@@ -5576,7 +5576,8 @@ class AgentRequestCart(models.Model):
                 })
 
             # списываем со склада
-            locked_qs.update(quantity=F("quantity") - need_qty)
+            # ТЗ-28 §2.1: продажа меняет updated_at, иначе касса пропустит остаток при ?updated_since=
+            locked_qs.update(quantity=F("quantity") - need_qty, updated_at=timezone.now())
 
             prod_model = type(prod)
             prod_id = prod.pk

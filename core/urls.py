@@ -44,10 +44,15 @@ if settings.ENABLE_API_DOCS:
 
 # Пути для включения различных приложений
 apps_includes = [
-    path('main/', include('apps.main.urls')),  
-    path('users/', include('apps.users.urls')),  
+    # ТЗ-28: bootstrap, stock/movements, products/stock, clients/<id>/debts (GET),
+    # pos/checkout с проверкой тела по Idempotency-Key, shifts/current.
+    # Стоят ПЕРЕД apps.main.urls и apps.construction.urls намеренно — перекрывают старые пути.
+    path('main/', include('apps.possync.urls')),
+    path('construction/', include('apps.possync.urls_construction')),
+    path('main/', include('apps.main.urls')),
+    path('users/', include('apps.users.urls')),
     path('platform-admin/', include('apps.users.platform_admin_urls')),
-    path('construction/', include('apps.construction.urls')),  
+    path('construction/', include('apps.construction.urls')),
     path('building/', include('apps.building.urls')),
     path('booking/', include('apps.booking.urls')),  
     path('barbershop/', include('apps.barber.urls')),   
