@@ -19,6 +19,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError, NotFoun
 from rest_framework.pagination import PageNumberPagination
 
 from apps.construction.models import Cashbox, CashFlow, CashFlowCategory, CashShift
+from apps.users.permissions import read_only_guard
 
 from apps.main.notifications_market import notify_shift_closed, notify_shift_opened
 from apps.ekassa.runtime import schedule_after_commit
@@ -181,6 +182,7 @@ class CompanyBranchScopedMixin:
 # ─────────────────────────────────────────────────────────────
 # CASHBOXES
 # ─────────────────────────────────────────────────────────────
+@read_only_guard("can_edit_cashbox")
 class CashboxListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIView):
     queryset = Cashbox.objects.select_related("company", "branch").order_by("-created_at")
     serializer_class = CashboxSerializer
@@ -384,6 +386,7 @@ class CashboxListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIView
         return Response(serializer.data)
 
 
+@read_only_guard("can_edit_cashbox")
 class CashboxDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Cashbox.objects.select_related("company", "branch").prefetch_related(
         "flows__category",
@@ -528,6 +531,7 @@ class CashboxDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroy
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@read_only_guard("can_edit_cashbox")
 class CashboxBulkDeleteView(CompanyBranchScopedMixin, APIView):
     """Archive/delete each requested cashbox independently.
 
@@ -614,6 +618,7 @@ def _parse_amount(raw, field: str):
     return value
 
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIView):
     queryset = CashFlow.objects.select_related(
         "company", "branch",
@@ -760,6 +765,7 @@ class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIVie
     def perform_create(self, serializer):
         self._inject_company_branch_on_save(serializer)
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = CashFlow.objects.select_related(
         "company", "branch",
@@ -795,6 +801,7 @@ class CashFlowDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestro
         return resp
 
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowEditRequestView(CompanyBranchScopedMixin, APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -906,6 +913,7 @@ class CashFlowEditRequestView(CompanyBranchScopedMixin, APIView):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowCancelRequestView(CompanyBranchScopedMixin, APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1012,6 +1020,7 @@ class CashFlowCancelRequestView(CompanyBranchScopedMixin, APIView):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowCategoryListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIView):
     queryset = CashFlowCategory.objects.select_related("company", "branch")
     serializer_class = CashFlowCategorySerializer
@@ -1029,6 +1038,7 @@ class CashFlowCategoryListCreateView(CompanyBranchScopedMixin, generics.ListCrea
         serializer.save()
 
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowCategoryDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = CashFlowCategory.objects.select_related("company", "branch")
     serializer_class = CashFlowCategorySerializer
@@ -1311,6 +1321,7 @@ class CashShiftCloseView(APIView):
         return Response(out, status=200)
 
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowBulkStatusUpdateView(CompanyBranchScopedMixin, generics.GenericAPIView):
     serializer_class = CashFlowBulkStatusSerializer
     CHUNK_SIZE = 1000

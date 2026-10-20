@@ -3,6 +3,7 @@ from datetime import timedelta
 import secrets
 import string
 
+from apps.users.permissions import READ_ONLY_FIELDS
 from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.core.mail import send_mail
@@ -394,6 +395,7 @@ class UserSerializer(serializers.ModelSerializer):
             # Склад: опасные операции (null — по умолчанию для роли)
             "can_post_negative_stock", "can_unpost_documents", "can_change_document_date",
             "can_post_closed_period", "can_cash_negative",
+            *READ_ONLY_FIELDS,
 
             # Consulting: воронка продаж
             "can_view_funnel", "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend", "can_view_leads_inbox", "funnel_grants",
@@ -823,6 +825,7 @@ class EmployeeUpdateSerializer(serializers.ModelSerializer):
             "can_manage_funnel_stages",
             "can_create_funnel",
             "can_manage_lead_ad_spend",
+            *READ_ONLY_FIELDS,
             "funnel_grants",
             "branch_ids",
         ]
@@ -944,6 +947,7 @@ class UserListSerializer(serializers.ModelSerializer):
             "consulting_region_codes", "consulting_regions",
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
             "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend",
+            *READ_ONLY_FIELDS,
             "branch_ids", "primary_branch_id",
         ]
 
@@ -973,6 +977,7 @@ class UserWithPermissionsSerializer(serializers.ModelSerializer):
             "consulting_region_codes", "consulting_regions",
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
             "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend",
+            *READ_ONLY_FIELDS,
             "branch_ids", "primary_branch_id",
         ]
 

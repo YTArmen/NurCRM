@@ -196,3 +196,4 @@ graphify-out/
 CLAUDE.md
 -onstruction-micro/
 onec/
+!apps/users/migrations/0060_user_can_edit_flags.py

@@ -708,6 +708,16 @@ class User(AbstractBaseUser, PermissionsMixin):
     can_post_closed_period = models.BooleanField(null=True, blank=True, default=None, verbose_name="Склад: изменения в закрытом периоде")
     can_cash_negative = models.BooleanField(null=True, blank=True, default=None, verbose_name="Склад: расход кассы в минус")
 
+    # Режим «только смотреть» (ТЗ «Бухгалтер», п. 1). NULL — как раньше (видит → может менять), False — только просмотр.
+    can_edit_cashbox = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: кассы")
+    can_edit_products = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: товары")
+    can_edit_procurement = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: закупки")
+    can_edit_documents = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: документы склада")
+    can_edit_clients = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: клиенты и долги")
+    can_edit_salary = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: зарплата")
+    can_edit_employees = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: сотрудники")
+    can_edit_settings = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: настройки")
+
     branches = models.ManyToManyField(
         "Branch",
         through="BranchMembership",

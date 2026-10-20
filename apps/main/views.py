@@ -26,6 +26,7 @@ from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
 from django.shortcuts import get_object_or_404
 from django.http import HttpResponse
 from rest_framework import serializers
+from apps.users.permissions import read_only_guard
 from .filters import TransactionRecordFilter, DebtFilter, DebtPaymentFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import DecimalField, ExpressionWrapper
@@ -1333,6 +1334,7 @@ class ProductCompactListView(CompanyBranchRestrictedMixin, generics.ListAPIView)
         return qs
 
 
+@read_only_guard("can_edit_products")
 class ProductCreateByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.CreateAPIView):
     """
     Создание товара только по штрих-коду (если найден в глобальной базе).
@@ -1719,6 +1721,7 @@ class MarketSaleEmployeePayProfileRetrieveUpdateDestroyAPIView(CompanyBranchRest
 # ==========================
 # Product create manual
 # ==========================
+@read_only_guard("can_edit_products")
 class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAPIView):
     """
     Ручное создание товара + (опционально) добавление в глобальную базу.
@@ -2204,6 +2207,7 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
         return Response(ser.data, status=status.HTTP_201_CREATED)
 
 
+@read_only_guard("can_edit_products")
 class ProductRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ProductSerializer
 
@@ -2437,6 +2441,7 @@ class ProductRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics
 
 
 
+@read_only_guard("can_edit_products")
 class ProductBulkUpdateAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     PATCH /api/main/products/bulk-update/
@@ -2648,6 +2653,7 @@ class ProductBulkUpdateAPIView(CompanyBranchRestrictedMixin, APIView):
         }, status=status.HTTP_200_OK)
 
 
+@read_only_guard("can_edit_products")
 class ProductBulkDeleteAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     DELETE /api/main/products/bulk-delete/
@@ -3030,6 +3036,7 @@ class WarehouseEventRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, g
 # ===========================
 #  Product taxonomies
 # ===========================
+@read_only_guard("can_edit_products")
 class ProductCategoryListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     serializer_class = ProductCategorySerializer
     queryset = ProductCategory.objects.select_related("company", "branch", "parent").all()
@@ -3050,6 +3057,7 @@ class ProductCategoryListCreateAPIView(CompanyBranchRestrictedMixin, generics.Li
             raise
 
 
+@read_only_guard("can_edit_products")
 class ProductCategoryRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ProductCategorySerializer
     queryset = ProductCategory.objects.select_related("company", "branch", "parent").all()
@@ -3067,6 +3075,7 @@ class ProductCategoryRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, 
             raise
 
 
+@read_only_guard("can_edit_products")
 class ProductBrandListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     serializer_class = ProductBrandSerializer
     queryset = ProductBrand.objects.select_related("company", "branch").all()
@@ -3087,6 +3096,7 @@ class ProductBrandListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListC
             raise
 
 
+@read_only_guard("can_edit_products")
 class ProductBrandRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = ProductBrandSerializer
     queryset = ProductBrand.objects.select_related("company", "branch").all()
@@ -3237,6 +3247,7 @@ class ClientPhoneAwareSearchFilter(filters.SearchFilter):
         return super().filter_queryset(request, queryset, view)
 
 
+@read_only_guard("can_edit_clients")
 class ClientListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     """
     GET  /api/main/clients/
@@ -3272,6 +3283,7 @@ class ClientListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateA
         self._save_with_company_branch(serializer, **kwargs)
 
 
+@read_only_guard("can_edit_clients")
 class ClientRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     """
     GET    /api/main/clients/<uuid:pk>/
@@ -3388,6 +3400,7 @@ class ClientKPIsAPIView(CompanyBranchRestrictedMixin, APIView):
         }, status=status.HTTP_200_OK)
 
 
+@read_only_guard("can_edit_clients")
 class ClientDealListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     """
       GET  /api/main/deals/
@@ -3505,6 +3518,7 @@ class ClientDealListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCre
 
 # ===== Deals retrieve/update/destroy =====
 
+@read_only_guard("can_edit_clients")
 class ClientDealRetrieveUpdateDestroyAPIView(
     CompanyBranchRestrictedMixin,
     generics.RetrieveUpdateDestroyAPIView,
@@ -3560,6 +3574,7 @@ class ClientDealRetrieveUpdateDestroyAPIView(
 
 # ===== RESCHEDULE / PROMISED DATE (перенос срока по взносу) =====
 
+@read_only_guard("can_edit_clients")
 class ClientDealInstallmentUpdateAPIView(APIView, CompanyBranchRestrictedMixin):
     """
     PATCH /api/main/clients/<client_id>/deals/<deal_id>/installments/<installment_id>/
@@ -3708,6 +3723,7 @@ class ClientDealInstallmentUpdateAPIView(APIView, CompanyBranchRestrictedMixin):
 
 # ===== PAY (создаём DealPayment + обновляем installment) =====
 
+@read_only_guard("can_edit_clients")
 class ClientDealPayAPIView(APIView, CompanyBranchRestrictedMixin):
     """
     POST /api/main/deals/<uuid:pk>/pay/
@@ -3876,6 +3892,7 @@ class ClientDealPayAPIView(APIView, CompanyBranchRestrictedMixin):
         return Response(ClientDealSerializer(fresh, context={"request": request}).data, status=status.HTTP_200_OK)
 
 
+@read_only_guard("can_edit_clients")
 class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
     """Atomically distribute one payment across a client's debt installments.
 
@@ -4017,6 +4034,7 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
 
 # ===== REFUND (создаём DealPayment refund + уменьшаем paid_amount) =====
 
+@read_only_guard("can_edit_clients")
 class ClientDealRefundAPIView(APIView, CompanyBranchRestrictedMixin):
     """
     POST /api/main/deals/<uuid:pk>/refund/
@@ -4300,6 +4318,7 @@ class ContractorWorkRetrieveUpdateDestroyAPIView(
 # ===========================
 #  Debts
 # ===========================
+@read_only_guard("can_edit_clients")
 class DebtListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     """
     GET  /api/main/debts/?search=...&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
@@ -4318,6 +4337,7 @@ class DebtListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPI
         )
 
 
+@read_only_guard("can_edit_clients")
 class DebtRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     """
     GET/PATCH/PUT/DELETE /api/main/debts/<uuid:pk>/
@@ -4378,6 +4398,7 @@ class DebtRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.Re
                 )
 
 
+@read_only_guard("can_edit_clients")
 class DebtPayAPIView(APIView, CompanyBranchRestrictedMixin):
     """
     POST /api/main/debts/<uuid:pk>/pay/
@@ -5247,6 +5268,7 @@ class SupplierReceiptLimitPagination(PageNumberPagination):
         )
 
 
+@read_only_guard("can_edit_procurement")
 class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     POST /api/main/suppliers/<uuid:supplier_id>/receipt/
@@ -5657,6 +5679,7 @@ class SupplierReturnRetrieveAPIView(CompanyBranchRestrictedMixin, generics.Retri
         return Response(data)
 
 
+@read_only_guard("can_edit_procurement")
 class SupplierReturnCreateAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     POST /api/main/suppliers/<uuid:supplier_id>/returns/

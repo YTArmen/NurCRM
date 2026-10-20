@@ -135,3 +135,54 @@ class IsPlatformAdmin(permissions.BasePermission):
             and u.is_authenticated
             and getattr(u, "is_platform_admin", False) is True
         )
+
+
+# ─────────────────────────────────────────────────────────────
+# «Только смотреть» (ТЗ «Бухгалтер», п. 1)
+# ─────────────────────────────────────────────────────────────
+READ_ONLY_FIELDS = (
+    "can_edit_cashbox", "can_edit_products", "can_edit_procurement", "can_edit_documents",
+    "can_edit_clients", "can_edit_salary", "can_edit_employees", "can_edit_settings",
+)
+_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def is_read_only_for(user, field: str) -> bool:
+    """True, если права «менять» раздела явно отключены (field=False). owner/admin/superuser — никогда."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_superuser", False) or getattr(user, "role", None) in ("owner", "admin"):
+        return False
+    if getattr(user, "owned_company_id", None):
+        return False
+    return getattr(user, field, None) is False
+
+
+def read_only_permission(field: str):
+    """Класс permission: при field=False запрещает POST/PATCH/PUT/DELETE (403 code=read_only)."""
+
+    class _ReadOnlyGuard(permissions.BasePermission):
+        def has_permission(self, request, view):
+            if request.method in _SAFE_METHODS:
+                return True
+            if is_read_only_for(request.user, field):
+                from core.exceptions import ApiError
+
+                raise ApiError(
+                    "read_only", "Недостаточно прав: у вас доступ к разделу только для просмотра.",
+                    status_code=403,
+                )
+            return True
+
+    _ReadOnlyGuard.__name__ = f"ReadOnlyGuard_{field}"
+    return _ReadOnlyGuard
+
+
+def read_only_guard(field: str):
+    """Декоратор класса view: добавляет проверку «только смотреть» к permission_classes."""
+
+    def deco(view_cls):
+        view_cls.permission_classes = [*list(view_cls.permission_classes), read_only_permission(field)]
+        return view_cls
+
+    return deco

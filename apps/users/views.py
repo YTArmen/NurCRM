@@ -9,6 +9,7 @@ import logging
 
 from rest_framework import generics, permissions, status
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from apps.users.permissions import read_only_guard
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -366,6 +367,7 @@ class CurrentUserAPIView(generics.RetrieveUpdateAPIView):
         )
 
 
+@read_only_guard("can_edit_employees")
 class EmployeeCreateAPIView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = EmployeeCreateSerializer
@@ -376,6 +378,7 @@ class EmployeeCreateAPIView(generics.CreateAPIView):
 
 
 # ✅ SOFT DELETE
+@read_only_guard("can_edit_employees")
 class EmployeeDestroyAPIView(generics.DestroyAPIView):
     queryset = User.objects.all()
     serializer_class = UserListSerializer
@@ -408,6 +411,7 @@ class EmployeeDestroyAPIView(generics.DestroyAPIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@read_only_guard("can_edit_employees")
 class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     queryset = User.objects.all()
     serializer_class = EmployeeUpdateSerializer
@@ -516,6 +520,7 @@ def _emit_company_updated(company, changed_fields):
         )
 
 
+@read_only_guard("can_edit_settings")
 class CompanyDetailAPIView(generics.RetrieveUpdateAPIView):
     """
     GET   /api/users/company/
@@ -585,6 +590,7 @@ class ChangePasswordView(generics.UpdateAPIView):
         return Response({"detail": "Пароль успешно изменён."}, status=status.HTTP_200_OK)
 
 
+@read_only_guard("can_edit_settings")
 class CompanyUpdateAPIView(generics.RetrieveUpdateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = CompanyUpdateSerializer
@@ -662,6 +668,7 @@ class RoleListAPIView(generics.ListAPIView):
         return Response(data)
 
 
+@read_only_guard("can_edit_employees")
 class CustomRoleCreateAPIView(generics.CreateAPIView):
     serializer_class = CustomRoleSerializer
     permission_classes = [IsAuthenticated, IsCompanyOwner]
@@ -671,6 +678,7 @@ class CustomRoleCreateAPIView(generics.CreateAPIView):
         serializer.save(company=company)
 
 
+@read_only_guard("can_edit_employees")
 class CustomRoleDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = CustomRoleSerializer
     permission_classes = [IsAuthenticated, IsCompanyOwner]
