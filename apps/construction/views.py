@@ -100,6 +100,13 @@ def _choice_value(model, enum_name: str, member: str, fallback: str):
     return getattr(v, "value", None) or v or fallback
 
 
+def _ensure_cash_period_open(request, company, dates):
+    """Закрытие периода (ТЗ «Бухгалтер», п. 2): операции кассы с датой <= closed_until."""
+    from apps.warehouse.services import ensure_period_open_api
+
+    ensure_period_open_api(company=company, dates=dates, user=request.user)
+
+
 # ─────────────────────────────────────────────────────────────
 # base mixin: company + branch scope
 # ─────────────────────────────────────────────────────────────
@@ -763,6 +770,7 @@ class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIVie
         return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
+        _ensure_cash_period_open(self.request, self._company(), [timezone.now()])
         self._inject_company_branch_on_save(serializer)
 
 @read_only_guard("can_edit_cashbox")
@@ -783,6 +791,7 @@ class CashFlowDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestro
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
         old_status = instance.status
+        _ensure_cash_period_open(request, instance.company, [instance.created_at])
 
         # Если это заявка на редактирование или отмену
         if instance.request_kind in (CashFlow.RequestKind.EDIT, CashFlow.RequestKind.CANCEL):
@@ -800,6 +809,11 @@ class CashFlowDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestro
             handle_cashflow_reject(instance, user=request.user)
         return resp
 
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        _ensure_cash_period_open(request, instance.company, [instance.created_at])
+        return super().destroy(request, *args, **kwargs)
+
 
 @read_only_guard("can_edit_cashbox")
 class CashFlowEditRequestView(CompanyBranchScopedMixin, APIView):
@@ -811,6 +825,7 @@ class CashFlowEditRequestView(CompanyBranchScopedMixin, APIView):
         target_flow = qs.filter(id=pk).first()
         if not target_flow:
             raise NotFound({"detail": "Движение кассы не найдено."})
+        _ensure_cash_period_open(request, target_flow.company, [target_flow.created_at])
 
         if target_flow.request_kind:
             return Response(
@@ -923,6 +938,7 @@ class CashFlowCancelRequestView(CompanyBranchScopedMixin, APIView):
         target_flow = qs.filter(id=pk).first()
         if not target_flow:
             raise NotFound({"detail": "Движение кассы не найдено."})
+        _ensure_cash_period_open(request, target_flow.company, [target_flow.created_at])
 
         if target_flow.request_kind:
             return Response(

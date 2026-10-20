@@ -4419,6 +4419,13 @@ class DebtPayAPIView(APIView, CompanyBranchRestrictedMixin):
         from apps.main.services_debt import normalize_debt_payment_method
         pm = normalize_debt_payment_method(raw_pm)
 
+        from apps.warehouse.services import ensure_period_open_api
+        ensure_period_open_api(
+            company=debt.company,
+            dates=[ser.validated_data.get("paid_at") or timezone.localdate()],
+            user=request.user,
+        )
+
         payment = DebtPayment.objects.create(
             company=debt.company,
             branch=debt.branch,

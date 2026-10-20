@@ -4080,6 +4080,10 @@ class SaleReturnAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, AP
         locked_qs = self._filter_qs_company_branch(locked_qs)
         sale = get_object_or_404(locked_qs, id=pk)
 
+        # Закрытие периода (ТЗ «Бухгалтер», п. 2): возврат проводится сегодняшним числом.
+        from apps.warehouse.services import ensure_period_open_api
+        ensure_period_open_api(company=sale.company, dates=[timezone.now()], user=request.user)
+
         if sale.status == Sale.Status.CANCELED:
             return Response(
                 {"detail": "Продажа уже отменена."},

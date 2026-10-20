@@ -87,3 +87,46 @@ class ReadOnlyTests(BuhBase):
         r = self.client.get("/api/users/profile/")
         self.assertEqual(r.status_code, 200)
         self.assertIs(r.data.get("can_edit_cashbox"), False)
+
+
+class PeriodCloseTests(BuhBase):
+    def _close(self, date):
+        from apps.warehouse.models import WarehouseAccountingSettings
+
+        WarehouseAccountingSettings.objects.update_or_create(
+            company=self.company, defaults={"closed_until": date}
+        )
+
+    def test_create_blocked_in_closed_period_for_non_owner(self):
+        from django.utils import timezone
+
+        self._close(timezone.localdate())
+        self.client.force_authenticate(self.acc)
+        r = self.post_flow()
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data["code"], "period_closed")
+        self.assertEqual(r.data["closed_until"], timezone.localdate().isoformat())
+
+    def test_owner_allowed_and_open_period_ok(self):
+        from django.utils import timezone
+
+        self._close(timezone.localdate())
+        self.client.force_authenticate(self.owner)
+        self.assertEqual(self.post_flow().status_code, 201)
+        self._close(timezone.localdate() - timezone.timedelta(days=5))
+        self.client.force_authenticate(self.acc)
+        self.assertEqual(self.post_flow().status_code, 201)
+
+    def test_update_delete_blocked(self):
+        from django.utils import timezone
+
+        self.client.force_authenticate(self.acc)
+        fid = self.post_flow().data["id"]
+        self._close(timezone.localdate())
+        r = self.client.patch(f"/api/construction/cashflows/{fid}/", {"name": "x"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data["code"], "period_closed")
+        r = self.client.delete(f"/api/construction/cashflows/{fid}/")
+        self.assertEqual(r.data["code"], "period_closed")
+        r = self.client.post(f"/api/construction/cashflows/{fid}/cancel-request/", {}, format="json")
+        self.assertEqual(r.data["code"], "period_closed")
