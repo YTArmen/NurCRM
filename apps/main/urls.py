@@ -112,6 +112,8 @@ from apps.main.part12_views import (
 )
 
 
+from apps.main.views_payables import SupplierPayablesAPIView
+
 urlpatterns = [
     # Приложение клиентов: поиск по телефону, QR, перенос бонусов, магазин в приложении, приглашения
     path("", include("apps.clientapp.staff_urls")),
@@ -426,6 +428,7 @@ urlpatterns = [
     # -------------------------
     # Поставщики -> товары -> оприходование
     # -------------------------
+    path("suppliers/payables/", SupplierPayablesAPIView.as_view(), name="supplier-payables"),
     path("suppliers/", SupplierListAPIView.as_view(), name="supplier-list"),
     path("suppliers/receipts/", SupplierReceiptListAPIView.as_view(), name="supplier-receipts"),
     path("suppliers/receipts/<uuid:pk>/", SupplierReceiptRetrieveAPIView.as_view(), name="supplier-receipt-detail"),
