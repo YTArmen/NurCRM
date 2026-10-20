@@ -15,7 +15,7 @@ FIELDS = [
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("users", "0059_useruipreferences"),
+        ("users", "0061_user_can_cash_negative_user_can_change_document_date_and_more"),
     ]
 
     operations = [
