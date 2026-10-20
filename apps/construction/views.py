@@ -657,6 +657,13 @@ class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIVie
             ids = [x.strip() for x in cashboxes.split(",") if x.strip()]
             qs = qs.filter(cashbox_id__in=ids)
 
+        # ✅ проверено бухгалтером: ?checked=true|false
+        checked = (qp.get("checked") or "").strip().lower()
+        if checked in ("true", "1", "yes"):
+            qs = qs.filter(checked_at__isnull=False)
+        elif checked in ("false", "0", "no"):
+            qs = qs.filter(checked_at__isnull=True)
+
         # ✅ по смене: ?shift=<uuid>
         shift_id = qp.get("shift")
         if shift_id:

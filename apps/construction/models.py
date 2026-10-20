@@ -1147,6 +1147,14 @@ class CashFlow(models.Model):
         verbose_name="Категория",
     )
 
+    # ТЗ «Бухгалтер», п. 6: отметка «проверено» (деньги не меняет)
+    checked_at = models.DateTimeField(null=True, blank=True, db_index=True, verbose_name="Проверено")
+    checked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="checked_cash_flows", verbose_name="Кто проверил",
+    )
+    accountant_note = models.TextField(blank=True, default="", verbose_name="Комментарий бухгалтера")
+
     objects = CashFlowQuerySet.as_manager()
 
     class Meta:

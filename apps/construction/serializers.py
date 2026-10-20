@@ -628,6 +628,7 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
             "source_id",
             "shift",
             "category", "category_id",
+            "checked_at", "checked_by", "accountant_note",
             "category_title",
             "cashier",
             "cashier_display",
@@ -660,6 +661,7 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
             "resolved_by",
             "resolved_at",
             "idempotency_key",
+            "checked_at", "checked_by", "accountant_note",
         ]
 
     def __init__(self, *args, **kwargs):

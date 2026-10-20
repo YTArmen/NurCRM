@@ -6,7 +6,7 @@ from django.db.models import Q, Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework import permissions
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -76,3 +76,40 @@ class CashboxBalancesView(CompanyBranchScopedMixin, APIView):
                 "closing": f"{(opening + inc - exp):.2f}",
             })
         return Response(out)
+
+
+class CashFlowCheckView(CompanyBranchScopedMixin, APIView):
+    """
+    POST /api/construction/cashflows/<id>/check/  {checked: true|false, note: "..."}
+    Ставит/снимает отметку «проверено». Сумму не меняет, can_edit_cashbox не нужен,
+    нужен просмотр касс; в закрытом периоде разрешено.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk, *args, **kwargs):
+        user = request.user
+        if not (
+            getattr(user, "is_superuser", False)
+            or getattr(user, "role", None) in ("owner", "admin")
+            or getattr(user, "owned_company_id", None)
+            or getattr(user, "can_view_cashbox", False)
+        ):
+            raise PermissionDenied({"detail": "Нет доступа к кассам.", "code": "permission_denied"})
+        flow = self._scoped_queryset(CashFlow.objects.all()).filter(id=pk).first()
+        if flow is None:
+            raise NotFound({"detail": "Движение кассы не найдено."})
+        raw = request.data.get("checked", True)
+        checked = raw if isinstance(raw, bool) else str(raw).strip().lower() in ("true", "1", "yes")
+        fields = {"checked_at": timezone.now() if checked else None, "checked_by": user if checked else None}
+        if "note" in request.data:
+            fields["accountant_note"] = str(request.data.get("note") or "")[:2000]
+        CashFlow.objects.filter(pk=flow.pk).update(**fields)  # update(): деньги и валидации не трогаем
+        flow.refresh_from_db()
+        return Response({
+            "id": str(flow.id),
+            "checked": flow.checked_at is not None,
+            "checked_at": flow.checked_at.isoformat() if flow.checked_at else None,
+            "checked_by": str(flow.checked_by_id) if flow.checked_by_id else None,
+            "accountant_note": flow.accountant_note,
+        })

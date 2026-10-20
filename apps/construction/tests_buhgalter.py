@@ -231,3 +231,43 @@ class BalancesTests(BuhBase):
         row = next(x for x in r.data if x["cashbox_id"] == str(self.box.id))
         self.assertEqual(row["closing"], "1200.00")
         self.assertEqual(self.client.get("/api/construction/cashboxes/balances/").status_code, 400)
+
+
+class CheckedTests(BuhBase):
+    def test_check_and_filter(self):
+        from django.utils import timezone
+
+        self.client.force_authenticate(self.owner)
+        fid = self.post_flow(amount="40.00").data["id"]
+        self.post_flow(amount="60.00")
+        # бухгалтер только смотрит (can_edit_cashbox=False), но отмечать может
+        self.acc.can_edit_cashbox = False
+        self.acc.save()
+        self.client.force_authenticate(self.acc)
+        r = self.client.post(f"/api/construction/cashflows/{fid}/check/", {"checked": True, "note": "ок"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertTrue(r.data["checked"])
+        self.assertEqual(r.data["accountant_note"], "ок")
+        f = CashFlow.objects.get(pk=fid)
+        self.assertEqual(f.amount, Decimal("40.00"))
+        self.assertEqual(f.checked_by_id, self.acc.id)
+        ids = lambda q: {x["id"] for x in self.client.get(f"/api/construction/cashflows/?checked={q}").data["results"]}
+        self.assertEqual(ids("true"), {fid})
+        self.assertNotIn(fid, ids("false"))
+        # в закрытом периоде можно
+        from apps.warehouse.models import WarehouseAccountingSettings
+
+        WarehouseAccountingSettings.objects.create(company=self.company, closed_until=timezone.localdate())
+        r = self.client.post(f"/api/construction/cashflows/{fid}/check/", {"checked": False}, format="json")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.data["checked"])
+        self.assertIsNone(CashFlow.objects.get(pk=fid).checked_at)
+
+    def test_no_view_access_forbidden(self):
+        self.client.force_authenticate(self.owner)
+        fid = self.post_flow().data["id"]
+        self.acc.can_view_cashbox = False
+        self.acc.save()
+        self.client.force_authenticate(self.acc)
+        r = self.client.post(f"/api/construction/cashflows/{fid}/check/", {"checked": True}, format="json")
+        self.assertEqual(r.status_code, 403)

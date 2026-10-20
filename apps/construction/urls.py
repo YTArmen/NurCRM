@@ -21,7 +21,7 @@ from apps.construction.views import (
     CashboxReportAnalyticsView,
 )
 from apps.construction.sale_history_views import CashShiftSalesListView
-from apps.construction.views_buhgalter import CashboxBalancesView
+from apps.construction.views_buhgalter import CashboxBalancesView, CashFlowCheckView
 
 urlpatterns = [
     path("cashboxes/balances/", CashboxBalancesView.as_view(), name="cashbox-balances"),
@@ -39,6 +39,7 @@ urlpatterns = [
     path("cashflows/<uuid:pk>/", CashFlowDetailView.as_view(), name="cashflow-detail"),
     path("cashflows/<uuid:pk>/edit-request/", CashFlowEditRequestView.as_view(), name="cashflow-edit-request"),
     path("cashflows/<uuid:pk>/cancel-request/", CashFlowCancelRequestView.as_view(), name="cashflow-cancel-request"),
+    path("cashflows/<uuid:pk>/check/", CashFlowCheckView.as_view(), name="cashflow-check"),
     path("cashflows/bulk/status/", CashFlowBulkStatusUpdateView.as_view(), name="cashflow-bulk-status"),
 
     path("cashflow-categories/", CashFlowCategoryListCreateView.as_view(), name="cashflow-category-list-create"),
