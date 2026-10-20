@@ -194,3 +194,40 @@ class CategoryTests(BuhBase):
         row = next(x for x in tables["expense_by_category"] if x["name"] == "Аренда")
         self.assertEqual(row["total"], "30.00")
         self.assertEqual(row["count"], 1)
+
+
+class BalancesTests(BuhBase):
+    def _flow(self, type_, amount, when):
+        cf = CashFlow.objects.create(
+            company=self.company, cashbox=self.box, type=type_, amount=Decimal(amount),
+            status=CashFlow.Status.APPROVED, name="t",
+        )
+        CashFlow.objects.filter(pk=cf.pk).update(created_at=when)
+
+    def test_balances(self):
+        from datetime import datetime, time
+
+        from django.utils import timezone
+
+        def at(d, h=12):
+            return timezone.make_aware(datetime.combine(d, time(h)))
+
+        today = timezone.localdate()
+        d1 = today - timezone.timedelta(days=10)
+        self._flow("income", "1000", at(d1 - timezone.timedelta(days=5)))  # до периода
+        self._flow("expense", "100", at(d1 - timezone.timedelta(days=1)))
+        self._flow("income", "300", at(d1))
+        self._flow("expense", "50", at(today))
+        self.client.force_authenticate(self.acc)
+        r = self.client.get(f"/api/construction/cashboxes/balances/?date_from={d1}&date_to={today}")
+        self.assertEqual(r.status_code, 200, r.data)
+        row = next(x for x in r.data if x["cashbox_id"] == str(self.box.id))
+        self.assertEqual(
+            (row["opening"], row["income"], row["expense"], row["closing"]),
+            ("900.00", "300.00", "50.00", "1150.00"),
+        )
+        # на 1-е число = только остаток до
+        r = self.client.get(f"/api/construction/cashboxes/balances/?date_from={d1}&date_to={d1}")
+        row = next(x for x in r.data if x["cashbox_id"] == str(self.box.id))
+        self.assertEqual(row["closing"], "1200.00")
+        self.assertEqual(self.client.get("/api/construction/cashboxes/balances/").status_code, 400)
