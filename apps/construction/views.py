@@ -1043,7 +1043,18 @@ class CashFlowCategoryListCreateView(CompanyBranchScopedMixin, generics.ListCrea
     pagination_class = None
 
     def get_queryset(self):
+        if self.request.method == "GET":
+            from apps.construction.categories import ensure_default_categories
+
+            ensure_default_categories(self._company())
         qs = self._scoped_queryset(super().get_queryset()).order_by("title")
+        qp = self.request.query_params
+        if qp.get("type") in ("income", "expense"):
+            qs = qs.filter(type__in=[qp["type"], "both"])
+        if (qp.get("archived") or "").lower() in ("true", "1"):
+            qs = qs.filter(archived=True)
+        elif (qp.get("archived") or "").lower() in ("false", "0"):
+            qs = qs.filter(archived=False)
         q = (self.request.query_params.get("search") or "").strip()
         if q:
             qs = qs.filter(title__icontains=q)

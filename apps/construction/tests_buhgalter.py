@@ -130,3 +130,67 @@ class PeriodCloseTests(BuhBase):
         self.assertEqual(r.data["code"], "period_closed")
         r = self.client.post(f"/api/construction/cashflows/{fid}/cancel-request/", {}, format="json")
         self.assertEqual(r.data["code"], "period_closed")
+
+
+class CategoryTests(BuhBase):
+    def test_default_categories_lazy_and_once(self):
+        from apps.construction.models import CashFlowCategory
+
+        self.assertEqual(CashFlowCategory.objects.filter(company=self.company).count(), 0)
+        self.client.force_authenticate(self.acc)
+        r = self.client.get("/api/construction/cashflow-categories/")
+        self.assertEqual(r.status_code, 200)
+        names = {c["name"] for c in r.data}
+        self.assertEqual(len(names), 11)
+        self.assertIn("Аренда", names)
+        self.assertIn("archived", r.data[0])
+        self.assertIn("type", r.data[0])
+        self.client.get("/api/construction/cashflow-categories/")
+        self.assertEqual(CashFlowCategory.objects.filter(company=self.company).count(), 11)
+        r = self.client.get("/api/construction/cashflow-categories/?type=income")
+        self.assertTrue(all(c["type"] in ("income", "both") for c in r.data))
+
+    def test_create_with_name_and_category_default_other(self):
+        self.client.force_authenticate(self.owner)
+        r = self.client.post(
+            "/api/construction/cashflow-categories/", {"name": "Охрана", "type": "expense"}, format="json"
+        )
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["name"], "Охрана")
+        cat_id = r.data["id"]
+        r = self.post_flow(category_id=cat_id)
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(str(r.data["category_id"]), cat_id)
+        r = self.post_flow()
+        self.assertEqual(r.data["category_title"], "Прочие")
+
+    def test_archived_category_rejected(self):
+        self.client.force_authenticate(self.owner)
+        r = self.client.post("/api/construction/cashflow-categories/", {"name": "Старая"}, format="json")
+        cid = r.data["id"]
+        self.client.patch(f"/api/construction/cashflow-categories/{cid}/", {"archived": True}, format="json")
+        self.assertEqual(self.post_flow(category_id=cid).status_code, 400)
+
+    def test_auto_cashflow_gets_category(self):
+        from apps.construction.auto_cashflow import create_auto_cashflow
+
+        cf = create_auto_cashflow(
+            company=self.company, cashbox=self.box, type="income", amount="50",
+            source_kind=CashFlow.SourceKind.DEBT_REPAYMENT, source_id=str(uuid.uuid4()),
+        )
+        self.assertEqual(cf.category.title, "Оплата долга покупателем")
+
+    def test_finance_analytics_by_category(self):
+        self.client.force_authenticate(self.owner)
+        r = self.client.get("/api/construction/cashflow-categories/")
+        rent = next(c["id"] for c in r.data if c["name"] == "Аренда")
+        r = self.post_flow(amount="30.00", category_id=rent, status="approved")
+        self.assertEqual(r.status_code, 201, r.data)
+        CashFlow.objects.filter(company=self.company).update(status=CashFlow.Status.APPROVED)
+        r = self.client.get("/api/main/analytics/market/?tab=finance&period=month")
+        self.assertEqual(r.status_code, 200, r.data)
+        tables = r.data["tables"]
+        self.assertIn("expense_breakdown", tables)  # старое поле на месте
+        row = next(x for x in tables["expense_by_category"] if x["name"] == "Аренда")
+        self.assertEqual(row["total"], "30.00")
+        self.assertEqual(row["count"], 1)

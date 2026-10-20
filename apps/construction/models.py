@@ -30,6 +30,15 @@ class CashFlowCategory(models.Model):
         verbose_name="Филиал",
     )
     title = models.CharField(max_length=128, verbose_name="Название")
+    # ТЗ «Бухгалтер», п. 3: статья движения денег.
+    class Kind(models.TextChoices):
+        INCOME = "income", "Доход"
+        EXPENSE = "expense", "Расход"
+        BOTH = "both", "Любой"
+
+    type = models.CharField(max_length=10, choices=Kind.choices, default=Kind.BOTH, verbose_name="Тип статьи")
+    archived = models.BooleanField(default=False, verbose_name="В архиве")
+    code = models.CharField(max_length=32, blank=True, default="", verbose_name="Код статьи по умолчанию")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
 
     class Meta:

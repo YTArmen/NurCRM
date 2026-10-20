@@ -469,6 +469,11 @@ def create_auto_cashflow(
     final_name = (name or "").strip() or default_names.get(source_kind, "Авто-операция")
     legacy_op_id = source_business_operation_id or default_names.get(source_kind, "Авто-операция")
 
+    if category is None:
+        from apps.construction.categories import category_for_source
+
+        category = category_for_source(company, source_kind)
+
     cf = CashFlow(
         company=company,
         branch=actual_branch,

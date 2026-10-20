@@ -3422,6 +3422,32 @@ class AnalyticsView(APIView):
             for r in inc_query
         ]
         
+        # Разбивка по статье (ТЗ «Бухгалтер», п. 3). Старые *_breakdown (по названию) не меняем.
+        def _by_category(kind):
+            rows = (
+                cfqs.filter(type=kind)
+                .values("category_id", "category__title")
+                .annotate(
+                    total=Coalesce(Sum("amount"), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
+                    count=Count("id"),
+                )
+                .order_by("-total")
+            )
+            if limit:
+                rows = rows[:limit]
+            return [
+                {
+                    "category_id": str(r["category_id"]) if r["category_id"] else None,
+                    "name": r["category__title"] or "Без статьи",
+                    "total": str(_money(r["total"])),
+                    "count": r["count"],
+                }
+                for r in rows
+            ]
+
+        expense_by_category = _by_category(CashFlow.Type.EXPENSE)
+        income_by_category = _by_category(CashFlow.Type.INCOME)
+
         # ПОЛНЫЙ список всех расходов с деталями
         expense_qs = cfqs.filter(type=CashFlow.Type.EXPENSE).order_by("-created_at")
         if limit:
@@ -3477,6 +3503,8 @@ class AnalyticsView(APIView):
             "tables": {
                 "expense_breakdown": expense_breakdown,
                 "income_breakdown": income_breakdown,
+                "expense_by_category": expense_by_category,
+                "income_by_category": income_by_category,
                 "expense_items": expense_items,  # НОВОЕ: полный детальный список
                 "income_items": income_items,    # НОВОЕ: полный детальный список
             },
