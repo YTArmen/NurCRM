@@ -611,6 +611,11 @@ class PosQuickCheckoutGuardedAPIView(PosQuickCheckoutAPIView):
 
     def post(self, request, *args, **kwargs):
         response = self._guarded_post(request, *args, **kwargs)
+        if response.status_code == status.HTTP_409_CONFLICT and isinstance(getattr(response, "data", None), dict) \
+                and response.data.get("code") in ("idempotency_conflict", "in_progress"):
+            # Касса повторяет чек с тем же ключом, но чуть другим телом; раньше получала ту же продажу.
+            # Отдаём по-старому: базовый checkout находит продажу по Sale.idempotency_key.
+            response = super().post(request, *args, **kwargs)
         if response.get("Idempotent-Replayed") == "true":
             # Как и раньше у pos/checkout/: повтор — 200 и "replayed": true (касса на это смотрит).
             response.status_code = status.HTTP_200_OK

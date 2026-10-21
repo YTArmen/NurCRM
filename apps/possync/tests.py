@@ -262,8 +262,9 @@ class CheckoutIdempotencyTests(PossyncBase):
         self.assertEqual(Sale.objects.filter(company=self.company).count(), 1)
 
         r3 = self.quick("sale-1", items=[{"product": str(self.product.id), "qty": "5", "price": "100.00"}])
-        self.assertEqual(r3.status_code, 409, r3.data)
-        self.assertEqual(r3.data["code"], "idempotency_conflict")
+        # Касса шлёт повтор с тем же ключом и чуть другим телом — отдаём ту же продажу, как до ТЗ-28.
+        self.assertEqual(r3.status_code, 200, r3.data)
+        self.assertEqual(r3.data["id"], r1.data["id"])
         self.assertEqual(Sale.objects.filter(company=self.company).count(), 1)
         self.assertEqual(IdempotencyRecord.objects.filter(company=self.company, key="sale-1").count(), 1)
 
