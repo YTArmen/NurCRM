@@ -36,9 +36,9 @@ class CashFlowCategory(models.Model):
         EXPENSE = "expense", "Расход"
         BOTH = "both", "Любой"
 
-    type = models.CharField(max_length=10, choices=Kind.choices, default=Kind.BOTH, verbose_name="Тип статьи")
-    archived = models.BooleanField(default=False, verbose_name="В архиве")
-    code = models.CharField(max_length=32, blank=True, default="", verbose_name="Код статьи по умолчанию")
+    type = models.CharField(max_length=10, choices=Kind.choices, default=Kind.BOTH, db_default=Kind.BOTH, verbose_name="Тип статьи")
+    archived = models.BooleanField(default=False, db_default=False, verbose_name="В архиве")
+    code = models.CharField(max_length=32, blank=True, default="", db_default="", verbose_name="Код статьи по умолчанию")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
 
     class Meta:
@@ -1153,7 +1153,7 @@ class CashFlow(models.Model):
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
         related_name="checked_cash_flows", verbose_name="Кто проверил",
     )
-    accountant_note = models.TextField(blank=True, default="", verbose_name="Комментарий бухгалтера")
+    accountant_note = models.TextField(blank=True, default="", db_default="", verbose_name="Комментарий бухгалтера")
 
     objects = CashFlowQuerySet.as_manager()
 

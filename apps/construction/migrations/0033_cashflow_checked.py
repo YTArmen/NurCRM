@@ -27,6 +27,6 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="cashflow",
             name="accountant_note",
-            field=models.TextField(blank=True, default="", verbose_name="Комментарий бухгалтера"),
+            field=models.TextField(blank=True, default="", db_default="", verbose_name="Комментарий бухгалтера"),
         ),
     ]

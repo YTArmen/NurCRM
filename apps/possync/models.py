@@ -7,6 +7,7 @@
 StockAdjustment / StockAdjustmentLine — изменение остатка «на величину» документом
 (приёмка без поставщика, списание, корректировка, возврат поставщику), атомарно,
 с ключом идемпотентности. Заменяет опасную пару «GET остаток → PATCH quantity».
+Авторы: Умар и Claude (Anthropic), октябрь 2026.
 """
 import uuid
 from decimal import Decimal

@@ -1,4 +1,7 @@
-"""Эндпоинты ТЗ «Бухгалтер»: остатки касс на дату, отметка «проверено»."""
+"""Эндпоинты ТЗ «Бухгалтер»: остатки касс на дату, отметка «проверено».
+
+Авторы: Умар и Claude (Anthropic), октябрь 2026.
+"""
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 

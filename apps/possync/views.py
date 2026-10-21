@@ -9,6 +9,7 @@ GET  api/construction/shifts/current/?cashbox=<id>    — текущая сме�
 GET  api/main/clients/{id}/debts/                     — долги клиента одним запросом (§7)
 GET  api/main/products/barcode/{code}/                — плюс штрихкоды вариантов (§2.6, ТЗ-27 §8)
 POST api/main/pos/checkout/                           — тот же checkout + 409 idempotency_conflict (§8.4)
+Авторы: Умар и Claude (Anthropic), октябрь 2026.
 """
 from __future__ import annotations
 

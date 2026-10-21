@@ -1,4 +1,7 @@
-"""GET /api/main/suppliers/payables/ — долги поставщикам одним запросом (ТЗ «Бухгалтер», п. 5)."""
+"""GET /api/main/suppliers/payables/ — долги поставщикам одним запросом (ТЗ «Бухгалтер», п. 5).
+
+Авторы: Умар и Claude (Anthropic), октябрь 2026.
+"""
 from decimal import Decimal
 
 from django.utils import timezone
