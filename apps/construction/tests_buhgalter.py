@@ -131,6 +131,19 @@ class PeriodCloseTests(BuhBase):
         r = self.client.post(f"/api/construction/cashflows/{fid}/cancel-request/", {}, format="json")
         self.assertEqual(r.data["code"], "period_closed")
 
+    def test_bulk_status_blocked(self):
+        from django.utils import timezone
+
+        self.client.force_authenticate(self.acc)
+        fid = self.post_flow().data["id"]
+        self._close(timezone.localdate())
+        r = self.client.patch(
+            "/api/construction/cashflows/bulk/status/",
+            {"items": [{"id": fid, "status": "approved"}]}, format="json",
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data["code"], "period_closed")
+
 
 class CategoryTests(BuhBase):
     def test_default_categories_lazy_and_once(self):
@@ -271,3 +284,13 @@ class CheckedTests(BuhBase):
         self.client.force_authenticate(self.acc)
         r = self.client.post(f"/api/construction/cashflows/{fid}/check/", {"checked": True}, format="json")
         self.assertEqual(r.status_code, 403)
+
+
+class SalaryTests(BuhBase):
+    def test_edit_salary_false_blocks_rates_and_payouts(self):
+        self.acc.can_edit_salary = False
+        self.acc.save()
+        self.client.force_authenticate(self.acc)
+        r = self.client.post("/api/warehouse/salary/payouts/", {}, format="json")
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(r.data.get("code"), "read_only")

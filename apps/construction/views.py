@@ -1384,6 +1384,8 @@ class CashFlowBulkStatusUpdateView(CompanyBranchScopedMixin, generics.GenericAPI
             raise ValidationError({"missing_ids": missing})
 
         old_flows = list(qs)
+        for cf in old_flows:  # закрытый период: смена статуса операций до closed_until запрещена
+            _ensure_cash_period_open(request, cf.company, [cf.created_at])
         updated_ids = []
         updated_count = 0
 
