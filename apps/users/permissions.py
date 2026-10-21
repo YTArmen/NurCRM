@@ -1,5 +1,6 @@
 # apps/cafe/permissions.py
 from rest_framework import permissions
+from rest_framework.exceptions import APIException
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
@@ -158,6 +159,13 @@ def is_read_only_for(user, field: str) -> bool:
     return getattr(user, field, None) is False
 
 
+class ReadOnlyError(APIException):
+    """403 {"detail", "code": "read_only"} — без зависимости от core.exceptions.ApiError (ТЗ-28)."""
+
+    status_code = 403
+    default_code = "read_only"
+
+
 def read_only_permission(field: str):
     """Класс permission: при field=False запрещает POST/PATCH/PUT/DELETE (403 code=read_only)."""
 
@@ -166,11 +174,8 @@ def read_only_permission(field: str):
             if request.method in _SAFE_METHODS:
                 return True
             if is_read_only_for(request.user, field):
-                from core.exceptions import ApiError
-
-                raise ApiError(
-                    "read_only", "Недостаточно прав: у вас доступ к разделу только для просмотра.",
-                    status_code=403,
+                raise ReadOnlyError(
+                    {"detail": "Недостаточно прав: у вас доступ к разделу только для просмотра.", "code": "read_only"}
                 )
             return True
 
