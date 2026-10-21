@@ -113,3 +113,55 @@ class CashFlowCheckView(CompanyBranchScopedMixin, APIView):
             "checked_by": str(flow.checked_by_id) if flow.checked_by_id else None,
             "accountant_note": flow.accountant_note,
         })
+
+
+class AuditLogView(CompanyBranchScopedMixin, APIView):
+    """
+    GET /api/construction/audit-log/?object_type=cashflow&object_id=&action=&user=&date_from=&date_to=&page=
+    Журнал денежных операций (только чтение). Видят владелец/админ и те, кому открыт просмотр касс.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+    PAGE = 50
+
+    def get(self, request, *args, **kwargs):
+        from apps.construction.models import AuditLog
+
+        user = request.user
+        if not (
+            getattr(user, "is_superuser", False)
+            or getattr(user, "role", None) in ("owner", "admin")
+            or getattr(user, "owned_company_id", None)
+            or getattr(user, "can_view_cashbox", False)
+        ):
+            raise PermissionDenied({"detail": "Нет доступа к журналу.", "code": "permission_denied"})
+        company = self._company()
+        if company is None:
+            raise PermissionDenied("У пользователя не настроена компания.")
+        qs = AuditLog.objects.filter(company=company).select_related("user")
+        q = request.query_params
+        for param, field in (("object_type", "object_type"), ("object_id", "object_id"), ("action", "action"), ("user", "user_id")):
+            if q.get(param):
+                qs = qs.filter(**{field: q[param]})
+        df, dt = parse_date(q.get("date_from") or ""), parse_date(q.get("date_to") or "")
+        if df:
+            qs = qs.filter(created_at__gte=_day_start(df))
+        if dt:
+            qs = qs.filter(created_at__lt=_day_start(dt + timedelta(days=1)))
+        try:
+            page = max(int(q.get("page") or 1), 1)
+        except ValueError:
+            page = 1
+        total = qs.count()
+        rows = list(qs[(page - 1) * self.PAGE: page * self.PAGE])
+        results = [
+            {
+                "id": str(r.id), "created_at": r.created_at, "action": r.action,
+                "user": str(r.user_id) if r.user_id else None,
+                "user_name": (f"{r.user.first_name} {r.user.last_name}".strip() or r.user.email) if r.user else None,
+                "object_type": r.object_type, "object_id": r.object_id, "object_name": r.object_name,
+                "before": r.before, "after": r.after, "ip": r.ip,
+            }
+            for r in rows
+        ]
+        return Response({"count": total, "page": page, "page_size": self.PAGE, "results": results})

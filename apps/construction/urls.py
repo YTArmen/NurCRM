@@ -21,9 +21,10 @@ from apps.construction.views import (
     CashboxReportAnalyticsView,
 )
 from apps.construction.sale_history_views import CashShiftSalesListView
-from apps.construction.views_buhgalter import CashboxBalancesView, CashFlowCheckView
+from apps.construction.views_buhgalter import AuditLogView, CashboxBalancesView, CashFlowCheckView
 
 urlpatterns = [
+    path("audit-log/", AuditLogView.as_view(), name="construction-audit-log"),
     path("cashboxes/balances/", CashboxBalancesView.as_view(), name="cashbox-balances"),
     path("cashboxes/", CashboxListCreateView.as_view(), name="cashbox-list-create"),
     path("cashboxes/<uuid:pk>/", CashboxDetailView.as_view(), name="cashbox-detail"),

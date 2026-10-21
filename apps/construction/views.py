@@ -779,6 +779,9 @@ class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIVie
     def perform_create(self, serializer):
         _ensure_cash_period_open(self.request, self._company(), [timezone.now()])
         self._inject_company_branch_on_save(serializer)
+        from apps.construction.audit import log_cashflow, cashflow_snapshot
+        if isinstance(serializer.instance, CashFlow):
+            log_cashflow(self.request, serializer.instance, "create", after=cashflow_snapshot(serializer.instance))
 
 @read_only_guard("can_edit_cashbox")
 class CashFlowDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroyAPIView):
@@ -807,10 +810,16 @@ class CashFlowDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestro
                 from apps.construction.services_change_requests import resolve_change_request
                 resolve_change_request(instance, new_status=new_st, user=request.user)
                 instance.refresh_from_db()
+                from apps.construction.audit import log_cashflow
+                log_cashflow(request, instance.target_flow or instance, "approve" if new_st == CashFlow.Status.APPROVED else "reject",
+                             after={"request_kind": instance.request_kind, "request_id": str(instance.pk)})
                 return Response(self.get_serializer(instance).data)
 
+        from apps.construction.audit import log_cashflow, cashflow_snapshot
+        before = cashflow_snapshot(instance)
         resp = super().update(request, *args, **kwargs)
         instance.refresh_from_db()
+        log_cashflow(request, instance, "update", before=before, after=cashflow_snapshot(instance))
         if old_status != CashFlow.Status.REJECTED and instance.status == CashFlow.Status.REJECTED:
             from apps.construction.auto_cashflow import handle_cashflow_reject
             handle_cashflow_reject(instance, user=request.user)
@@ -819,6 +828,8 @@ class CashFlowDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestro
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         _ensure_cash_period_open(request, instance.company, [instance.created_at])
+        from apps.construction.audit import log_cashflow, cashflow_snapshot
+        log_cashflow(request, instance, "delete", before=cashflow_snapshot(instance))
         return super().destroy(request, *args, **kwargs)
 
 
@@ -931,6 +942,8 @@ class CashFlowEditRequestView(CompanyBranchScopedMixin, APIView):
             idempotency_key=idempotency_key,
         )
 
+        from apps.construction.audit import log_cashflow
+        log_cashflow(request, target_flow, "edit_request", after={"proposed": {"type": str(prop_type), "amount": str(prop_amount), "name": prop_name}, "reason": reason, "request_id": str(req_flow.pk)})
         serializer = CashFlowSerializer(req_flow, context={"request": request})
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -1039,6 +1052,8 @@ class CashFlowCancelRequestView(CompanyBranchScopedMixin, APIView):
             idempotency_key=idempotency_key,
         )
 
+        from apps.construction.audit import log_cashflow
+        log_cashflow(request, target_flow, "cancel_request", after={"request_id": str(req_flow.pk)})
         serializer = CashFlowSerializer(req_flow, context={"request": request})
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -1388,6 +1403,7 @@ class CashFlowBulkStatusUpdateView(CompanyBranchScopedMixin, generics.GenericAPI
             _ensure_cash_period_open(request, cf.company, [cf.created_at])
         updated_ids = []
         updated_count = 0
+        _before_status = {cf.id: cf.status for cf in old_flows}
 
         from apps.construction.services_change_requests import resolve_change_request
         from apps.construction.auto_cashflow import handle_cashflow_reject
@@ -1443,6 +1459,12 @@ class CashFlowBulkStatusUpdateView(CompanyBranchScopedMixin, generics.GenericAPI
                 if cf.status != CashFlow.Status.REJECTED and new_st == CashFlow.Status.REJECTED:
                     cf.status = CashFlow.Status.REJECTED
                     handle_cashflow_reject(cf, user=request.user)
+
+        from apps.construction.audit import log_cashflow
+        for cf in old_flows:
+            new_st = id_to_status.get(cf.id)
+            if new_st and new_st != _before_status.get(cf.id):
+                log_cashflow(request, cf, "update", before={"status": _before_status.get(cf.id)}, after={"status": new_st})
 
         return Response(
             {"count": updated_count, "updated_ids": updated_ids},

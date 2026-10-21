@@ -1216,3 +1216,26 @@ class CashFlow(models.Model):
 
     def __str__(self):
         return f"{self.get_type_display()} {self.amount} ({self.status})"
+
+
+class AuditLog(models.Model):
+    """Журнал изменений денежных операций (ТЗ «Бухгалтер», п. 7). Только дописывается."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="audit_logs")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    action = models.CharField(max_length=32)  # create/update/delete/edit_request/cancel_request/approve/reject/closed_until
+    object_type = models.CharField(max_length=32)  # cashflow, period
+    object_id = models.CharField(max_length=64, blank=True, default="")
+    object_name = models.CharField(max_length=255, blank=True, default="")
+    before = models.JSONField(null=True, blank=True)
+    after = models.JSONField(null=True, blank=True)
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["company", "object_type", "object_id", "-created_at"], name="ix_audit_obj"),
+            models.Index(fields=["company", "-created_at"], name="ix_audit_company_date"),
+        ]

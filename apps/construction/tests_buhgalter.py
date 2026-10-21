@@ -294,3 +294,31 @@ class SalaryTests(BuhBase):
         r = self.client.post("/api/warehouse/salary/payouts/", {}, format="json")
         self.assertEqual(r.status_code, 403)
         self.assertEqual(r.data.get("code"), "read_only")
+
+
+class AuditLogTests(BuhBase):
+    def test_create_update_delete_logged_and_filter(self):
+        self.client.force_authenticate(self.owner)
+        fid = self.post_flow("100.00").data["id"]
+        self.client.patch(f"/api/construction/cashflows/{fid}/", {"amount": "250.00"}, format="json")
+        self.client.delete(f"/api/construction/cashflows/{fid}/")
+        r = self.client.get(f"/api/construction/audit-log/?object_type=cashflow&object_id={fid}")
+        self.assertEqual(r.status_code, 200)
+        acts = [x["action"] for x in r.data["results"]]
+        self.assertEqual(sorted(acts), ["create", "delete", "update"])
+        upd = next(x for x in r.data["results"] if x["action"] == "update")
+        self.assertEqual(upd["before"]["amount"], "100.00")
+        self.assertEqual(upd["after"]["amount"], "250.00")
+        self.assertEqual(self.client.get("/api/construction/audit-log/?object_id=nope").data["count"], 0)
+
+    def test_closed_until_logged_and_no_access(self):
+        self.client.force_authenticate(self.owner)
+        self.client.patch("/api/warehouse/settings/period-close/", {"closed_until": "2026-09-30"}, format="json")
+        r = self.client.get("/api/construction/audit-log/?action=closed_until")
+        self.assertEqual(r.data["count"], 1)
+        self.assertEqual(r.data["results"][0]["after"]["closed_until"], "2026-09-30")
+        other = User.objects.create_user(email="x@t.com", password="p", role="manager")
+        other.company = self.company
+        other.save()
+        self.client.force_authenticate(other)
+        self.assertEqual(self.client.get("/api/construction/audit-log/").status_code, 403)
