@@ -597,10 +597,11 @@ class CompanyUpdateAPIView(generics.RetrieveUpdateAPIView):
     queryset = Company.objects.none()
 
     def get_permissions(self):
-        # ТЗ 12.18: читать могут все сотрудники, менять данные компании - только владелец.
+        # ТЗ 12.18: читать могут все сотрудники, менять данные компании - владелец или администратор
+        # (на сайте вкладку «Компания» видят обе роли).
         if self.request.method in ("GET", "HEAD", "OPTIONS"):
             return [IsAuthenticated()]
-        return [IsAuthenticated(), IsCompanyOwner()]
+        return [IsAuthenticated(), IsCompanyOwnerOrAdmin()]
 
     def get_object(self):
         company = _get_company(self.request.user)

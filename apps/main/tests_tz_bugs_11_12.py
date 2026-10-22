@@ -214,7 +214,7 @@ class SupplierWithoutPhoneTests(KassaBase):
 
 
 class CompanySettingsOwnerOnlyTests(KassaBase):
-    """12.18: PATCH users/settings/company/ только владелец."""
+    """12.18: PATCH users/settings/company/ только владелец или администратор."""
 
     URL = "/api/users/settings/company/"
 
@@ -232,6 +232,15 @@ class CompanySettingsOwnerOnlyTests(KassaBase):
         self.assertEqual(r.status_code, 403, getattr(r, "data", None))
         self.company.refresh_from_db()
         self.assertEqual(self.company.name, "Новое имя")
+
+    def test_admin_can_patch(self):
+        from django.contrib.auth import get_user_model
+        from rest_framework.test import APIClient
+        admin = get_user_model().objects.create_user(email=f"a{uuid.uuid4().hex[:6]}@t.kg", password="x", company=self.company, role="admin")
+        c = APIClient()
+        c.force_authenticate(admin)
+        r = c.patch(self.URL, {"name": "Имя от админа"}, format="json")
+        self.assertEqual(r.status_code, 200, getattr(r, "data", None))
 
 
 class SocialApplicationsTests(KassaBase):
