@@ -1897,6 +1897,26 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
         if not isinstance(packages_input, list):
             packages_input = []
 
+        # ТЗ 12.12: is_adult, minimum_quantity, plu, shelf_life_days
+        extra_fields = {}
+        if "is_adult" in data:
+            extra_fields["is_adult"] = _parse_bool_like(data.get("is_adult"))
+        if data.get("minimum_quantity") not in (None, ""):
+            try:
+                extra_fields["minimum_quantity"] = _parse_decimal_nonneg(data.get("minimum_quantity"), "minimum_quantity")
+            except ValueError:
+                return Response({"minimum_quantity": "Неверный минимальный остаток."}, status=status.HTTP_400_BAD_REQUEST)
+        for int_key, int_label in (("plu", "ПЛУ"), ("shelf_life_days", "срок хранения")):
+            raw_int = data.get(int_key)
+            if raw_int not in (None, ""):
+                try:
+                    int_val = int(str(raw_int).strip())
+                    if int_val < 0:
+                        raise ValueError
+                except ValueError:
+                    return Response({int_key: f"Неверное значение: {int_label}."}, status=status.HTTP_400_BAD_REQUEST)
+                extra_fields[int_key] = int_val
+
         product = Product(
             company=company,
             branch=branch,
@@ -1931,6 +1951,7 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
 
             created_by=request.user,
             stock=_parse_bool_like(data.get("stock", False)),
+            **extra_fields,
             **parse_upsell_fields(data),
         )
         if price_provided:
