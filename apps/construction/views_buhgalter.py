@@ -2,6 +2,7 @@
 
 Авторы: Умар и Claude (Anthropic), октябрь 2026.
 """
+import uuid
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
@@ -143,8 +144,22 @@ class AuditLogView(CompanyBranchScopedMixin, APIView):
             raise PermissionDenied("У пользователя не настроена компания.")
         qs = AuditLog.objects.filter(company=company).select_related("user")
         q = request.query_params
-        for param, field in (("object_type", "object_type"), ("object_id", "object_id"), ("action", "action"), ("user", "user_id")):
+        # те, кому открыты только кассы, видят лишь денежные записи; остальной журнал — владелец/админ
+        full = (
+            getattr(user, "is_superuser", False)
+            or getattr(user, "role", None) in ("owner", "admin")
+            or getattr(user, "owned_company_id", None)
+        )
+        if not full:
+            qs = qs.filter(object_type__in=("cashflow", "period"))
+        for param, field in (("object_type", "object_type"), ("object_id", "object_id"), ("action", "action"),
+                             ("user", "user_id"), ("branch", "branch_id")):
             if q.get(param):
+                if field.endswith("_id") and field != "object_id":
+                    try:
+                        uuid.UUID(str(q[param]))
+                    except ValueError:
+                        raise ValidationError({param: "Неверный идентификатор."})
                 qs = qs.filter(**{field: q[param]})
         df, dt = parse_date(q.get("date_from") or ""), parse_date(q.get("date_to") or "")
         if df:
@@ -164,6 +179,7 @@ class AuditLogView(CompanyBranchScopedMixin, APIView):
                 "user_name": (f"{r.user.first_name} {r.user.last_name}".strip() or r.user.email) if r.user else None,
                 "object_type": r.object_type, "object_id": r.object_id, "object_name": r.object_name,
                 "before": r.before, "after": r.after, "ip": r.ip,
+                "branch": str(r.branch_id) if r.branch_id else None,
             }
             for r in rows
         ]

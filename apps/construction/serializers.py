@@ -385,6 +385,8 @@ class CashboxWithFlowsSerializer(CompanyBranchReadOnlyMixin):
 
 
 class CashboxSerializer(CompanyBranchReadOnlyMixin):
+    # ТЗ 11.4: филиал кассы отдаём id (null — общая касса); у ReadOnlyField(source="branch.id") ключ пропадал при null
+    branch = serializers.PrimaryKeyRelatedField(read_only=True, allow_null=True)
     analytics = serializers.SerializerMethodField()
     is_consumption = serializers.BooleanField(required=False, default=False)
     role = serializers.ChoiceField(choices=Cashbox.CashboxRole.choices, required=False, allow_null=True)

@@ -4,6 +4,8 @@ from apps.main.mass_incoming_views import ProductMassIncomingAPIView
 from .views import *
 from .price_check import ProductCatalogVersionView, ProductPriceCheckView
 from .pos_views import *
+from apps.construction.views_buhgalter import AuditLogView
+from apps.construction.views_admin import TrashListView, TrashRestoreView
 from .kassa_stage3 import (
     AppointmentDetailAPIView,
     AppointmentListCreateAPIView,
@@ -115,6 +117,10 @@ from apps.main.part12_views import (
 from apps.main.views_payables import SupplierPayablesAPIView
 
 urlpatterns = [
+    # ТЗ «Админка»: журнал действий (тот же, что construction/audit-log/) и корзина удалённого
+    path("audit-log/", AuditLogView.as_view(), name="main-audit-log"),
+    path("trash/", TrashListView.as_view(), name="main-trash"),
+    path("trash/<str:type>/<str:object_id>/restore/", TrashRestoreView.as_view(), name="main-trash-restore"),
     # Приложение клиентов: поиск по телефону, QR, перенос бонусов, магазин в приложении, приглашения
     path("", include("apps.clientapp.staff_urls")),
 

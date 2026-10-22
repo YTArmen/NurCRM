@@ -1141,3 +1141,29 @@ class FeatureActivationKey(models.Model):
 
     def __str__(self):
         return f"{self.key} → {self.code}"
+
+
+class AdminPin(models.Model):
+    """PIN подтверждения опасных действий (ТЗ п.10): хэш, счётчик неверных попыток, блокировка."""
+
+    user = models.OneToOneField("users.User", on_delete=models.CASCADE, related_name="admin_pin")
+    pin_hash = models.CharField(max_length=256)
+    failed_attempts = models.PositiveSmallIntegerField(default=0, db_default=0)
+    locked_until = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "PIN администратора"
+        verbose_name_plural = "PIN администраторов"
+
+
+class CompanyPinSetting(models.Model):
+    """Настройка компании «Подтверждать PIN» для опасных действий."""
+
+    company = models.OneToOneField("users.Company", on_delete=models.CASCADE, related_name="pin_setting")
+    require_pin = models.BooleanField(default=False, db_default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Настройка PIN компании"
+        verbose_name_plural = "Настройки PIN компаний"

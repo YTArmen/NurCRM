@@ -41,10 +41,15 @@ from apps.integrations.views import (
 )
 from apps.users.scale_views import send_products_to_scale, get_scale_api_token, register_scale
 
+from .pin import PinSetView, PinVerifyView, PinSettingsView
+
 urlpatterns = [
     # 🔐 Авторизация / регистрация
     path('auth/register/', RegisterAPIView.as_view(), name='user-register'),
     path('auth/login/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('auth/pin/', PinSetView.as_view(), name='admin-pin-set'),
+    path('auth/pin/verify/', PinVerifyView.as_view(), name='admin-pin-verify'),
+    path('auth/pin/settings/', PinSettingsView.as_view(), name='admin-pin-settings'),
     path('auth/refresh/', CustomTokenRefreshView.as_view(), name='token_refresh'),
     
     path("scales/token/", get_scale_api_token, name="scale-api-token"),

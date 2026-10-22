@@ -256,6 +256,23 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
     permission_classes = [AllowAny]
 
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code == 200:
+            # журнал действий (ТЗ п.8): вход в систему
+            try:
+                from apps.construction.audit import log_change
+
+                ident = request.data.get("email") or request.data.get("username")
+                u = User.objects.filter(email__iexact=str(ident).strip()).select_related("company").first() if ident else None
+                company = (getattr(u, "company", None) or getattr(u, "owned_company", None)) if u else None
+                if company is not None:
+                    log_change(company=company, user=u, action="login", object_type="user", object_id=u.pk,
+                               object_name=(f"{u.first_name} {u.last_name}".strip() or u.email), request=request)
+            except Exception:
+                pass
+        return response
+
 
 class CustomTokenRefreshView(TokenRefreshView):
     """
@@ -442,6 +459,19 @@ class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
             return User.objects.none()
 
         return _apply_branch_filter_to_users(self.request, company, base_qs)
+
+    def perform_update(self, serializer):
+        # журнал действий (ТЗ п.8): изменение прав и роли сотрудника
+        from apps.construction.audit import log_request, user_rights
+
+        before = user_rights(serializer.instance)
+        obj = serializer.save()
+        try:
+            log_request(self.request, "rights_change", "user", obj.pk,
+                        (f"{obj.first_name} {obj.last_name}".strip() or obj.email),
+                        before=before, after=user_rights(obj))
+        except Exception:
+            pass
 
     def destroy(self, request, *args, **kwargs):
         if getattr(request.user, "role", None) == "supervisor":

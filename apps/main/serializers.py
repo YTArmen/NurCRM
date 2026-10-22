@@ -4350,7 +4350,11 @@ class AgentRequestCartSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSe
 
 class MarketSaleEmployeePayProfileSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
     company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")
+    # ТЗ 12.21: branch можно передать явно (null = схема для всех филиалов) и он всегда возвращается.
+    # Не передан -> как раньше: активный филиал запроса или null.
+    branch = serializers.PrimaryKeyRelatedField(
+        queryset=Branch.objects.all(), required=False, allow_null=True
+    )
 
     class Meta:
         model = MarketSaleEmployeePayProfile
@@ -4371,7 +4375,23 @@ class MarketSaleEmployeePayProfileSerializer(CompanyBranchReadOnlyMixin, seriali
         company = self._user_company()
         if company and hasattr(User, "company_id"):
             fields["user"].queryset = User.objects.filter(company_id=company.id)
+        if company and "branch" in fields:
+            fields["branch"].queryset = Branch.objects.filter(company_id=company.id)
         return fields
+
+    def create(self, validated_data):
+        company = self._user_company()
+        if company:
+            validated_data["company"] = company
+        if "branch" not in validated_data:
+            validated_data["branch"] = self._auto_branch()
+        return serializers.ModelSerializer.create(self, validated_data)
+
+    def update(self, instance, validated_data):
+        company = self._user_company()
+        if company:
+            validated_data["company"] = company
+        return serializers.ModelSerializer.update(self, instance, validated_data)
 
     def validate(self, attrs):
         data = super().validate(attrs)
