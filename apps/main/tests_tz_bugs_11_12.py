@@ -272,3 +272,17 @@ class SubscriptionBranchesLimitTests(KassaBase):
         Branch.objects.create(company=self.company, name="Филиал 1")
         Branch.objects.create(company=self.company, name="Филиал 2")
         self.assertEqual(get_company_limits(self.company)["branches"], {"used": 2, "max": None})
+
+
+class ShiftSalesTransferFilterTests(KassaBase):
+    """12.11 (продажи смены): transfer включает банки."""
+
+    def test_transfer(self):
+        a = Sale.objects.create(company=self.company, user=self.owner, cashbox=self.cashbox, shift=self.shift,
+                                status=Sale.Status.PAID, payment_method="mbank")
+        Sale.objects.create(company=self.company, user=self.owner, cashbox=self.cashbox, shift=self.shift,
+                            status=Sale.Status.PAID, payment_method="cash")
+        r = self.api.get(f"/api/construction/cash/shifts/{self.shift.id}/sales/", {"payment_method": "transfer"})
+        self.assertEqual(r.status_code, 200, getattr(r, "data", None))
+        rows = r.data["results"] if isinstance(r.data, dict) else r.data
+        self.assertEqual([x["id"] for x in rows], [str(a.id)])
