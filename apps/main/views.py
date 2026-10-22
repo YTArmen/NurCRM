@@ -1751,8 +1751,16 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
             return v
         raise ValueError(f"Недопустимый статус. Допустимые: {', '.join(sorted(codes))}.")
 
-    @transaction.atomic
     def create(self, request, *args, **kwargs):
+        # ТЗ 12.13: любой ответ-ошибка (>=400) после product.save() откатывает всю транзакцию,
+        # чтобы не оставалось наполовину сохранённого товара (повтор плодил дубли).
+        with transaction.atomic():
+            response = self._create_manual(request, *args, **kwargs)
+            if getattr(response, "status_code", 200) >= 400:
+                transaction.set_rollback(True)
+        return response
+
+    def _create_manual(self, request, *args, **kwargs):
         company = self._company()
         branch = None
         data = request.data

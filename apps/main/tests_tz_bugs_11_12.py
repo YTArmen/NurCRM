@@ -164,3 +164,36 @@ class SalePaymentFilterTests(KassaBase):
         self.assertEqual({x["id"] for x in r.data["results"]}, {ids[k] for k in ("transfer", "mbank", "optima", "obank", "bakai")})
         r = self.api.get("/api/main/pos/sales/", {"payment_method": "cash"})
         self.assertEqual({x["id"] for x in r.data["results"]}, {ids["cash"]})
+
+
+class CreateManualTests(KassaBase):
+    """12.12 доп. поля сохраняются; 12.13 ошибка доп. штрихкода откатывает товар."""
+
+    URL = "/api/main/products/create-manual/"
+
+    def test_saves_extra_fields(self):
+        from apps.main.models import Product
+        r = self.api.post(self.URL, {
+            "name": "Колбаса", "price": "300", "quantity": "5", "is_weight": True,
+            "is_adult": True, "minimum_quantity": "2.5", "plu": 17, "shelf_life_days": 30,
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        p = Product.objects.get(name="Колбаса")
+        self.assertEqual((p.is_adult, p.minimum_quantity, p.plu, p.shelf_life_days), (True, Decimal("2.500"), 17, 30))
+
+    def test_bad_number_is_400(self):
+        r = self.api.post(self.URL, {"name": "X", "price": "1", "plu": "abc"}, format="json")
+        self.assertEqual(r.status_code, 400, r.data)
+
+    def test_bad_alternate_barcode_rolls_back(self):
+        from apps.main.models import Product
+        self.product.barcode = "4600000000011"
+        self.product.save()
+        before = Product.objects.filter(company=self.company).count()
+        r = self.api.post(self.URL, {
+            "name": "Новый", "price": "10", "barcode": "4600000000028",
+            "alternate_barcodes": [{"barcode": "4600000000011", "name": "дубль"}],
+        }, format="json")
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertEqual(Product.objects.filter(company=self.company).count(), before)
+        self.assertFalse(Product.objects.filter(name="Новый").exists())
