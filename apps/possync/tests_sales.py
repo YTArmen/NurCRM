@@ -250,3 +250,78 @@ class DateFilterTests(SalesBase):
         self.assertEqual(r.data["count"], 1)
         r = self.api.get("/api/construction/cashflows/?date_from=2026-10-19&date_to=2026-10-19")
         self.assertEqual(r.data["count"], 0)
+
+
+class SaleItemsTests(SalesBase):
+    def test_items_filters_pagination_returned(self):
+        self.open_shift()
+        r1 = self.checkout("si-1", items=[
+            {"product": str(self.product.id), "qty": "3", "price": "100.00", "discount": "20.00"}])
+        other = self.product.__class__.objects.create(
+            company=self.company, name="Молоко", price=Decimal("60.00"), quantity=Decimal("10"))
+        r2 = self.checkout("si-2", items=[{"product": str(other.id), "qty": "2", "price": "60.00"}])
+        self.assertEqual(r1.status_code, 201, r1.data)
+        # частичный возврат 1 шт
+        item_id = r1.data["items"][0]["id"]
+        rr = self.api.post(f"/api/main/pos/sales/{r1.data['id']}/return/",
+                           {"items": [{"sale_item_id": item_id, "quantity": "1"}]}, format="json")
+        self.assertEqual(rr.status_code, 200, rr.data)
+
+        r = self.api.get("/api/main/pos/sale-items/")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["count"], 2)
+        by_name = {x["name"]: x for x in r.data["results"]}
+        bread = by_name["Хлеб"]
+        self.assertEqual(bread["qty"], "2.000")
+        self.assertEqual(bread["returned_qty"], "1.000")
+        self.assertEqual(bread["sale_id"], r1.data["id"])
+        self.assertEqual(bread["number"], r1.data["number"])
+        self.assertEqual(bread["cashier_id"], str(self.owner.id))
+        self.assertEqual(bread["payment_method"], "cash")
+
+        r = self.api.get(f"/api/main/pos/sale-items/?product={other.id}")
+        self.assertEqual(r.data["count"], 1)
+        self.assertEqual(r.data["results"][0]["sum"], "120.00")
+        r = self.api.get("/api/main/pos/sale-items/?page_size=1")
+        self.assertEqual(len(r.data["results"]), 1)
+        self.assertIsNotNone(r.data["next"])
+        r = self.api.get(f"/api/main/pos/sale-items/?cashier={uuid_other()}")
+        self.assertEqual(r.data["count"], 0)
+        r = self.api.get("/api/main/pos/sale-items/?date_from=2000-01-01&date_to=2000-01-01")
+        self.assertEqual(r.data["count"], 0)
+        r = self.api.get("/api/main/pos/sale-items/?date_from=2020-01-01&date_to=2099-01-01&page_size=500")
+        self.assertEqual(r.data["count"], 2)
+
+    def test_other_company_not_visible(self):
+        from apps.users.models import Company
+
+        self.open_shift()
+        self.checkout("si-3")
+        other_owner = type(self.owner).objects.create_user(email="x@y.kg", password="x", role="owner")
+        co = Company.objects.create(name="Чужая", owner=other_owner, is_active=True, subscription_plan=self.plan)
+        other_owner.company = co
+        other_owner.save()
+        self.api.force_authenticate(other_owner)
+        r = self.api.get("/api/main/pos/sale-items/")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data["count"], 0)
+
+    def test_pack_info_in_items(self):
+        from apps.main.models import ProductPackage
+
+        self.open_shift()
+        pk = ProductPackage.objects.create(company=self.company, product=self.product, name="Блок",
+                                           quantity_in_package=Decimal("10"))
+        r = self.checkout("si-4", items=[{"product": str(self.product.id), "sale_package_id": str(pk.id),
+                                          "qty": "2", "price": "400.00"}])
+        self.assertEqual(r.status_code, 201, r.data)
+        row = self.api.get("/api/main/pos/sale-items/").data["results"][0]
+        self.assertEqual(row["sale_package_id"], str(pk.id))
+        self.assertEqual(row["packs_qty"], "2.000")
+        self.assertEqual(row["qty"], "20.000")
+
+
+def uuid_other():
+    import uuid
+
+    return str(uuid.uuid4())
