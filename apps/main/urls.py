@@ -241,6 +241,7 @@ urlpatterns = [
 
     # 🔹 Уведомления
     path('notifications/', NotificationListView.as_view(), name='notification-list'),
+    path('notifications/unread-count/', NotificationUnreadCountView.as_view(), name='notification-unread-count'),
     path('notifications/mark-all-read/', MarkAllNotificationsReadView.as_view(), name='mark-all-notifications-read'),
     # алиас: часть клиентов зовёт read-all/ (см. realtime-notifications-backend.md)
     path('notifications/read-all/', MarkAllNotificationsReadView.as_view(), name='notifications-read-all'),

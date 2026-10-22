@@ -248,3 +248,16 @@ class SocialApplicationsTests(KassaBase):
         self.assertEqual(len(rows), 1)
         pk = rows[0]["id"]
         self.assertEqual(self.api.get(f"/api/main/socialapplications/{pk}/").status_code, 200)
+
+
+class NotificationUnreadCountTests(KassaBase):
+    """12.20: GET notifications/unread-count/."""
+
+    def test_count(self):
+        from apps.main.models import Notification
+        for i, read in enumerate((False, False, True)):
+            Notification.objects.create(company=self.company, user=self.owner, type="t", title=f"n{i}", message="m", is_read=read)
+        Notification.objects.create(company=self.company, user=self.cashier, type="t", title="чужое", message="m")
+        r = self.api.get("/api/main/notifications/unread-count/")
+        self.assertEqual(r.status_code, 200, getattr(r, "data", None))
+        self.assertEqual(r.data, {"count": 2})

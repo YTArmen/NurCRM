@@ -2928,6 +2928,18 @@ class NotificationDetailView(CompanyBranchRestrictedMixin, generics.RetrieveDest
         return super().get_queryset().filter(user=self.request.user)
 
 
+class NotificationUnreadCountView(APIView):
+    """GET /api/main/notifications/unread-count/ -> {"count": N} (ТЗ 12.20). Опционально ?category=."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        qs = Notification.objects.filter(user=request.user, is_read=False)
+        cat = (request.query_params.get("category") or "").strip()
+        if cat:
+            qs = qs.filter(Q(category=cat) | Q(type=cat))
+        return Response({"count": qs.count()})
+
+
 class MarkAllNotificationsReadView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
