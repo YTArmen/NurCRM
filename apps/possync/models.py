@@ -92,3 +92,22 @@ class StockAdjustmentLine(models.Model):
         verbose_name = "Строка изменения остатка"
         verbose_name_plural = "Строки изменения остатка"
         indexes = [models.Index(fields=["product"], name="possync_adjline_product")]
+
+
+class ClientDebtLimit(models.Model):
+    """
+    Лимит долга клиента (ТЗ веб-кассы, п. 2). В apps.main схему менять нельзя (миграции main живут
+    только на сервере), поэтому лимит лежит отдельной таблицей. Нет записи или limit = NULL — без лимита.
+    """
+
+    client = models.OneToOneField("main.Client", on_delete=models.CASCADE, related_name="debt_limit_row")
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="client_debt_limits")
+    limit = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Лимит долга клиента"
+        verbose_name_plural = "Лимиты долга клиентов"

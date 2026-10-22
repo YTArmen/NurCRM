@@ -33,14 +33,21 @@ from apps.main.kassa_views import ClientDirectDebtAPIView, PosQuickCheckoutAPIVi
 from apps.main.models import Client, ClientDeal, DealInstallment, Product, ProductDeletion, ProductVariant, Sale, SaleItem
 from apps.main.pos_utils import money, qty3
 from apps.main.price_check import catalog_version
-from apps.main.views import CompanyBranchRestrictedMixin, ProductByBarcodeAPIView, _filter_products_company_only
+from apps.main.pos_serializers import _is_owner_like
+from apps.main.views import (
+    ClientRetrieveUpdateDestroyAPIView,
+    CompanyBranchRestrictedMixin,
+    ProductByBarcodeAPIView,
+    _filter_products_company_only,
+)
 from apps.users.models import Branch
 from apps.users.serializers import CompanySerializer, UserSerializer, company_addons_payload, company_feature_codes
 from core.exceptions import ApiError
 
 from apps.integrations.idempotency import _request_key, idempotent
 
-from .models import StockAdjustment, StockAdjustmentLine
+from .debt_limits import check_debt_limits, client_debt_payload
+from .models import ClientDebtLimit, StockAdjustment, StockAdjustmentLine
 
 ZERO = Decimal("0.00")
 Q3 = Decimal("0.001")
@@ -625,6 +632,10 @@ class PosQuickCheckoutGuardedAPIView(PosQuickCheckoutAPIView):
             self._enrich(request, response.data)
         return response
 
+    def after_sale_created(self, request, sale, client, data) -> None:
+        # Лимиты долга: клиент и кассир (внутри транзакции продажи, под блокировкой)
+        check_debt_limits(request, sale, client, data)
+
     def _enrich(self, request, data: dict) -> None:
         """ТЗ-28 §8.5: итоги смены, новые остатки и версия каталога прямо в ответе продажи."""
         try:
@@ -678,3 +689,48 @@ class ProductByBarcodeWithVariantsAPIView(ProductByBarcodeAPIView):
             data["variant"] = ProductVariantSerializer(variant).data
             data["matched_by"] = "variant_barcode"
             return Response(data)
+
+
+class ClientDetailWithDebtLimitAPIView(ClientRetrieveUpdateDestroyAPIView):
+    """
+    GET/PATCH /api/main/clients/{id}/ — как раньше, плюс `debt_limit` и `debt_available`.
+    PATCH {"debt_limit": 5000} / {"debt_limit": null} (без лимита) — только владелец/администратор.
+    """
+
+    def _with_limit(self, response):
+        if response.status_code == 200 and isinstance(getattr(response, "data", None), dict):
+            response.data.update(client_debt_payload(self.get_object()))
+        return response
+
+    def retrieve(self, request, *args, **kwargs):
+        return self._with_limit(super().retrieve(request, *args, **kwargs))
+
+    def update(self, request, *args, **kwargs):
+        has_limit = hasattr(request.data, "get") and "debt_limit" in request.data
+        new_limit = None
+        if has_limit:
+            if not _is_owner_like(request.user):
+                raise ApiError("forbidden", "Менять лимит долга может владелец или администратор.", status_code=403)
+            raw = request.data.get("debt_limit")
+            if raw in (None, ""):
+                new_limit = None
+            else:
+                try:
+                    new_limit = money(Decimal(str(raw)))
+                except (InvalidOperation, ValueError):
+                    raise ApiError("validation_error", "Лимит долга — число.", fields={"debt_limit": ["Ожидается число."]})
+                if new_limit < 0:
+                    raise ApiError("validation_error", "Лимит долга не может быть отрицательным.",
+                                   fields={"debt_limit": ["Не меньше нуля."]})
+            data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+            data.pop("debt_limit", None)
+            request._full_data = data
+        with transaction.atomic():
+            response = super().update(request, *args, **kwargs)
+            if has_limit and response.status_code == 200:
+                client = self.get_object()
+                ClientDebtLimit.objects.update_or_create(
+                    client=client,
+                    defaults={"company_id": client.company_id, "limit": new_limit, "updated_by": request.user},
+                )
+        return self._with_limit(response)

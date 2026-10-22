@@ -431,6 +431,8 @@ class PosQuickCheckoutAPIView(APIView):
                         sale=sale,
                         user=user,
                     )
+                # Хук для проверок после создания чека (лимиты долга и т.п.): исключение откатывает всю транзакцию.
+                self.after_sale_created(request, sale, client, data)
                 sale.idempotency_key = key
                 Sale.objects.filter(pk=sale.pk).update(
                     idempotency_key=key,
@@ -457,6 +459,9 @@ class PosQuickCheckoutAPIView(APIView):
         return Response(body, status=status.HTTP_201_CREATED)
 
     # --- helpers ---
+
+    def after_sale_created(self, request, sale, client, data):
+        """Переопределяется в apps.possync: проверки внутри транзакции продажи."""
 
     def _add_items(self, cart, items, limit_discounts, max_dp):
         from apps.main.pos_views import _q2, default_unit_price_for_package
