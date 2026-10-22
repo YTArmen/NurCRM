@@ -55,12 +55,13 @@ class ApiError(exceptions.APIException):
     default_code = "invalid"
     default_detail = "Ошибка запроса."
 
-    def __init__(self, code, detail=None, *, status_code=None, data=None, fields=None):
+    def __init__(self, code, detail=None, *, status_code=None, data=None, fields=None, top=None):
         if status_code is not None:
             self.status_code = int(status_code)
         self.code = code
         self.extra_data = data
         self.extra_fields = fields
+        self.extra_top = top  # поля верхнего уровня ответа (например limit/current)
         super().__init__(detail=detail or self.default_detail, code=code)
 
 
@@ -120,6 +121,8 @@ def api_exception_handler(exc, context):
             data["data"] = exc.extra_data
         if exc.extra_fields:
             data["fields"] = exc.extra_fields
+        if getattr(exc, "extra_top", None):
+            data.update(exc.extra_top)
         if "detail" in data:
             data["detail"] = str(data["detail"])
         return response

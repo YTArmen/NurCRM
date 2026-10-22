@@ -70,6 +70,8 @@ class QuickCheckoutItemSerializer(serializers.Serializer):
     custom = serializers.BooleanField(required=False, default=False)
     product = serializers.UUIDField(required=False, allow_null=True)
     sale_package = serializers.UUIDField(required=False, allow_null=True)
+    # Продажа упаковкой: qty — число упаковок, цена — цена упаковки (обрабатывает apps.possync.packs)
+    sale_package_id = serializers.UUIDField(required=False, allow_null=True)
     variant = serializers.UUIDField(required=False, allow_null=True)
     performer = serializers.UUIDField(required=False, allow_null=True)
     name = serializers.CharField(required=False, allow_blank=True, max_length=255)
@@ -150,6 +152,11 @@ class QuickCheckoutSerializer(serializers.Serializer):
     # серверу — продажа идёт в смену этой кассы, открытую в это время, иначе в техническую смену дня.
     sold_at = serializers.DateTimeField(required=False, allow_null=True)
     cashbox = serializers.UUIDField(required=False, allow_null=True)
+    # Удалённые строки корзины (веб-касса) — пишутся в CartItemDeletionLog (apps.possync.deletions)
+    deleted_items = serializers.ListField(child=serializers.DictField(), required=False, allow_empty=True, max_length=500)
+    # График долга (веб-касса): создаётся вместе со сделкой (apps.possync.schedule)
+    debt_schedule = serializers.JSONField(required=False, allow_null=True)
+    schedule_version = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
     def to_internal_value(self, data):
         items = data.get("items")
@@ -452,6 +459,8 @@ class PosQuickCheckoutAPIView(APIView):
                         sale=sale,
                         user=user,
                     )
+                # Хук для проверок после создания чека (лимиты долга и т.п.): исключение откатывает всю транзакцию.
+                self.after_sale_created(request, sale, client, data)
                 sale.idempotency_key = key
                 Sale.objects.filter(pk=sale.pk).update(
                     idempotency_key=key,
@@ -478,6 +487,9 @@ class PosQuickCheckoutAPIView(APIView):
         return Response(body, status=status.HTTP_201_CREATED)
 
     # --- helpers ---
+
+    def after_sale_created(self, request, sale, client, data):
+        """Переопределяется в apps.possync: проверки внутри транзакции продажи."""
 
     def _add_items(self, cart, items, limit_discounts, max_dp):
         from apps.main.pos_views import _q2, default_unit_price_for_package

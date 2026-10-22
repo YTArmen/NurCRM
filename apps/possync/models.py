@@ -92,3 +92,46 @@ class StockAdjustmentLine(models.Model):
         verbose_name = "Строка изменения остатка"
         verbose_name_plural = "Строки изменения остатка"
         indexes = [models.Index(fields=["product"], name="possync_adjline_product")]
+
+
+class ClientDebtLimit(models.Model):
+    """
+    Лимит долга клиента (ТЗ веб-кассы, п. 2). В apps.main схему менять нельзя (миграции main живут
+    только на сервере), поэтому лимит лежит отдельной таблицей. Нет записи или limit = NULL — без лимита.
+    """
+
+    client = models.OneToOneField("main.Client", on_delete=models.CASCADE, related_name="debt_limit_row")
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="client_debt_limits")
+    limit = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Лимит долга клиента"
+        verbose_name_plural = "Лимиты долга клиентов"
+
+
+class SalePackLine(models.Model):
+    """
+    Строка чека, проданная упаковкой (ТЗ веб-кассы, п. 3). Саму строку SaleItem в apps.main менять
+    нельзя, поэтому она хранится в базовых единицах (qty × quantity_in_package), а «2 пачки по 20»
+    запоминается здесь — для чека, отчётов и списка sale-items.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sale = models.ForeignKey("main.Sale", on_delete=models.CASCADE, related_name="pack_lines")
+    product = models.ForeignKey("main.Product", on_delete=models.CASCADE, related_name="+")
+    variant = models.ForeignKey("main.ProductVariant", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    package = models.ForeignKey("main.ProductPackage", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    package_name = models.CharField(max_length=64, blank=True, default="")
+    packs = models.DecimalField("Упаковок", max_digits=14, decimal_places=3)
+    units_per_pack = models.DecimalField("Базовых единиц в упаковке", max_digits=10, decimal_places=3)
+    pack_price = models.DecimalField("Цена упаковки", max_digits=12, decimal_places=2)
+    base_qty = models.DecimalField("Базовых единиц", max_digits=14, decimal_places=3)
+
+    class Meta:
+        verbose_name = "Строка чека (упаковка)"
+        verbose_name_plural = "Строки чеков (упаковки)"
+        indexes = [models.Index(fields=["sale", "product"], name="possync_packline_sale_prod")]
