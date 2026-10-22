@@ -335,47 +335,46 @@ def _build_physical_receipt_text(sale, *, payment_method=None, cash_received=Non
     elif payment_label:
         lines.append(f"Оплата: {payment_label}")
 
-    lines.append("-" * 32)
-    lines.append("Спасибо за покупку")
-
-    # eKassa (если фискализация уже выполнена и данные сохранены в Sale.ekassa_fiscal)
+    # eKassa: если чек фискализирован, печатаем готовый чек ГНС от eKassa (все обязательные реквизиты:
+    # приход, СНО, НДС/НсП, наличные/безналичные, РН ККМ, ФМ, ФД, ФПД) вместо нашей копии позиций.
     try:
         meta = getattr(sale, "ekassa_fiscal", None) or {}
     except Exception:
         meta = {}
-    if isinstance(meta, dict) and meta:
+    if not isinstance(meta, dict):
+        meta = {}
+    fiscal_txt = (meta.get("receipt_txt") or "").rstrip() if meta.get("status") == "ok" else ""
+    if fiscal_txt:
+        lines = fiscal_txt.split("\n")
+        lines.append(f"Чек NurCRM № {getattr(sale, 'doc_no', None) or sale.id}")
+        for extra in (
+            ("Консультант", _user_display_name(getattr(sale, "consultant", None)) if getattr(sale, "consultant", None) else ""),
+            ("Клиент", client_name if getattr(sale, "client", None) else ""),
+        ):
+            if extra[1]:
+                lines.append(f"{extra[0]}: {extra[1]}")
+    elif meta.get("status") == "ok":
+        # Старые продажи без готового текста: реквизиты по отдельности.
+        fd_number = meta.get("fd_number") if meta.get("fd_number") is not None else (meta.get("fields") or {}).get("1040")
         lines.append("-" * 32)
-        lines.append("eKassa")
-        status = meta.get("status")
-        if status is not None:
-            lines.append(f"status: {status}")
-        # Явные реквизиты (как в «Дубликат»)
-        kkm_reg = meta.get("kkm_reg_number")
-        fm_number = meta.get("fm_number")
-        fd_number = meta.get("fd_number") if meta.get("fd_number") is not None else meta.get("fields", {}).get("1040")
-        fpd = meta.get("fpd")
-        if kkm_reg:
-            lines.append(f"РН ККМ\t{kkm_reg}")
-        if fm_number:
-            lines.append(f"ФМ\t{fm_number}")
-        if fd_number is not None:
-            lines.append(f"ФД\t{fd_number}")
-        if fpd:
-            lines.append(f"ФПД\t{fpd}")
-        if meta.get("ekassa_receipt_id") is not None:
-            lines.append(f"receipt_id: {meta.get('ekassa_receipt_id')}")
-        # Данные для QR (ссылка из ответа eKassa)
-        link = meta.get("link")
-        if link:
-            lines.append(f"QR\t{link}")
-        fields = meta.get("fields")
-        if isinstance(fields, dict) and fields:
-            lines.append("fields:")
-            for k in sorted(fields.keys(), key=lambda x: str(x)):
-                v = fields.get(k)
-                if v is None or v == "":
-                    continue
-                lines.append(f"  {k}: {v}")
+        for label, val in (
+            ("РН ККМ", meta.get("kkm_reg_number")),
+            ("ФМ", meta.get("fm_number")),
+            ("ФД", fd_number),
+            ("ФПД", meta.get("fpd")),
+        ):
+            if val not in (None, ""):
+                lines.append(f"{label}\t{val}")
+    elif meta.get("status") in ("error", "pending"):
+        lines.append("-" * 32)
+        lines.append("Фискальный чек не получен")
+
+    # Данные для QR (ссылка проверки чека на сайте ГНС)
+    link = meta.get("link") if meta.get("status") == "ok" else None
+    if link:
+        lines.append(f"QR\t{link}")
+    lines.append("-" * 32)
+    lines.append("Спасибо за покупку")
     return "\n".join(lines)
 
 

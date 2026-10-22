@@ -144,6 +144,9 @@ def try_fiscalize_pos_sale(sale_id) -> None:
         "operation": "INCOME",
         "cash": cash_amount >= Decimal(str(sale.total or 0)) and sale.noncash_payment_amount() <= 0,
         "goods": goods,
+        # Готовый фискальный чек от eKassa (все реквизиты ГНС), 32 символа в строке — под ленту 58/80 мм.
+        "txt": True,
+        "length": 32,
     }
 
     # В goods цена строки уже нетто (line_total / qty), т.е. построчные скидки в неё зашиты.
@@ -230,6 +233,7 @@ def try_fiscalize_pos_sale(sale_id) -> None:
             "fm_number": fm_number,
             "fpd": fpd,
             "link": link,
+            "receipt_txt": data.get("txt") or None,
             "message": resp.get("message"),
         },
     )
