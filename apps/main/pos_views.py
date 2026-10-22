@@ -1,3 +1,4 @@
+from apps.users.pin import pin_guard
 from apps.integrations.idempotency import idempotent
 from rest_framework import generics, status, permissions, filters
 from rest_framework.views import APIView
@@ -4055,6 +4056,7 @@ def _execute_sale_return(
     return debt_adj
 
 
+@pin_guard("POST")
 class SaleReturnAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, APIView):
     """
     Возврат продажи (владелец и кассир).
@@ -4550,6 +4552,13 @@ class SaleListAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, gene
         return self.paginator.get_paginated_response(serializer.data, total_amount=total_amount)
 
 
+def _audit_sale_deleted(request, infos):
+    from apps.construction.audit import log_request
+
+    for company, pk, before in infos[:500]:
+        log_request(request, "delete", "sale", pk, f"Чек {pk[:8]}", before=before, company=company)
+
+
 class SaleRetrieveAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
     lookup_field = "id"
@@ -4604,7 +4613,12 @@ class SaleRetrieveAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, 
             active = get_object_or_404(_cart_queryset_for_response(), id=active.id, company=company)
             return _pos_multi_cart_response(request, active)
 
-        return super().destroy(request, *args, **kwargs)
+        # журнал (ТЗ п.8): удаление чека
+        _sale = self.get_object()
+        _info = (_sale.company, str(_sale.pk), {"total": str(_sale.total), "status": str(_sale.status)})
+        response = super().destroy(request, *args, **kwargs)
+        _audit_sale_deleted(request, [_info])
+        return response
 
 
 class SaleBulkDeleteAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, APIView):
@@ -4656,7 +4670,9 @@ class SaleBulkDeleteAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin
         found_ids = set(str(sid) for sid in base_qs.values_list("id", flat=True))
         not_found_ids = [str(x) for x in valid_ids if str(x) not in found_ids]
 
+        _infos = [(x.company, str(x.pk), {"total": str(x.total), "status": str(x.status)}) for x in deletable_qs.select_related("company")]
         deleted_count, _ = deletable_qs.delete()
+        _audit_sale_deleted(request, _infos)
 
         return Response(
             {

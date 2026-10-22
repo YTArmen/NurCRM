@@ -20,6 +20,7 @@ from rest_framework.pagination import PageNumberPagination
 
 from apps.construction.models import Cashbox, CashFlow, CashFlowCategory, CashShift
 from apps.users.permissions import read_only_guard
+from apps.users.pin import pin_guard
 
 from apps.main.notifications_market import notify_shift_closed, notify_shift_opened
 from apps.ekassa.runtime import schedule_after_commit
@@ -949,6 +950,7 @@ class CashFlowEditRequestView(CompanyBranchScopedMixin, APIView):
 
 
 @read_only_guard("can_edit_cashbox")
+@pin_guard("POST")
 class CashFlowCancelRequestView(CompanyBranchScopedMixin, APIView):
     permission_classes = [permissions.IsAuthenticated]
 

@@ -21,6 +21,9 @@ from rest_framework.views import APIView
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
 from apps.main.models import ProductDeletion
+from apps.construction.trash import TrashDestroyMixin
+from apps.users.pin import pin_guard
+from apps.construction import audit as admin_audit
 from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
 from django.shortcuts import get_object_or_404
@@ -2209,7 +2212,9 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
 
 
 @read_only_guard("can_edit_products")
-class ProductRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+@pin_guard("DELETE")
+class ProductRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+    trash_type = "product"
     serializer_class = ProductSerializer
 
     queryset = (
@@ -2255,8 +2260,20 @@ class ProductRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics
             )
 
 
-    @transaction.atomic
     def update(self, request, *args, **kwargs):
+        # журнал (ТЗ п.8): цена/наценка и ручной остаток — было → стало
+        before = admin_audit.product_values(kwargs.get(self.lookup_url_kwarg or self.lookup_field))
+        response = self._update_impl(request, *args, **kwargs)
+        if before is not None and 200 <= response.status_code < 300:
+            try:
+                p = Product.objects.select_related("company").get(pk=kwargs.get(self.lookup_url_kwarg or self.lookup_field))
+                admin_audit.log_product_change(request, p, before)
+            except Exception:
+                pass
+        return response
+
+    @transaction.atomic
+    def _update_impl(self, request, *args, **kwargs):
         partial = kwargs.pop("partial", False)
         instance = self.get_object()
         data = request.data
@@ -2655,6 +2672,7 @@ class ProductBulkUpdateAPIView(CompanyBranchRestrictedMixin, APIView):
 
 
 @read_only_guard("can_edit_products")
+@pin_guard()
 class ProductBulkDeleteAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     DELETE /api/main/products/bulk-delete/
@@ -2674,13 +2692,20 @@ class ProductBulkDeleteAPIView(CompanyBranchRestrictedMixin, APIView):
 
         results = {"deleted": [], "protected": [], "not_found": not_found}
 
+        from apps.construction import trash as _trash
+
         def _delete_one(p: Product):
             try:
-                if soft and hasattr(p, "is_active"):
-                    p.is_active = False
-                    p.save(update_fields=["is_active"])
-                else:
-                    p.delete()
+                pname, ppk = p.name, p.pk
+                with transaction.atomic():
+                    entry = _trash.record(request, "product", p)
+                    if soft and hasattr(p, "is_active"):
+                        p.is_active = False
+                        p.save(update_fields=["is_active"])
+                    else:
+                        p.delete()
+                    _trash.finalize(entry, "product", p)
+                admin_audit.log_request(request, "delete", "product", ppk, pname, company=p.company)
                 results["deleted"].append(str(p.id))
             except ProtectedError:
                 results["protected"].append(str(p.id))
@@ -3059,7 +3084,8 @@ class ProductCategoryListCreateAPIView(CompanyBranchRestrictedMixin, generics.Li
 
 
 @read_only_guard("can_edit_products")
-class ProductCategoryRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+class ProductCategoryRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+    trash_type = "category"
     serializer_class = ProductCategorySerializer
     queryset = ProductCategory.objects.select_related("company", "branch", "parent").all()
 
@@ -3098,7 +3124,8 @@ class ProductBrandListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListC
 
 
 @read_only_guard("can_edit_products")
-class ProductBrandRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+class ProductBrandRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+    trash_type = "brand"
     serializer_class = ProductBrandSerializer
     queryset = ProductBrand.objects.select_related("company", "branch").all()
 
@@ -3285,7 +3312,8 @@ class ClientListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateA
 
 
 @read_only_guard("can_edit_clients")
-class ClientRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+class ClientRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+    trash_type = "client"
     """
     GET    /api/main/clients/<uuid:pk>/
     PATCH  /api/main/clients/<uuid:pk>/
