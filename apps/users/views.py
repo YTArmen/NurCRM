@@ -596,6 +596,12 @@ class CompanyUpdateAPIView(generics.RetrieveUpdateAPIView):
     serializer_class = CompanyUpdateSerializer
     queryset = Company.objects.none()
 
+    def get_permissions(self):
+        # ТЗ 12.18: читать могут все сотрудники, менять данные компании - только владелец.
+        if self.request.method in ("GET", "HEAD", "OPTIONS"):
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsCompanyOwner()]
+
     def get_object(self):
         company = _get_company(self.request.user)
         if not company:

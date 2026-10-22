@@ -211,3 +211,24 @@ class SupplierWithoutPhoneTests(KassaBase):
         r = self.api.post("/api/main/clients/", {"full_name": "Покупатель"}, format="json")
         self.assertEqual(r.status_code, 400, r.data)
         self.assertIn("phone", r.data)
+
+
+class CompanySettingsOwnerOnlyTests(KassaBase):
+    """12.18: PATCH users/settings/company/ только владелец."""
+
+    URL = "/api/users/settings/company/"
+
+    def test_owner_ok_cashier_403(self):
+        r = self.api.patch(self.URL, {"name": "Новое имя"}, format="json")
+        self.assertEqual(r.status_code, 200, getattr(r, "data", None))
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.name, "Новое имя")
+
+        from rest_framework.test import APIClient
+        other = APIClient()
+        other.force_authenticate(self.cashier)
+        self.assertEqual(other.get(self.URL).status_code, 200)
+        r = other.patch(self.URL, {"name": "Взлом"}, format="json")
+        self.assertEqual(r.status_code, 403, getattr(r, "data", None))
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.name, "Новое имя")
