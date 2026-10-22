@@ -4244,12 +4244,12 @@ class BidRetrieveUpdateDestroyAPIView(generics.RetrieveUpdateDestroyAPIView):
 
 class SocialApplicationsListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     serializer_class = SocialApplicationsSerializers
-    queryset = SocialApplications.objects.select_related("company", "branch", "client").all()
+    queryset = SocialApplications.objects.all()
 
 
 class SocialApplicationsRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = SocialApplicationsSerializers
-    queryset = SocialApplications.objects.select_related("company", "branch", "client").all()
+    queryset = SocialApplications.objects.all()
 
 
 # ===========================

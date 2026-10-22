@@ -232,3 +232,19 @@ class CompanySettingsOwnerOnlyTests(KassaBase):
         self.assertEqual(r.status_code, 403, getattr(r, "data", None))
         self.company.refresh_from_db()
         self.assertEqual(self.company.name, "Новое имя")
+
+
+class SocialApplicationsTests(KassaBase):
+    """12.19: GET main/socialapplications/ не падает с 500."""
+
+    def test_list_and_create(self):
+        r = self.api.get("/api/main/socialapplications/")
+        self.assertEqual(r.status_code, 200, getattr(r, "data", None))
+        r = self.api.post("/api/main/socialapplications/", {"company": self.company.name, "text": "Подключите Instagram"}, format="json")
+        self.assertEqual(r.status_code, 201, getattr(r, "data", None))
+        r = self.api.get("/api/main/socialapplications/")
+        self.assertEqual(r.status_code, 200)
+        rows = r.data["results"] if isinstance(r.data, dict) else r.data
+        self.assertEqual(len(rows), 1)
+        pk = rows[0]["id"]
+        self.assertEqual(self.api.get(f"/api/main/socialapplications/{pk}/").status_code, 200)
