@@ -735,7 +735,7 @@ def _aware(dt_or_date, end=False):
     if isinstance(dt_or_date, datetime):
         return dt_or_date if is_aware(dt_or_date) else make_aware(dt_or_date, tz)
     if isinstance(dt_or_date, date):
-        t = dtime(23, 59, 59) if end else dtime(0, 0, 0)
+        t = dtime(23, 59, 59, 999999) if end else dtime(0, 0, 0)
         return make_aware(datetime.combine(dt_or_date, t), tz)
     return None
 
@@ -748,12 +748,15 @@ def _parse_range_dt(v: str, *, end: bool) -> Optional[datetime]:
     """
     if not v:
         return None
+    v = v.strip()
+    # Голая дата YYYY-MM-DD: на Python 3.11+ parse_datetime() принимает её как 00:00,
+    # поэтому дату разбираем первой (конец диапазона = конец дня).
+    d = parse_date(v) if "T" not in v and " " not in v else None
+    if d:
+        return _aware(d, end=end)
     dt = parse_datetime(v)
     if dt:
         return _aware(dt, end=end)
-    d = parse_date(v)
-    if d:
-        return _aware(d, end=end)
     return None
 
 
