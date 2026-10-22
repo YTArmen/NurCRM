@@ -4,6 +4,7 @@
 """
 from decimal import Decimal
 
+from apps.construction.models import CashShift
 from apps.main.models import Client, ClientDeal, Sale
 from apps.users.models import CompanyAppSettings
 
@@ -200,3 +201,52 @@ class PackSaleTests(SalesBase):
         self.assertEqual(r.data["total"], "230.00")
         self.product.refresh_from_db()
         self.assertEqual(self.product.quantity, Decimal("75.000"))
+
+
+class DateFilterTests(SalesBase):
+    def make_sale_at(self, local_dt_str):
+        from datetime import datetime, timedelta, timezone as tz
+
+        if not CashShift.objects.filter(company=self.company).exists():
+            self.open_shift()
+        r = self.checkout(f"dt-{local_dt_str}")
+        self.assertEqual(r.status_code, 201, r.data)
+        dt = datetime.fromisoformat(local_dt_str).replace(tzinfo=tz(timedelta(hours=6)))
+        Sale.objects.filter(pk=r.data["id"]).update(created_at=dt)
+        return r.data["id"]
+
+    def test_sales_date_range_inclusive_bishkek(self):
+        a = self.make_sale_at("2026-10-18T00:30:00")
+        b = self.make_sale_at("2026-10-18T23:59:00")
+        self.make_sale_at("2026-10-19T00:05:00")
+        self.make_sale_at("2026-10-17T23:50:00")
+        r = self.api.get("/api/main/pos/sales/?date_from=2026-10-18&date_to=2026-10-18")
+        self.assertEqual(r.status_code, 200, r.data)
+        ids = {x["id"] for x in r.data["results"]}
+        self.assertEqual(ids, {a, b})
+        self.assertEqual(r.data["count"], 2)
+        r = self.api.get("/api/main/pos/sales/?date_from=2026-10-18&date_to=2026-10-19")
+        self.assertEqual(r.data["count"], 3)
+        r = self.api.get("/api/main/pos/sales/?date_to=2026-10-17")
+        self.assertEqual(r.data["count"], 1)
+
+    def test_sales_bad_date_is_400(self):
+        r = self.api.get("/api/main/pos/sales/?date_from=вчера")
+        self.assertEqual(r.status_code, 400)
+
+    def test_cashflows_date_range(self):
+        from datetime import datetime, timedelta, timezone as tz
+        from apps.construction.models import CashFlow
+
+        self.open_shift()
+        self.assertEqual(self.checkout("cf-1").status_code, 201)
+        flow = CashFlow.objects.filter(company=self.company).first()
+        self.assertIsNotNone(flow)
+        CashFlow.objects.filter(pk=flow.pk).update(
+            created_at=datetime(2026, 10, 18, 0, 30, tzinfo=tz(timedelta(hours=6)))
+        )
+        r = self.api.get("/api/construction/cashflows/?date_from=2026-10-18&date_to=2026-10-18")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["count"], 1)
+        r = self.api.get("/api/construction/cashflows/?date_from=2026-10-19&date_to=2026-10-19")
+        self.assertEqual(r.data["count"], 0)
