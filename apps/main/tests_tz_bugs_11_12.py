@@ -73,3 +73,22 @@ class CheckoutAliasTests(KassaBase):
         r = self.quick(payment={"method": "cash", "cash_received": "500.00"})
         self.assertEqual(r.status_code, 201, r.data)
         self.assertEqual(r.data["change"], "300.00")
+
+
+class ProductPatchCharacteristicsTests(KassaBase):
+    """11.6: PATCH products/{id}/ принимает characteristics."""
+
+    def test_patch_characteristics(self):
+        url = f"/api/main/products/{self.product.id}/"
+        r = self.api.patch(url, {"characteristics": {"height_cm": "12.5", "description": "Круглый"}}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["characteristics"]["height_cm"], "12.50")
+        r = self.api.patch(url, {"characteristics": {"width_cm": "7"}}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        ch = self.product.characteristics
+        ch.refresh_from_db()
+        self.assertEqual((ch.height_cm, ch.width_cm, ch.description), (Decimal("12.50"), Decimal("7.00"), "Круглый"))
+
+    def test_bad_value_is_400(self):
+        r = self.api.patch(f"/api/main/products/{self.product.id}/", {"characteristics": {"height_cm": "abc"}}, format="json")
+        self.assertEqual(r.status_code, 400, r.data)

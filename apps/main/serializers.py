@@ -1812,6 +1812,22 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
         promotion_raw = validated_data.pop("promotion_rules_input", None) if promotion_in else None
         alt_in = "alternate_barcodes" in getattr(self, "initial_data", {})
         alternate_raw = validated_data.pop("alternate_barcodes", None) if alt_in else None
+        # ТЗ 11.6: characteristics (read-only в схеме) принимаем из тела PATCH, как в create-manual.
+        chars_raw = getattr(self, "initial_data", {}).get("characteristics") if hasattr(getattr(self, "initial_data", None), "get") else None
+        if isinstance(chars_raw, dict):
+            chars_ser = ProductCharacteristicsSerializer(
+                instance=getattr(instance, "characteristics", None), data=chars_raw, partial=True
+            )
+            chars_ser.is_valid(raise_exception=True)
+            chars_obj, _ = ProductCharacteristics.objects.update_or_create(
+                product=instance,
+                defaults={
+                    "company": instance.company,
+                    "branch": instance.branch,
+                    **chars_ser.validated_data,
+                },
+            )
+            instance.characteristics = chars_obj  # сбросить кэш, чтобы ответ показал новые значения
         if promotion_in and promotion_raw:
             try:
                 pr_rows = parse_product_promotion_tiers_payload(promotion_raw)
