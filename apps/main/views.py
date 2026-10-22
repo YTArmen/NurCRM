@@ -1695,8 +1695,7 @@ class MarketSaleEmployeePayProfileListCreateAPIView(CompanyBranchRestrictedMixin
         branch = self._auto_branch()
         if branch is not None:
             qs = qs.filter(Q(branch=branch) | Q(branch__isnull=True))
-        else:
-            qs = qs.filter(branch__isnull=True)
+        # без активного филиала — все схемы компании (у каждой теперь виден branch)
         return qs.select_related("user", "branch").order_by("user_id", "-branch_id")
 
     def perform_create(self, serializer):
@@ -1716,8 +1715,7 @@ class MarketSaleEmployeePayProfileRetrieveUpdateDestroyAPIView(CompanyBranchRest
         branch = self._auto_branch()
         if branch is not None:
             qs = qs.filter(Q(branch=branch) | Q(branch__isnull=True))
-        else:
-            qs = qs.filter(branch__isnull=True)
+        # без активного филиала — все схемы компании (у каждой теперь виден branch)
         return qs.select_related("user", "branch")
 
 

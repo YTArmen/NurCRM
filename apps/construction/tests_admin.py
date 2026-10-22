@@ -5,6 +5,7 @@ from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 
 from apps.construction.tests_buhgalter import BuhBase
+from apps.users.models import Company
 
 User = get_user_model()
 
@@ -65,3 +66,34 @@ class CashboxBranchTests(BuhBase):
         self.assertEqual(str(by_name["Моя касса фил"]["branch"]), str(br.id))
         self.assertIn("branch", by_name["Касса"])
         self.assertIsNone(by_name["Касса"]["branch"])
+
+
+class PayProfileBranchTests(BuhBase):
+    def test_branch_writable_and_returned(self):
+        from apps.users.models import Branch
+
+        br = Branch.objects.create(company=self.company, name="Ф1")
+        o2 = User.objects.create_user(email="z@t.com", password="p", role="owner")
+        c2 = Company.objects.create(name="Чужая", owner=o2)
+        other = Branch.objects.create(company=c2, name="Ф2")
+        self.client.force_authenticate(self.owner)
+        url = "/api/main/market-sale-employee-pay-profiles/"
+        r = self.client.post(url, {"user": str(self.acc.id), "pay_scheme": "percent", "sales_percent": "5", "branch": str(br.id)}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(str(r.data["branch"]), str(br.id))
+        pid = r.data["id"]
+        # глобальная схема того же сотрудника
+        r2 = self.client.post(url, {"user": str(self.acc.id), "pay_scheme": "percent", "sales_percent": "3", "branch": None}, format="json")
+        self.assertEqual(r2.status_code, 201, r2.data)
+        self.assertIsNone(r2.data["branch"])
+        # PATCH без branch ветку не трогает
+        r3 = self.client.patch(f"{url}{pid}/", {"sales_percent": "7"}, format="json")
+        self.assertEqual(r3.status_code, 200, r3.data)
+        self.assertEqual(str(r3.data["branch"]), str(br.id))
+        # список без активного филиала отдаёт обе
+        r4 = self.client.get(url)
+        rows = r4.data["results"] if isinstance(r4.data, dict) else r4.data
+        self.assertEqual(len(rows), 2)
+        # чужой филиал нельзя
+        r5 = self.client.patch(f"{url}{pid}/", {"branch": str(other.id)}, format="json")
+        self.assertEqual(r5.status_code, 400)
