@@ -160,8 +160,16 @@ def get_company_limits(company, plan_code: Optional[str] = None) -> Dict[str, An
     except Exception:
         pass
 
+    # ТЗ 12.22: лимит филиалов. Поля «максимум филиалов» в тарифе нет, поэтому max=None
+    # (без ограничения); как только лимит появится в данных тарифа - подставить сюда.
+    try:
+        br_used = company.branches.count()
+    except Exception:
+        br_used = 0
+
     return {
         "employees": {"used": emp_used, "max": emp_max},
+        "branches": {"used": br_used, "max": None},
         "warehouses": {"used": wh_used, "max": None},
         "products": {"used": prod_used, "max": None},
     }

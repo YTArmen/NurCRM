@@ -261,3 +261,14 @@ class NotificationUnreadCountTests(KassaBase):
         r = self.api.get("/api/main/notifications/unread-count/")
         self.assertEqual(r.status_code, 200, getattr(r, "data", None))
         self.assertEqual(r.data, {"count": 2})
+
+
+class SubscriptionBranchesLimitTests(KassaBase):
+    """12.22: limits.branches в данных подписки."""
+
+    def test_limits_branches(self):
+        from apps.users.models import Branch
+        from apps.users.services_subscription import get_company_limits
+        Branch.objects.create(company=self.company, name="Филиал 1")
+        Branch.objects.create(company=self.company, name="Филиал 2")
+        self.assertEqual(get_company_limits(self.company)["branches"], {"used": 2, "max": None})
