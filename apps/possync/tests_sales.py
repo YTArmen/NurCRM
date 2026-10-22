@@ -95,11 +95,20 @@ class DebtLimitTests(SalesBase):
         ClientDebtLimit.objects.create(client=c, company=self.company, limit=Decimal("1"))
         self.assertEqual(self.checkout("c1", client=str(c.id)).status_code, 201)
 
+    def as_cashier(self):
+        cashier = type(self.owner).objects.create_user(email="kass@t.kg", password="x", role="cashier")
+        cashier.company = self.company
+        cashier.save()
+        CashShift.objects.create(company=self.company, cashbox=self.cashbox, cashier=cashier,
+                                 status=CashShift.Status.OPEN, opening_cash=Decimal("0"))
+        self.api.force_authenticate(cashier)
+        return cashier
+
     def test_cashier_limit_from_debt_access(self):
-        self.open_shift()
+        cashier = self.as_cashier()
         CompanyAppSettings.objects.create(
             company=self.company, app="nurmarket-mobile",
-            settings={"DebtAccess": [{"user": str(self.owner.id), "mode": "limit", "max_receipts": 1, "max_sum": 1000}]},
+            settings={"DebtAccess": [{"user": str(cashier.id), "mode": "limit", "max_receipts": 1, "max_sum": 1000}]},
         )
         c1, c2 = self.new_client("А"), self.new_client("Б")
         self.assertEqual(self.debt_sale("k1", c1, "300.00").status_code, 201)
@@ -110,10 +119,10 @@ class DebtLimitTests(SalesBase):
         self.assertEqual(r.data["current"], 1)
 
     def test_cashier_sum_limit_and_deny(self):
-        self.open_shift()
+        cashier = self.as_cashier()
         row = CompanyAppSettings.objects.create(
             company=self.company, app="nurmarket-mobile",
-            settings={"DebtAccess": [{"user": str(self.owner.id), "mode": "limit", "max_sum": 400}]},
+            settings={"DebtAccess": [{"user": str(cashier.id), "mode": "limit", "max_sum": 400}]},
         )
         c = self.new_client()
         self.assertEqual(self.debt_sale("s1", c, "300.00").status_code, 201)
@@ -121,11 +130,39 @@ class DebtLimitTests(SalesBase):
         self.assertEqual(r.status_code, 400, r.data)
         self.assertEqual(r.data["limit"], 400)
         self.assertEqual(r.data["current"], 300)
-        row.settings = {"DebtAccess": [{"user": str(self.owner.id), "mode": "deny"}]}
+        row.settings = {"DebtAccess": [{"user": str(cashier.id), "mode": "deny"}]}
         row.save()
         r = self.debt_sale("s3", c, "100.00")
         self.assertEqual(r.status_code, 400, r.data)
         self.assertEqual(r.data["code"], "debt_forbidden")
+
+    def test_wildcard_rule_and_own_rule_priority(self):
+        cashier = self.as_cashier()
+        CompanyAppSettings.objects.create(
+            company=self.company, app="nurmarket-mobile",
+            settings={"DebtAccess": [{"user": "*", "mode": "deny"}]})
+        c = self.new_client()
+        r = self.debt_sale("w1", c, "100.00")
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertEqual(r.data["code"], "debt_forbidden")
+        # своё правило сильнее общего
+        CompanyAppSettings.objects.filter(company=self.company).update(
+            settings={"DebtAccess": [{"user": "*", "mode": "deny"},
+                                     {"user": str(cashier.id), "mode": "allow"}]})
+        self.assertEqual(self.debt_sale("w2", c, "100.00").status_code, 201)
+
+    def test_owner_exempt_from_cashier_rules_but_not_client_limit(self):
+        self.open_shift()
+        CompanyAppSettings.objects.create(
+            company=self.company, app="nurmarket-mobile",
+            settings={"DebtAccess": [{"user": "*", "mode": "deny"},
+                                     {"user": str(self.owner.id), "mode": "deny"}]})
+        c = self.new_client()
+        self.assertEqual(self.debt_sale("o1", c, "100.00").status_code, 201)
+        ClientDebtLimit.objects.create(client=c, company=self.company, limit=Decimal("150"))
+        r = self.debt_sale("o2", c, "100.00")
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertEqual(r.data["scope"], "client")
 
 
 class PackSaleTests(SalesBase):

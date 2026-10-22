@@ -74,15 +74,20 @@ def cashier_rule(company_id, branch_id, user_id) -> dict | None:
         val = (row.settings or {}).get("DebtAccess")
         if isinstance(val, list):
             access = val  # филиал перезаписывает компанию
+    common = None
     for item in access or []:
         if not isinstance(item, dict):
             continue
         u = item.get("user")
         if isinstance(u, dict):
             u = u.get("id")
-        if u is not None and str(u) == str(user_id):
-            return item
-    return None
+        if u is None:
+            continue
+        if str(u) == str(user_id):
+            return item  # своё правило сотрудника
+        if str(u) == "*" and common is None:
+            common = item  # общее правило для всех остальных
+    return common
 
 
 def _dec(v):
@@ -136,6 +141,10 @@ def check_debt_limits(request, sale, client, data) -> None:
     from django.contrib.auth import get_user_model
 
     get_user_model().objects.select_for_update().filter(pk=user.pk).first()
+    from apps.main.pos_serializers import _is_owner_like
+
+    if _is_owner_like(user):
+        return  # владелец и администратор — без лимитов кассира (лимит клиента выше уже проверен)
     rule = cashier_rule(sale.company_id, sale.branch_id, user.pk)
     if rule is None:
         return

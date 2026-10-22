@@ -23,7 +23,7 @@ python manage.py test apps.possync --settings=core.settings_test_sqlite
 
 ## 2. Лимит долга
 
-- Лимит кассира: `CompanyAppSettings(app="nurmarket-mobile").settings["DebtAccess"]` = `[{user, mode: allow|deny|limit, max_receipts, max_sum}]`. Настройки филиала перекрывают настройки компании. Если кассира нет в списке — без ограничений.
+- Лимит кассира: `CompanyAppSettings(app="nurmarket-mobile").settings["DebtAccess"]` = `[{user, mode: allow|deny|limit, max_receipts, max_sum}]`. Настройки филиала перекрывают настройки компании. Порядок: своё правило сотрудника, иначе общее `"user": "*"`, иначе без ограничений. Владелец и администратор (`_is_owner_like`: owner/admin/суперпользователь) от лимитов кассира освобождены; лимит КЛИЕНТА к ним применяется.
 - Лимит клиента: в `Client` поля нет и менять `main` нельзя → таблица `possync.ClientDebtLimit(client, limit)`.
 - Проверка вызывается внутри транзакции `pos/checkout/` после создания чека, под `select_for_update` по клиенту и по кассиру; свой чек в «текущем долге» не считается. Откат всей продажи при ошибке. Учитывается `debt_initial` чека (долг и долговая часть при предоплате).
 - Ошибка 400:
