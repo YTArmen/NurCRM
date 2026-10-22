@@ -54,3 +54,17 @@ class PayDebtSupplierTests(KassaBase):
         self._pay(self.client_obj)
         cf = CashFlow.objects.get(source_kind=CashFlow.SourceKind.DEBT_REPAYMENT)
         self.assertEqual(cf.type, CashFlow.Type.INCOME)
+
+
+class CheckoutAliasTests(KassaBase):
+    """11.5 quantity как qty; 12.9 cash_received как payment.received."""
+
+    def test_quantity_alias(self):
+        r = self.quick(items=[{"product": str(self.product.id), "quantity": "3", "price": "100.00"}])
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["total"], "300.00")
+
+    def test_missing_qty_is_400(self):
+        r = self.quick(items=[{"product": str(self.product.id), "price": "100.00"}])
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertEqual(Sale.objects.filter(company=self.company).count(), 0)

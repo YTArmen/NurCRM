@@ -78,6 +78,12 @@ class QuickCheckoutItemSerializer(serializers.Serializer):
     discount = MoneyField(required=False, allow_null=True, default=ZERO)
     is_wholesale = serializers.BooleanField(required=False, default=False)
 
+    # ТЗ 11.5: принимается псевдоним quantity.
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and data.get("qty") in (None, "") and data.get("quantity") not in (None, ""):
+            data = {**data, "qty": data["quantity"]}
+        return super().to_internal_value(data)
+
     def validate(self, attrs):
         if attrs["qty"] <= 0:
             raise serializers.ValidationError({"qty": "Количество должно быть больше нуля."})
@@ -93,6 +99,15 @@ class QuickCheckoutItemSerializer(serializers.Serializer):
         return attrs
 
 
+class CheckoutItemSerializer(QuickCheckoutItemSerializer):
+    """Строка чека POS checkout: qty/quantity обязательны (раньше молча ставилась 1 шт.)."""
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and all(data.get(k) in (None, "") for k in ("qty", "quantity")):
+            raise serializers.ValidationError({"qty": "Укажите количество (qty или quantity)."})
+        return super().to_internal_value(data)
+
+
 class QuickCheckoutPaymentSerializer(serializers.Serializer):
     method = serializers.ChoiceField(choices=Sale.PaymentMethod.choices, default=Sale.PaymentMethod.CASH)
     received = MoneyField(required=False, allow_null=True)
@@ -106,7 +121,7 @@ class QuickCheckoutPaymentSerializer(serializers.Serializer):
 class QuickCheckoutSerializer(serializers.Serializer):
     shift = serializers.UUIDField(required=False, allow_null=True)
     client = serializers.UUIDField(required=False, allow_null=True)
-    items = QuickCheckoutItemSerializer(many=True, allow_empty=False)
+    items = CheckoutItemSerializer(many=True, allow_empty=False)
     order_discount_total = MoneyField(required=False, allow_null=True)
     order_discount_percent = serializers.DecimalField(
         max_digits=5, decimal_places=2, required=False, allow_null=True, min_value=0, max_value=100
