@@ -136,3 +136,16 @@ class DealPatchTitleWithPaymentsTests(KassaBase):
         deal.refresh_from_db()
         self.assertEqual((deal.title, deal.note), ("Новое", "заметка"))
         self.assertEqual(list(deal.installments.order_by("number").values_list("id", "paid_amount")), before)
+
+
+class BulkDeleteMessageTests(KassaBase):
+    """12.10: понятный текст для кассира и машинный code."""
+
+    def test_paid_message(self):
+        s = Sale.objects.create(company=self.company, user=self.owner, cashbox=self.cashbox, status=Sale.Status.PAID)
+        r = self.api.post("/api/main/sales/bulk-delete/", {"ids": [str(s.id)]}, format="json")
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertEqual(r.data["code"], "paid_sales_need_confirmation")
+        self.assertNotIn("allow_paid", r.data["detail"])
+        self.assertIn("оплаченные", r.data["detail"])
+        self.assertTrue(Sale.objects.filter(pk=s.pk).exists())

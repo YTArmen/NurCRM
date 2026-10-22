@@ -4642,8 +4642,9 @@ class SaleBulkDeleteAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin
         if paid_ids and not allow_paid:
             return Response(
                 {
-                    "detail": "Среди переданных продаж есть оплаченные. "
-                              "Если хочешь удалить их тоже, передай allow_paid=true.",
+                    "code": "paid_sales_need_confirmation",
+                    "detail": "Среди выбранных чеков есть оплаченные. "
+                              "Удалить их можно только после подтверждения.",
                     "paid_ids": [str(x) for x in paid_ids],
                 },
                 status=400,
