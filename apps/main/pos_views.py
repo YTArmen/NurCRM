@@ -236,7 +236,7 @@ def _build_physical_receipt_text(sale, *, payment_method=None, cash_received=Non
         lines.append(vh["address"])
     lines.extend(
         [
-            f"Чек № {getattr(sale, 'doc_no', None) or sale.id}",
+            f"Чек № {getattr(sale, 'doc_number', None) or sale.id}",
             created_at.strftime("%d.%m.%Y %H:%M"),
         ]
     )
@@ -346,7 +346,7 @@ def _build_physical_receipt_text(sale, *, payment_method=None, cash_received=Non
     fiscal_txt = (meta.get("receipt_txt") or "").rstrip() if meta.get("status") == "ok" else ""
     if fiscal_txt:
         lines = fiscal_txt.split("\n")
-        lines.append(f"Чек NurCRM № {getattr(sale, 'doc_no', None) or sale.id}")
+        lines.append(f"Чек NurCRM № {getattr(sale, 'doc_number', None) or sale.id}")
         for extra in (
             ("Консультант", _user_display_name(getattr(sale, "consultant", None)) if getattr(sale, "consultant", None) else ""),
             ("Клиент", client_name if getattr(sale, "client", None) else ""),
