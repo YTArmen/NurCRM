@@ -48,6 +48,7 @@ from apps.integrations.idempotency import _request_key, idempotent
 
 from .debt_limits import check_debt_limits, client_debt_payload
 from .deletions import write_deletions
+from .schedule import apply_debt_schedule, schedule_payload
 from .packs import annotate_items, convert_pack_items, save_pack_lines
 from .models import ClientDebtLimit, StockAdjustment, StockAdjustmentLine
 
@@ -653,6 +654,8 @@ class PosQuickCheckoutGuardedAPIView(PosQuickCheckoutAPIView):
         save_pack_lines(sale, getattr(self, "_pack_info", []))
         # Удалённые строки корзины веб-кассы → CartItemDeletionLog
         write_deletions(company=sale.company, branch=sale.branch, user=request.user, items=data.get("deleted_items") or [])
+        # График долга: создаётся вместе со сделкой, а не вторым PATCH
+        apply_debt_schedule(sale, data)
         # Лимиты долга: клиент и кассир (внутри транзакции продажи, под блокировкой)
         check_debt_limits(request, sale, client, data)
 
@@ -676,6 +679,8 @@ class PosQuickCheckoutGuardedAPIView(PosQuickCheckoutAPIView):
                         {"variant_id": str(vid), "quantity": _d3(q)}
                         for vid, q in ProductVariant.objects.filter(id__in=variant_ids).values_list("id", "quantity")
                     ]
+            if sale.debt_initial and sale.debt_initial > 0:
+                data.update(schedule_payload(sale))
             company = _company(request)
             data["catalog_version"] = catalog_version(Product.objects.filter(company=company).exclude(status=Product.Status.ARCHIVED))["version"]
             data["server_time"] = timezone.now().isoformat(timespec="milliseconds")

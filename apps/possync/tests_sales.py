@@ -360,3 +360,55 @@ class DeletedItemsTests(SalesBase):
         self.assertEqual(r.data["created"], 1)
         r = self.api.post("/api/main/pos/cart-item-deletions/", {"items": []}, format="json")
         self.assertEqual(r.status_code, 400)
+
+
+class DebtScheduleTests(SalesBase):
+    def test_custom_installments_in_checkout(self):
+        self.open_shift()
+        c = self.new_client()
+        r = self.debt_sale("sch-1", c, "900.00", debt_schedule=[
+            {"due_date": "2026-11-01", "amount": "300.00"},
+            {"due_date": "2026-12-01", "amount": "300.00"},
+            {"due_date": "2027-01-01", "amount": "300.00"},
+        ], schedule_version="v2")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual([x["due_date"] for x in r.data["debt_schedule"]], ["2026-11-01", "2026-12-01", "2027-01-01"])
+        deal = ClientDeal.objects.get(sale_id=r.data["id"])
+        self.assertEqual(deal.installments.count(), 3)
+        self.assertEqual(r.data["deal_id"], str(deal.id))
+
+    def test_params_schedule(self):
+        self.open_shift()
+        c = self.new_client()
+        r = self.debt_sale("sch-2", c, "600.00", debt_schedule={
+            "debt_months": 3, "interval_months": 1, "first_due_date": "2026-11-15"})
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual([x["amount"] for x in r.data["debt_schedule"]], ["200.00"] * 3)
+        self.assertEqual(r.data["debt_schedule"][1]["due_date"], "2026-12-15")
+
+    def test_sum_mismatch_rolls_back(self):
+        self.open_shift()
+        c = self.new_client()
+        r = self.debt_sale("sch-3", c, "900.00", debt_schedule=[{"due_date": "2026-11-01", "amount": "100.00"}])
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertEqual(r.data["code"], "invalid_debt_schedule")
+        self.assertEqual(Sale.objects.filter(company=self.company).count(), 0)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.quantity, Decimal("50.000"))
+
+    def test_default_without_schedule_is_30_days(self):
+        self.open_shift()
+        c = self.new_client()
+        r = self.debt_sale("sch-4", c, "300.00")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(len(r.data["debt_schedule"]), 1)
+
+    def test_schedule_with_prepayment(self):
+        self.open_shift()
+        c = self.new_client()
+        r = self.checkout("sch-5", items=[{"product": str(self.product.id), "qty": "5", "price": "100.00"}],
+                          payment={"method": "debt", "cash_amount": "200.00"}, client=str(c.id),
+                          debt_schedule=[{"due_date": "2026-11-01", "amount": "100.00"},
+                                         {"due_date": "2026-12-01", "amount": "200.00"}])
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(len(r.data["debt_schedule"]), 2)
