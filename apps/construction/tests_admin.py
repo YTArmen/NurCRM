@@ -48,3 +48,20 @@ class EditProductsRightTests(BuhBase):
         other.refresh_from_db()
         self.assertIs(self.acc.can_edit_products, True)
         self.assertIsNone(other.can_edit_products)
+
+
+class CashboxBranchTests(BuhBase):
+    def test_cashboxes_return_branch(self):
+        from apps.construction.models import Cashbox
+        from apps.users.models import Branch
+
+        br = Branch.objects.create(company=self.company, name="Фил")
+        bx = Cashbox.objects.create(name="Моя касса фил", company=self.company, branch=br, role=Cashbox.CashboxRole.POS_BRANCH)
+        self.client.force_authenticate(self.owner)
+        r = self.client.get("/api/construction/cashboxes/")
+        self.assertEqual(r.status_code, 200)
+        rows = r.data["results"] if isinstance(r.data, dict) else r.data
+        by_name = {x["name"]: x for x in rows}
+        self.assertEqual(str(by_name["Моя касса фил"]["branch"]), str(br.id))
+        self.assertIn("branch", by_name["Касса"])
+        self.assertIsNone(by_name["Касса"]["branch"])
