@@ -149,3 +149,18 @@ class BulkDeleteMessageTests(KassaBase):
         self.assertNotIn("allow_paid", r.data["detail"])
         self.assertIn("оплаченные", r.data["detail"])
         self.assertTrue(Sale.objects.filter(pk=s.pk).exists())
+
+
+class SalePaymentFilterTests(KassaBase):
+    """12.11: payment_method=transfer включает банки."""
+
+    def test_transfer_matches_banks(self):
+        ids = {}
+        for pm in ("cash", "transfer", "mbank", "optima", "obank", "bakai", "debt", "mixed"):
+            ids[pm] = str(Sale.objects.create(
+                company=self.company, user=self.owner, cashbox=self.cashbox, status=Sale.Status.PAID, payment_method=pm
+            ).id)
+        r = self.api.get("/api/main/pos/sales/", {"payment_method": "transfer"})
+        self.assertEqual({x["id"] for x in r.data["results"]}, {ids[k] for k in ("transfer", "mbank", "optima", "obank", "bakai")})
+        r = self.api.get("/api/main/pos/sales/", {"payment_method": "cash"})
+        self.assertEqual({x["id"] for x in r.data["results"]}, {ids["cash"]})

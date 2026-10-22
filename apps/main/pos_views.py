@@ -730,6 +730,16 @@ def _reprice_cart_items_for_mode(cart: Cart) -> None:
         cart.recalc()
 
 
+# ТЗ 12.11: все безналичные способы оплаты, попадающие под фильтр payment_method=transfer.
+SALE_TRANSFER_METHODS = (
+    Sale.PaymentMethod.TRANSFER,
+    Sale.PaymentMethod.MBANK,
+    Sale.PaymentMethod.OPTIMA,
+    Sale.PaymentMethod.OBANK,
+    Sale.PaymentMethod.BAKAI,
+)
+
+
 def _aware(dt_or_date, end=False):
     tz = get_current_timezone()
     if isinstance(dt_or_date, datetime):
@@ -4510,7 +4520,11 @@ class SaleListAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, gene
         # Аналитический фильтр (страница /crm/market/analytics → «Транзакции»)
         payment_method = (self.request.query_params.get("payment_method") or "").strip()
         if payment_method:
-            qs = qs.filter(payment_method=payment_method)
+            if payment_method == Sale.PaymentMethod.TRANSFER:
+                # ТЗ 12.11: безнал разных банков тоже считается переводом.
+                qs = qs.filter(payment_method__in=SALE_TRANSFER_METHODS)
+            else:
+                qs = qs.filter(payment_method=payment_method)
 
         cashbox_param = (self.request.query_params.get("cashbox") or "").strip()
         if cashbox_param:
