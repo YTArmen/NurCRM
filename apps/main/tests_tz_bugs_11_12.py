@@ -68,3 +68,8 @@ class CheckoutAliasTests(KassaBase):
         r = self.quick(items=[{"product": str(self.product.id), "price": "100.00"}])
         self.assertEqual(r.status_code, 400, r.data)
         self.assertEqual(Sale.objects.filter(company=self.company).count(), 0)
+
+    def test_cash_received_alias(self):
+        r = self.quick(payment={"method": "cash", "cash_received": "500.00"})
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["change"], "300.00")

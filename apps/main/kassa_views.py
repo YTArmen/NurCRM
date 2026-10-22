@@ -117,6 +117,12 @@ class QuickCheckoutPaymentSerializer(serializers.Serializer):
     prepayment_method = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     payments = serializers.ListField(child=serializers.DictField(), required=False)
 
+    def to_internal_value(self, data):
+        # ТЗ 12.9: старое имя cash_received принимается как received.
+        if isinstance(data, dict) and data.get("received") in (None, "") and data.get("cash_received") not in (None, ""):
+            data = {**data, "received": data["cash_received"]}
+        return super().to_internal_value(data)
+
 
 class QuickCheckoutSerializer(serializers.Serializer):
     shift = serializers.UUIDField(required=False, allow_null=True)
