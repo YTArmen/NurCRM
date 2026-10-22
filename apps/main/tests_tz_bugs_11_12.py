@@ -197,3 +197,17 @@ class CreateManualTests(KassaBase):
         self.assertEqual(r.status_code, 400, r.data)
         self.assertEqual(Product.objects.filter(company=self.company).count(), before)
         self.assertFalse(Product.objects.filter(name="Новый").exists())
+
+
+class SupplierWithoutPhoneTests(KassaBase):
+    """12.16: поставщика можно создать без телефона, клиента - нет."""
+
+    def test_supplier_without_phone(self):
+        r = self.api.post("/api/main/clients/", {"full_name": "ОсОО Без телефона", "type": "suppliers"}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(Client.objects.get(full_name="ОсОО Без телефона").phone, "")
+
+    def test_client_still_needs_phone(self):
+        r = self.api.post("/api/main/clients/", {"full_name": "Покупатель"}, format="json")
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertIn("phone", r.data)

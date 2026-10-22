@@ -2221,6 +2221,21 @@ class ClientSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
             'id', 'company', 'branch', 'created_at', 'updated_at',
             'salesperson_display', 'service_display', 'bonus_balance'
         ]
+        # ТЗ 12.16: телефон обязателен всем, кроме поставщиков (см. validate)
+        extra_kwargs = {'phone': {'required': False, 'allow_blank': True}}
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        inst = getattr(self, 'instance', None)
+        client_type = attrs.get('type', getattr(inst, 'type', None))
+        # проверяем при создании или когда телефон явно присылают (старых клиентов без телефона не трогаем)
+        if inst is None or 'phone' in attrs:
+            phone = (attrs.get('phone') or '').strip()
+            if not phone and client_type != Client.StatusClient.SUPPLIERS:
+                raise serializers.ValidationError({'phone': 'Укажите телефон.'})
+        if inst is None:
+            attrs.setdefault('phone', '')
+        return attrs
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
