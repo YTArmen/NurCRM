@@ -936,6 +936,8 @@ class AnalyticsView(APIView):
             data = self._salary(request, company, branch, period)
         elif tab == "abc":
             data = self._abc(request, company, branch, period)
+        elif tab in ("stock_items", "stock-items"):
+            data = self._stock_items(request, company, branch, period)
         elif tab == "reconcile":
             data = self._reconcile(request, company, branch, period)
         elif tab == "cashflow":
@@ -944,7 +946,7 @@ class AnalyticsView(APIView):
             data = self._pnl(request, company, branch, period)
         else:
             return Response(
-                {"detail": "Unknown tab. Use: sales|stock|cashboxes|shifts|products|suppliers|procurement|purchases|users|finance|salary|abc|reconcile|cashflow|pnl"},
+                {"detail": "Unknown tab. Use: sales|stock|stock_items|cashboxes|shifts|products|suppliers|procurement|purchases|users|finance|salary|abc|reconcile|cashflow|pnl"},
                 status=400,
             )
 
@@ -1194,11 +1196,15 @@ class AnalyticsView(APIView):
                         Sum("total"),
                         Value(Z_MONEY, output_field=MONEY_FIELD),
                         output_field=MONEY_FIELD,
-                    )
+                    ),
+                    tx=Count("id"),
                 )
                 .order_by("d")
             )
-            daily = [{"date": r["d"].isoformat(), "value": str(_money(r["v"]))} for r in daily_rows if r["d"]]
+            daily = [
+                {"date": r["d"].isoformat(), "value": str(_money(r["v"])), "transactions": r["tx"]}
+                for r in daily_rows if r["d"]
+            ]
 
             # ── Payment Method Breakdown ──
             payment_breakdown = []
@@ -1345,6 +1351,100 @@ class AnalyticsView(APIView):
                 "products_stock": products_stock,
             },
         }
+
+    # ─────────────────────────────────────────────────────────
+    # STOCK ITEMS (ТЗ 12.24): остаток и закупочная цена по ВСЕМ товарам, постранично
+    # ─────────────────────────────────────────────────────────
+    STOCK_ITEMS_SORTS = {
+        "name": "name", "quantity": "quantity", "purchase_price": "purchase_price",
+        "price": "price", "stock_value": "_sv",
+    }
+
+    def _stock_items(self, request, company, branch, period: Period):
+        """
+        tab=stock_items&page=1&page_size=200(макс 1000)&search=&category=&kind=&sort=name|quantity|purchase_price|price|stock_value
+        &order=asc|desc&only_in_stock=1&abc=1
+        Один SQL-запрос на страницу + один агрегат на итоги; abc=1 добавляет класс A/B/C по стоимости остатка
+        (один дополнительный запрос id+стоимость по всем товарам). Услуги не считаются.
+        """
+        ProductModel = apps.get_model("main.Product")
+        q = request.query_params
+        pqs = self._market_products_queryset(request, company, branch)
+        pqs = pqs.exclude(kind=ProductModel.Kind.SERVICE).exclude(status=ProductModel.Status.ARCHIVED)
+        if q.get("category"):
+            pqs = pqs.filter(category_id=q["category"])
+        if q.get("kind"):
+            pqs = pqs.filter(kind=q["kind"])
+        if q.get("search"):
+            term = q["search"].strip()
+            pqs = pqs.filter(Q(name__icontains=term) | Q(barcode__icontains=term) | Q(code__icontains=term))
+        if (q.get("only_in_stock") or "").lower() in ("1", "true", "yes"):
+            pqs = pqs.filter(quantity__gt=0)
+
+        sv_expr = ExpressionWrapper(F("quantity") * F("purchase_price"), output_field=MONEY_FIELD)
+        pqs = pqs.annotate(_sv=sv_expr)
+        tot = pqs.aggregate(
+            n=Count("id"),
+            qty=Coalesce(Sum("quantity"), Value(Z_QTY, output_field=QTY_FIELD), output_field=QTY_FIELD),
+            value=Coalesce(Sum("_sv"), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
+            retail=Coalesce(
+                Sum(ExpressionWrapper(F("quantity") * F("price"), output_field=MONEY_FIELD)),
+                Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD,
+            ),
+        )
+
+        abc_map = {}
+        abc_summary = None
+        if (q.get("abc") or "").lower() in ("1", "true", "yes"):
+            total_v = tot["value"] if tot["value"] and tot["value"] > 0 else Decimal("0")
+            cum = Decimal("0")
+            abc_summary = {"A": 0, "B": 0, "C": 0}
+            for pid, v in pqs.order_by("-_sv", "id").values_list("id", "_sv"):
+                v = v or Decimal("0")
+                share = (v / total_v * 100) if total_v > 0 and v > 0 else Decimal("0")
+                cum += share
+                cls = "C" if v <= 0 else "A" if round(cum, 1) <= self.ABC_THRESHOLDS["A"] else "B" if round(cum, 1) <= self.ABC_THRESHOLDS["B"] else "C"
+                abc_map[pid] = cls
+                abc_summary[cls] += 1
+
+        sort = self.STOCK_ITEMS_SORTS.get((q.get("sort") or "name").lower(), "name")
+        order = "-" if (q.get("order") or "asc").lower() == "desc" else ""
+        try:
+            page = max(int(q.get("page") or 1), 1)
+            page_size = min(max(int(q.get("page_size") or 200), 1), 1000)
+        except ValueError:
+            page, page_size = 1, 200
+        rows = pqs.order_by(f"{order}{sort}", "id").values(
+            "id", "name", "barcode", "code", "unit", "quantity", "purchase_price", "price", "_sv",
+            "category_id", "category__name",
+        )[(page - 1) * page_size: page * page_size]
+        items = []
+        for r in rows:
+            item = {
+                "id": str(r["id"]), "name": r["name"], "barcode": r["barcode"] or "", "code": r["code"] or "",
+                "unit": r["unit"] or "", "category": str(r["category_id"]) if r["category_id"] else None,
+                "category_name": r["category__name"],
+                "quantity": str((r["quantity"] or Z_QTY).quantize(Decimal("0.001"))),
+                "purchase_price": str(_money(r["purchase_price"] or Z_MONEY)),
+                "price": str(_money(r["price"] or Z_MONEY)),
+                "stock_value": str(_money(r["_sv"] or Z_MONEY)),
+            }
+            if abc_map:
+                item["class"] = abc_map.get(r["id"])
+            items.append(item)
+        out = {
+            "tab": "stock_items",
+            "count": tot["n"], "page": page, "page_size": page_size,
+            "totals": {
+                "quantity": str((tot["qty"] or Z_QTY).quantize(Decimal("0.001"))),
+                "stock_value": str(_money(tot["value"])),
+                "retail_value": str(_money(tot["retail"])),
+            },
+            "items": items,
+        }
+        if abc_summary is not None:
+            out["abc"] = {"thresholds": self.ABC_THRESHOLDS, "counts": abc_summary}
+        return out
 
     # ─────────────────────────────────────────────────────────
     # STOCK

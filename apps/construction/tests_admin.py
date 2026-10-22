@@ -97,3 +97,45 @@ class PayProfileBranchTests(BuhBase):
         # чужой филиал нельзя
         r5 = self.client.patch(f"{url}{pid}/", {"branch": str(other.id)}, format="json")
         self.assertEqual(r5.status_code, 400)
+
+
+class AnalyticsTests(BuhBase):
+    URL = "/api/main/analytics/market/"
+
+    def test_sales_dynamics_has_transactions(self):
+        from decimal import Decimal
+        from django.utils import timezone
+        from apps.main.models import Sale
+
+        now = timezone.now()
+        for _ in range(3):
+            Sale.objects.create(company=self.company, status=Sale.Status.PAID, total=Decimal("100"), paid_at=now, cashbox=self.box)
+        self.client.force_authenticate(self.owner)
+        today = timezone.localdate().isoformat()
+        r = self.client.get(self.URL, {"tab": "sales", "date_from": today, "date_to": today})
+        self.assertEqual(r.status_code, 200, r.data)
+        day = r.data["charts"]["sales_dynamics"][0]
+        self.assertEqual(day["transactions"], 3)
+        self.assertEqual(day["value"], "300.00")
+
+    def test_stock_items_paginated_with_abc(self):
+        from decimal import Decimal
+        from apps.main.models import Product
+
+        for i, (qty, cost) in enumerate([(7, 100), (2, 100), (7, 10), (6, 5)]):
+            Product.objects.create(company=self.company, name=f"T{i}", price=Decimal("200"),
+                                   purchase_price=Decimal(cost), quantity=Decimal(qty))
+        self.client.force_authenticate(self.owner)
+        r = self.client.get(self.URL, {"tab": "stock_items", "page_size": 2, "sort": "stock_value", "order": "desc", "abc": 1})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["count"], 4)
+        self.assertEqual([i["name"] for i in r.data["items"]], ["T0", "T1"])
+        self.assertEqual(r.data["items"][0]["stock_value"], "700.00")
+        self.assertEqual(r.data["items"][0]["purchase_price"], "100.00")
+        self.assertEqual(r.data["items"][0]["class"], "A")
+        self.assertEqual(r.data["totals"]["stock_value"], "1000.00")
+        self.assertEqual(sum(r.data["abc"]["counts"].values()), 4)
+        r2 = self.client.get(self.URL, {"tab": "stock_items", "page": 2, "page_size": 3})
+        self.assertEqual(len(r2.data["items"]), 1)
+        r3 = self.client.get(self.URL, {"tab": "stock_items", "only_in_stock": 1, "search": "T1"})
+        self.assertEqual(r3.data["count"], 1)
