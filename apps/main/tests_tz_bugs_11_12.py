@@ -112,3 +112,27 @@ class DebtPatchAmountTests(KassaBase):
         r = self.api.patch(url, {"amount": "800.00", "payment_method": "cash"}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
         self.assertEqual(self.api.get(url).data["balance"], Decimal("500.00"))
+
+
+class DealPatchTitleWithPaymentsTests(KassaBase):
+    """12.6: PATCH {title, note} у сделки с оплатами не пересобирает график."""
+
+    def test_title_note_only(self):
+        deal = ClientDeal.objects.create(
+            company=self.company, client=self.client_obj, title="Старое", kind=ClientDeal.Kind.DEBT,
+            amount=Decimal("900.00"), debt_months=3, first_due_date=date.today(), schedule_version="v2",
+        )
+        pay = self.api.post(
+            f"/api/main/clients/{self.client_obj.id}/deals/{deal.id}/pay/",
+            {"amount": "100.00", "idempotency_key": str(uuid.uuid4()), "cashbox_id": str(self.cashbox.id)},
+            format="json",
+        )
+        self.assertEqual(pay.status_code, 200, pay.data)
+        before = list(deal.installments.order_by("number").values_list("id", "paid_amount"))
+        r = self.api.patch(
+            f"/api/main/clients/{self.client_obj.id}/deals/{deal.id}/", {"title": "Новое", "note": "заметка"}, format="json"
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        deal.refresh_from_db()
+        self.assertEqual((deal.title, deal.note), ("Новое", "заметка"))
+        self.assertEqual(list(deal.installments.order_by("number").values_list("id", "paid_amount")), before)

@@ -4162,6 +4162,11 @@ class ClientDeal(models.Model):
 
     def save(self, *args, **kwargs):
         custom_installments = getattr(self, "_custom_installments", None)
+        schedule_snapshot = None
+        if self.pk and not self._state.adding:
+            _old = ClientDeal.objects.filter(pk=self.pk).first()
+            if _old is not None:
+                schedule_snapshot = _old._schedule_terms()
         if self.kind != self.Kind.DEBT:
             self.debt_days = None
             self.debt_months = None
@@ -4176,7 +4181,18 @@ class ClientDeal(models.Model):
             return
 
         if self.auto_schedule or custom_installments:
+            # ТЗ 12.6: если по сделке уже есть платежи, а условия графика не менялись
+            # (правка title/note и т.п.), график не пересобираем.
+            if not custom_installments and schedule_snapshot is not None and self.payments.exists():
+                if self._schedule_terms() == schedule_snapshot:
+                    return
             self.rebuild_installments(custom_installments=custom_installments)
+
+    def _schedule_terms(self):
+        return (
+            self.kind, self.amount or Decimal("0"), self.prepayment or Decimal("0"),
+            self.debt_days, self.debt_months, self.first_due_date, self.schedule_version,
+        )
 
 
 def sync_sale_status_from_deal(deal_id) -> None:
