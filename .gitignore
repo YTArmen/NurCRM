@@ -19,6 +19,7 @@ media
 !apps/onec/migrations/0001_initial.py
 !apps/possync/migrations/0001_initial.py
 !apps/possync/migrations/0002_clientdebtlimit.py
+!apps/possync/migrations/0003_salepackline.py
 **/migrations/*.pyc
 
 

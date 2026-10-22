@@ -47,6 +47,7 @@ from core.exceptions import ApiError
 from apps.integrations.idempotency import _request_key, idempotent
 
 from .debt_limits import check_debt_limits, client_debt_payload
+from .packs import annotate_items, convert_pack_items, save_pack_lines
 from .models import ClientDebtLimit, StockAdjustment, StockAdjustmentLine
 
 ZERO = Decimal("0.00")
@@ -623,6 +624,8 @@ class PosQuickCheckoutGuardedAPIView(PosQuickCheckoutAPIView):
             # Касса повторяет чек с тем же ключом, но чуть другим телом; раньше получала ту же продажу.
             # Отдаём по-старому: базовый checkout находит продажу по Sale.idempotency_key.
             response = super().post(request, *args, **kwargs)
+        if isinstance(getattr(response, "data", None), dict) and isinstance(response.data.get("items"), list):
+            annotate_items(response.data.get("id"), response.data["items"])
         if response.get("Idempotent-Replayed") == "true":
             # Как и раньше у pos/checkout/: повтор — 200 и "replayed": true (касса на это смотрит).
             response.status_code = status.HTTP_200_OK
@@ -632,7 +635,21 @@ class PosQuickCheckoutGuardedAPIView(PosQuickCheckoutAPIView):
             self._enrich(request, response.data)
         return response
 
+    def _add_items(self, cart, items, limit_discounts, max_dp):
+        # Упаковки (sale_package_id) переводим в базовые единицы, остальное — как раньше
+        items, adjustments, self._pack_info = convert_pack_items(cart.company_id, items)
+        super()._add_items(cart, items, limit_discounts, max_dp)
+        if adjustments:
+            from apps.main.models import CartItem
+
+            for (pid, vid), adj in adjustments.items():
+                CartItem.objects.filter(cart=cart, product_id=pid, variant_id=vid).update(
+                    line_discount=F("line_discount") + adj
+                )
+            cart.recalc()
+
     def after_sale_created(self, request, sale, client, data) -> None:
+        save_pack_lines(sale, getattr(self, "_pack_info", []))
         # Лимиты долга: клиент и кассир (внутри транзакции продажи, под блокировкой)
         check_debt_limits(request, sale, client, data)
 

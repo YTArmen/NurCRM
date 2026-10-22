@@ -70,6 +70,8 @@ class QuickCheckoutItemSerializer(serializers.Serializer):
     custom = serializers.BooleanField(required=False, default=False)
     product = serializers.UUIDField(required=False, allow_null=True)
     sale_package = serializers.UUIDField(required=False, allow_null=True)
+    # Продажа упаковкой: qty — число упаковок, цена — цена упаковки (обрабатывает apps.possync.packs)
+    sale_package_id = serializers.UUIDField(required=False, allow_null=True)
     variant = serializers.UUIDField(required=False, allow_null=True)
     performer = serializers.UUIDField(required=False, allow_null=True)
     name = serializers.CharField(required=False, allow_blank=True, max_length=255)

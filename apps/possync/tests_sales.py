@@ -125,3 +125,78 @@ class DebtLimitTests(SalesBase):
         r = self.debt_sale("s3", c, "100.00")
         self.assertEqual(r.status_code, 400, r.data)
         self.assertEqual(r.data["code"], "debt_forbidden")
+
+
+class PackSaleTests(SalesBase):
+    def setUp(self):
+        super().setUp()
+        from apps.main.models import ProductPackage
+
+        self.product.quantity = Decimal("100")
+        self.product.price = Decimal("10.00")
+        self.product.purchase_price = Decimal("5.00")
+        self.product.save()
+        self.pack = ProductPackage.objects.create(
+            company=self.company, product=self.product, name="Пачка", quantity_in_package=Decimal("20")
+        )
+        self.open_shift()
+
+    def sell_packs(self, key, qty="2", price="180.00", **line):
+        item = {"product": str(self.product.id), "sale_package_id": str(self.pack.id), "qty": qty}
+        if price:
+            item["price"] = price
+        item.update(line)
+        return self.checkout(key, items=[item], payment={"method": "cash", "received": "1000.00"})
+
+    def test_stock_drops_by_qty_times_quantity_in_package_and_response(self):
+        r = self.sell_packs("p1")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.quantity, Decimal("60.000"))
+        it = r.data["items"][0]
+        self.assertEqual(it["sale_package_id"], str(self.pack.id))
+        self.assertEqual(it["package_name"], "Пачка")
+        self.assertEqual(it["packs_qty"], "2.000")
+        self.assertEqual(it["qty"], "40.000")  # базовые единицы
+        self.assertEqual(it["pack_price"], "180.00")
+        self.assertEqual(r.data["total"], "360.00")
+
+    def test_default_pack_price_is_unit_price_times_quantity(self):
+        r = self.sell_packs("p2", price=None)
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["total"], "400.00")  # 2 × 20 × 10
+
+    def test_inexact_unit_price_total_is_exact(self):
+        from apps.main.models import ProductPackage
+
+        pack3 = ProductPackage.objects.create(
+            company=self.company, product=self.product, name="Тройка", quantity_in_package=Decimal("3")
+        )
+        r = self.checkout("p3", items=[{"product": str(self.product.id), "sale_package_id": str(pack3.id),
+                                         "qty": "2", "price": "100.00"}],
+                          payment={"method": "cash", "received": "1000.00"})
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["total"], "200.00")
+
+    def test_return_gives_back_base_units(self):
+        r = self.sell_packs("p4")
+        sale_id = r.data["id"]
+        item = r.data["items"][0]
+        rr = self.api.post(
+            f"/api/main/pos/sales/{sale_id}/return/",
+            {"items": [{"sale_item_id": item["id"], "quantity": "20"}]},  # 1 пачка = 20 ед.
+            format="json",
+        )
+        self.assertEqual(rr.status_code, 200, rr.data)
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.quantity, Decimal("80.000"))
+
+    def test_pack_plus_loose_same_product_merges(self):
+        r = self.checkout("p5", items=[
+            {"product": str(self.product.id), "sale_package_id": str(self.pack.id), "qty": "1", "price": "180.00"},
+            {"product": str(self.product.id), "qty": "5", "price": "10.00"},
+        ], payment={"method": "cash", "received": "1000.00"})
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["total"], "230.00")
+        self.product.refresh_from_db()
+        self.assertEqual(self.product.quantity, Decimal("75.000"))
