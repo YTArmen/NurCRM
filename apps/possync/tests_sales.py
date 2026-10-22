@@ -325,3 +325,38 @@ def uuid_other():
     import uuid
 
     return str(uuid.uuid4())
+
+
+class DeletedItemsTests(SalesBase):
+    def test_checkout_writes_deleted_items(self):
+        from apps.main.models import CartItemDeletionLog
+
+        self.open_shift()
+        r = self.checkout("del-1", deleted_items=[
+            {"product": str(self.product.id), "qty": "2"},
+            {"name": "Ручной товар", "qty": "1.5"},
+        ])
+        self.assertEqual(r.status_code, 201, r.data)
+        logs = CartItemDeletionLog.objects.filter(company=self.company).order_by("product_name")
+        self.assertEqual(logs.count(), 2)
+        self.assertEqual({l.product_name for l in logs}, {"Хлеб", "Ручной товар"})
+        self.assertEqual(logs.get(product_name="Хлеб").deleted_by_id, self.owner.id)
+        # повтор того же чека не дублирует журнал
+        self.checkout("del-1", deleted_items=[{"product": str(self.product.id), "qty": "2"}])
+        self.assertEqual(CartItemDeletionLog.objects.filter(company=self.company).count(), 2)
+        r = self.api.get("/api/main/pos/cart-item-deletions/")
+        self.assertEqual(r.status_code, 200)
+
+    def test_bad_deleted_item_rolls_back_sale(self):
+        self.open_shift()
+        r = self.checkout("del-2", deleted_items=[{"qty": "1"}])
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertEqual(Sale.objects.filter(company=self.company).count(), 0)
+
+    def test_standalone_endpoint(self):
+        r = self.api.post("/api/main/pos/cart-item-deletions/",
+                          {"items": [{"product": str(self.product.id), "qty": "3"}]}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["created"], 1)
+        r = self.api.post("/api/main/pos/cart-item-deletions/", {"items": []}, format="json")
+        self.assertEqual(r.status_code, 400)

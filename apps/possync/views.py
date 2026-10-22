@@ -47,6 +47,7 @@ from core.exceptions import ApiError
 from apps.integrations.idempotency import _request_key, idempotent
 
 from .debt_limits import check_debt_limits, client_debt_payload
+from .deletions import write_deletions
 from .packs import annotate_items, convert_pack_items, save_pack_lines
 from .models import ClientDebtLimit, StockAdjustment, StockAdjustmentLine
 
@@ -650,6 +651,8 @@ class PosQuickCheckoutGuardedAPIView(PosQuickCheckoutAPIView):
 
     def after_sale_created(self, request, sale, client, data) -> None:
         save_pack_lines(sale, getattr(self, "_pack_info", []))
+        # Удалённые строки корзины веб-кассы → CartItemDeletionLog
+        write_deletions(company=sale.company, branch=sale.branch, user=request.user, items=data.get("deleted_items") or [])
         # Лимиты долга: клиент и кассир (внутри транзакции продажи, под блокировкой)
         check_debt_limits(request, sale, client, data)
 

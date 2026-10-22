@@ -4,6 +4,7 @@
 """
 from django.urls import path
 
+from .deletions import CartItemDeletionsAPIView
 from .sales_views import SaleItemsListAPIView, SaleListWithDatesAPIView
 from .views import (
     BootstrapAPIView,
@@ -25,6 +26,7 @@ main_urlpatterns = [
     path("clients/<uuid:client_id>/debts/", ClientDebtsAPIView.as_view(), name="possync-client-debts"),
     path("pos/sales/", SaleListWithDatesAPIView.as_view(), name="possync-pos-sale-list"),
     path("pos/sale-items/", SaleItemsListAPIView.as_view(), name="possync-pos-sale-items"),
+    path("pos/cart-item-deletions/", CartItemDeletionsAPIView.as_view(), name="possync-cart-item-deletions"),
     path("pos/checkout/", PosQuickCheckoutGuardedAPIView.as_view(), name="possync-pos-quick-checkout"),
     path("products/barcode/<str:barcode>/", ProductByBarcodeWithVariantsAPIView.as_view(), name="possync-product-by-barcode"),
 ]

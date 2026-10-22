@@ -131,6 +131,11 @@ class QuickCheckoutSerializer(serializers.Serializer):
     # серверу — продажа идёт в смену этой кассы, открытую в это время, иначе в техническую смену дня.
     sold_at = serializers.DateTimeField(required=False, allow_null=True)
     cashbox = serializers.UUIDField(required=False, allow_null=True)
+    # Удалённые строки корзины (веб-касса) — пишутся в CartItemDeletionLog (apps.possync.deletions)
+    deleted_items = serializers.ListField(child=serializers.DictField(), required=False, allow_empty=True, max_length=500)
+    # График долга (веб-касса): создаётся вместе со сделкой (apps.possync.schedule)
+    debt_schedule = serializers.JSONField(required=False, allow_null=True)
+    schedule_version = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
     def to_internal_value(self, data):
         items = data.get("items")
