@@ -3977,6 +3977,7 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
         note = data.get("note", "") or ""
         left = amount
         affected_ids = []
+        is_supplier = client.type == Client.StatusClient.SUPPLIERS
         for inst in installments:
             if left <= 0:
                 break
@@ -4002,22 +4003,41 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
             inst.paid_on = paid_date if inst.paid_amount >= inst.amount else None
             inst.save(update_fields=["paid_amount", "paid_on"])
 
-            create_auto_cashflow(
-                company=deal.company,
-                branch=deal.branch,
-                cashbox_id=data.get("cashbox_id"),
-                cashbox_role=data.get("cashbox_role") or "pos_branch",
-                shift_id=data.get("shift_id"),
-                user=request.user,
-                type=CashFlow.Type.INCOME,
-                amount=pay_amount,
-                source_kind=CashFlow.SourceKind.DEBT_REPAYMENT,
-                source_id=str(payment.id),
-                name=f"Оплата долга: {deal.title or client.full_name}",
-                source_business_operation_id="Оплата долга",
-                payment_method=pm,
-                affects_shift_drawer=(pm == "cash"),
-            )
+            if is_supplier:
+                # Долг поставщику - это РАСХОД (как в clients/{id}/deals/{deal}/pay/).
+                create_auto_cashflow(
+                    company=deal.company,
+                    branch=deal.branch,
+                    cashbox_id=data.get("cashbox_id"),
+                    cashbox_role=data.get("cashbox_role") or "expense_variable",
+                    user=request.user,
+                    shift=None,
+                    type=CashFlow.Type.EXPENSE,
+                    amount=pay_amount,
+                    source_kind=CashFlow.SourceKind.SUPPLIER_DEBT_PAYMENT,
+                    source_id=str(payment.id),
+                    name=f"Оплата долга поставщику: {deal.title or client.full_name}",
+                    source_business_operation_id="Оплата долга",
+                    payment_method=pm,
+                    affects_shift_drawer=False,
+                )
+            else:
+                create_auto_cashflow(
+                    company=deal.company,
+                    branch=deal.branch,
+                    cashbox_id=data.get("cashbox_id"),
+                    cashbox_role=data.get("cashbox_role") or "pos_branch",
+                    shift_id=data.get("shift_id"),
+                    user=request.user,
+                    type=CashFlow.Type.INCOME,
+                    amount=pay_amount,
+                    source_kind=CashFlow.SourceKind.DEBT_REPAYMENT,
+                    source_id=str(payment.id),
+                    name=f"Оплата долга: {deal.title or client.full_name}",
+                    source_business_operation_id="Оплата долга",
+                    payment_method=pm,
+                    affects_shift_drawer=(pm == "cash"),
+                )
             if deal.id not in affected_ids:
                 affected_ids.append(deal.id)
             self.applied.append((deal, pay_amount))

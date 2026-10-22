@@ -24,3 +24,33 @@ class SalesDateToTests(KassaBase):
         r = self.api.get("/api/main/pos/sales/", {"date_from": today.isoformat(), "date_to": today.isoformat()})
         self.assertEqual(r.status_code, 200, r.data)
         self.assertEqual({row["id"] for row in r.data["results"]}, {str(s1.id), str(s2.id)})
+
+
+class PayDebtSupplierTests(KassaBase):
+    """11.2: оплата долга поставщику через pay-debt - расход."""
+
+    def _pay(self, client):
+        deal = ClientDeal.objects.create(
+            company=self.company, client=client, title="Долг", kind=ClientDeal.Kind.DEBT,
+            amount=Decimal("500.00"), debt_months=1, first_due_date=date.today(),
+        )
+        cb = Cashbox.objects.create(name="Расходы", company=self.company, role=Cashbox.CashboxRole.EXPENSE_VARIABLE)
+        r = self.api.post(
+            f"/api/main/clients/{client.id}/pay-debt/",
+            {"amount": "200.00", "idempotency_key": str(uuid.uuid4()), "cashbox_id": str(cb.id)},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 200, r.data)
+        return deal
+
+    def test_supplier_creates_expense(self):
+        sup = Client.objects.create(company=self.company, full_name="Пост", type=Client.StatusClient.SUPPLIERS)
+        self._pay(sup)
+        cf = CashFlow.objects.get(source_kind=CashFlow.SourceKind.SUPPLIER_DEBT_PAYMENT)
+        self.assertEqual(cf.type, CashFlow.Type.EXPENSE)
+        self.assertEqual(cf.amount, Decimal("200.00"))
+
+    def test_customer_still_income(self):
+        self._pay(self.client_obj)
+        cf = CashFlow.objects.get(source_kind=CashFlow.SourceKind.DEBT_REPAYMENT)
+        self.assertEqual(cf.type, CashFlow.Type.INCOME)
