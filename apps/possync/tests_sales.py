@@ -412,3 +412,78 @@ class DebtScheduleTests(SalesBase):
                                          {"due_date": "2026-12-01", "amount": "200.00"}])
         self.assertEqual(r.status_code, 201, r.data)
         self.assertEqual(len(r.data["debt_schedule"]), 2)
+
+
+class DealReversalTests(SalesBase):
+    def setUp(self):
+        super().setUp()
+        self.open_shift()
+        self.client_obj = self.new_client()
+        r = self.debt_sale("rev-1", self.client_obj, "500.00")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.deal = ClientDeal.objects.get(sale_id=r.data["id"])
+
+    def pay(self, amount="300.00"):
+        import uuid
+
+        r = self.api.post(
+            f"/api/main/clients/{self.client_obj.id}/deals/{self.deal.id}/pay/",
+            {"amount": amount, "idempotency_key": str(uuid.uuid4()), "payment_method": "cash"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+
+    def flows(self):
+        from apps.construction.models import CashFlow
+
+        return CashFlow.objects.filter(company=self.company, source_id=str(self.deal.id))
+
+    def test_refund_creates_reverse_expense(self):
+        import uuid
+        from apps.construction.models import CashFlow
+
+        self.pay("300.00")
+        self.assertEqual(self.flows().filter(type=CashFlow.Type.INCOME).count(), 1)
+        key = str(uuid.uuid4())
+        body = {"amount": "100.00", "idempotency_key": key}
+        r = self.api.post(f"/api/main/clients/{self.client_obj.id}/deals/{self.deal.id}/refund/", body, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        exp = self.flows().filter(type=CashFlow.Type.EXPENSE)
+        self.assertEqual(exp.count(), 1)
+        self.assertEqual(exp.first().amount, Decimal("100.00"))
+        self.assertEqual(r.data["reverse_cashflow"]["type"], "expense")
+        # исходный приход в той же кассе, обратная операция тоже
+        self.assertEqual(exp.first().cashbox_id, self.flows().filter(type=CashFlow.Type.INCOME).first().cashbox_id)
+        # повтор того же запроса не дублирует расход
+        r = self.api.post(f"/api/main/clients/{self.client_obj.id}/deals/{self.deal.id}/refund/", body, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(self.flows().filter(type=CashFlow.Type.EXPENSE).count(), 1)
+
+    def test_refund_error_creates_nothing(self):
+        import uuid
+
+        r = self.api.post(f"/api/main/clients/{self.client_obj.id}/deals/{self.deal.id}/refund/",
+                          {"idempotency_key": str(uuid.uuid4())}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(self.flows().count(), 0)
+
+    def test_delete_deal_with_payments_reverses_net(self):
+        import uuid
+        from apps.construction.models import CashFlow
+
+        self.pay("300.00")
+        self.api.post(f"/api/main/clients/{self.client_obj.id}/deals/{self.deal.id}/refund/",
+                      {"amount": "50.00", "idempotency_key": str(uuid.uuid4())}, format="json")
+        deal_id = str(self.deal.id)
+        r = self.api.delete(f"/api/main/clients/{self.client_obj.id}/deals/{self.deal.id}/")
+        self.assertEqual(r.status_code, 204, getattr(r, "data", None))
+        self.assertFalse(ClientDeal.objects.filter(pk=deal_id).exists())
+        expenses = CashFlow.objects.filter(company=self.company, source_id=deal_id, type=CashFlow.Type.EXPENSE)
+        # 50 (возврат) + 250 (чистая оплата при удалении)
+        self.assertEqual(sum(e.amount for e in expenses), Decimal("300.00"))
+
+    def test_delete_deal_without_payments_no_flows(self):
+        from apps.construction.models import CashFlow
+
+        deal_id = str(self.deal.id)
+        r = self.api.delete(f"/api/main/clients/{self.client_obj.id}/deals/{self.deal.id}/")
+        self.assertEqual(r.status_code, 204)
+        self.assertEqual(CashFlow.objects.filter(source_id=deal_id, type=CashFlow.Type.EXPENSE).count(), 0)
