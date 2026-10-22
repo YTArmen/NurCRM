@@ -15,7 +15,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from django.db import connection
-from django.db.models import Case, Count, DecimalField, Exists, F, OuterRef, Q, Sum, Value, When
+from django.db.models import Case, Count, DecimalField, Exists, ExpressionWrapper, F, OuterRef, Q, Subquery, Sum, Value, When
 from django.db.models.functions import Coalesce, ExtractHour
 from django.utils import timezone
 from rest_framework import permissions
@@ -417,3 +417,94 @@ class AnalyticsHoursSourcesAPIView(APIView):
             "hours": [by_hour[h] for h in range(24)],
             "sources": list(by_src.values()),
         })
+
+
+# ======================================================================
+# 3. Скорость продаж (дозаказ)
+# ======================================================================
+
+class ProductsSalesVelocityAPIView(CompanyBranchRestrictedMixin, APIView):
+    """
+    GET /api/main/products/sales-velocity/?days=30&branch&product_ids=<id,id>&page&page_size
+    sold_qty — продано за последние `days` суток (чеки paid/partially_returned по paid_at,
+    частичные возвраты уже вычтены из строк), per_day = sold_qty/days,
+    days_left = stock/per_day (null, если продаж нет). Без product_ids — только товары
+    с продажами за период или с остатком <= минимального (minimum_quantity > 0).
+    Сортировка: меньше всего дней остатка сверху.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        company = _get_company(request.user)
+        if company is None:
+            raise NotFound()
+        qp = request.query_params
+        days = _int_param(qp, "days", 30, 1, 365)
+        page = _int_param(qp, "page", 1, 1, 10**6)
+        page_size = _int_param(qp, "page_size", 50, 1, 200)
+        branch = self._auto_branch()
+
+        ids = []
+        raw_ids = (qp.get("product_ids") or "").strip()
+        if raw_ids:
+            import uuid
+            for x in raw_ids.split(","):
+                x = x.strip()
+                if not x:
+                    continue
+                try:
+                    ids.append(uuid.UUID(x))
+                except ValueError:
+                    raise ValidationError({"product_ids": f"Некорректный UUID: {x}"})
+
+        now = timezone.now()
+        sales = Sale.objects.filter(
+            company=company,
+            status__in=(Sale.Status.PAID, Sale.Status.PARTIALLY_RETURNED),
+            paid_at__gte=now - timedelta(days=days), paid_at__lte=now,
+        )
+        if branch is not None:
+            sales = sales.filter(branch=branch)
+        sold_sq = (
+            SaleItem.objects.filter(product=OuterRef("pk"), sale__in=sales)
+            .values("product").annotate(s=Sum("quantity")).values("s")
+        )
+        dec = DecimalField(max_digits=18, decimal_places=3)
+        products = Product.objects.filter(company=company).exclude(status=Product.Status.ARCHIVED)
+        if branch is not None:
+            products = products.filter(branch=branch)
+        products = products.annotate(sold=Coalesce(Subquery(sold_sq, output_field=dec), Value(D0, output_field=dec)))
+        if ids:
+            products = products.filter(id__in=ids)
+        else:
+            products = products.filter(
+                Q(sold__gt=0) | (Q(minimum_quantity__gt=0) & Q(quantity__lte=F("minimum_quantity")))
+            )
+        products = products.annotate(
+            dl=Case(
+                When(sold__gt=0, then=ExpressionWrapper(F("quantity") * Value(days) / F("sold"), output_field=dec)),
+                default=None, output_field=dec,
+            )
+        ).order_by(F("dl").asc(nulls_last=True), "-sold", "name", "id")
+
+        total = products.count()
+        rows = products.values("id", "name", "barcode", "quantity", "minimum_quantity", "sold")[
+            (page - 1) * page_size: page * page_size
+        ]
+        results = []
+        for r in rows:
+            sold = r["sold"] or D0
+            stock = r["quantity"] or D0
+            per_day = (sold / days).quantize(Decimal("0.001")) if sold else D0
+            results.append({
+                "product_id": str(r["id"]),
+                "name": r["name"],
+                "barcode": r["barcode"],
+                "sold_qty": str(sold),
+                "per_day": str(per_day),
+                "stock": str(stock),
+                "minimum_quantity": _s(r["minimum_quantity"]),
+                "days_left": str((stock / sold * days).quantize(Decimal("0.1"))) if sold else None,
+            })
+        return Response({"days": days, "count": total, "page": page, "page_size": page_size, "results": results})

@@ -141,3 +141,36 @@ class HoursSourcesTests(PossyncBase):
         self.assertEqual(src["showcase"]["count"], 1)
         self.assertEqual(Decimal(src["showcase"]["sum"]), Decimal("50.00"))
         self.assertEqual(src["other"]["count"], 0)
+
+
+class SalesVelocityTests(PossyncBase):
+    URL = "/api/main/products/sales-velocity/"
+
+    def test_velocity_and_days_left(self):
+        mk_sale(self.company, self.product, cashbox=self.cashbox, qty="30")  # 30 за 30 дней = 1/день, остаток 50
+        idle = Product.objects.create(company=self.company, name="Лежит", price=Decimal("1"), quantity=Decimal("9"))
+        low = Product.objects.create(company=self.company, name="Мало", price=Decimal("1"),
+                                     quantity=Decimal("2"), minimum_quantity=Decimal("5"))
+        r = self.api.get(self.URL + "?days=30")
+        self.assertEqual(r.status_code, 200, r.data)
+        by = {x["name"]: x for x in r.data["results"]}
+        self.assertNotIn("Лежит", by)
+        self.assertIn("Мало", by)
+        h = by["Хлеб"]
+        self.assertEqual(Decimal(h["sold_qty"]), Decimal("30"))
+        self.assertEqual(Decimal(h["per_day"]), Decimal("1"))
+        self.assertEqual(Decimal(h["days_left"]), Decimal("50"))
+        self.assertIsNone(by["Мало"]["days_left"])
+        self.assertEqual(r.data["results"][0]["name"], "Хлеб")  # с days_left выше, чем без продаж
+
+        r = self.api.get(self.URL + f"?product_ids={idle.id}")
+        self.assertEqual(r.data["count"], 1)
+        self.assertEqual(Decimal(r.data["results"][0]["sold_qty"]), Decimal("0"))
+        self.assertEqual(self.api.get(self.URL + "?product_ids=zzz").status_code, 400)
+
+    def test_old_sales_excluded_and_pagination(self):
+        s, _ = mk_sale(self.company, self.product, cashbox=self.cashbox, qty="10")
+        Sale.objects.filter(pk=s.pk).update(paid_at=timezone.now() - timezone.timedelta(days=40))
+        self.assertEqual(self.api.get(self.URL + "?days=30").data["count"], 0)
+        self.assertEqual(self.api.get(self.URL + "?days=60").data["count"], 1)
+        self.assertEqual(self.api.get(self.URL + "?days=60&page=2&page_size=1").data["results"], [])
