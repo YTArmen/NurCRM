@@ -197,5 +197,6 @@ CLAUDE.md
 -onstruction-micro/
 onec/
 !apps/users/migrations/0062_user_can_edit_flags.py
+!apps/users/migrations/0063_can_edit_products_backfill.py
 !apps/construction/migrations/0032_cashflowcategory_type_archived_code.py
 !apps/construction/migrations/0033_cashflow_checked.py
