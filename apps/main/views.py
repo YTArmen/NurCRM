@@ -4390,6 +4390,10 @@ class DebtRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.Re
         if old_amount is not None and new_amount is not None and new_amount < old_amount:
             repaid_amount = (old_amount - new_amount).quantize(Decimal("0.01"))
             if repaid_amount > Decimal("0.00"):
+                # ТЗ 12.2: PATCH с меньшей суммой - это погашение. Остаток = amount - оплаты, поэтому
+                # после записи платежа возвращаем amount прежним, иначе остаток падал бы дважды.
+                instance.amount = old_amount
+                instance.save(update_fields=["amount", "updated_at"])
                 debt_payment = instance.add_payment(
                     amount=repaid_amount,
                     paid_at=timezone.localdate(),

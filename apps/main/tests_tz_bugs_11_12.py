@@ -92,3 +92,23 @@ class ProductPatchCharacteristicsTests(KassaBase):
     def test_bad_value_is_400(self):
         r = self.api.patch(f"/api/main/products/{self.product.id}/", {"characteristics": {"height_cm": "abc"}}, format="json")
         self.assertEqual(r.status_code, 400, r.data)
+
+
+class DebtPatchAmountTests(KassaBase):
+    """12.2: PATCH долга с меньшей суммой (= погашение) не уменьшает остаток дважды."""
+
+    def test_lower_amount_reduces_balance_once(self):
+        from apps.main.models import Debt
+        debt = Debt.objects.create(company=self.company, name="Долг", phone="+996555111222", amount=Decimal("1000.00"))
+        url = f"/api/main/debts/{debt.id}/"
+        r = self.api.patch(url, {"amount": "700.00", "payment_method": "cash"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(debt.payments.count(), 1)
+        self.assertEqual(debt.payments.get().amount, Decimal("300.00"))
+        g = self.api.get(url)
+        self.assertEqual(g.data["balance"], Decimal("700.00"))
+        self.assertEqual(g.data["paid_total"], Decimal("300.00"))
+        # повторное погашение: ещё раз 200 -> остаток 500, а не 300
+        r = self.api.patch(url, {"amount": "800.00", "payment_method": "cash"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(self.api.get(url).data["balance"], Decimal("500.00"))
