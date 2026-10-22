@@ -7,6 +7,7 @@ from django.urls import path
 from .deal_reversal import ClientDealDestroyWithCashflowAPIView, ClientDealRefundWithCashflowAPIView
 from .deletions import CartItemDeletionsAPIView
 from .sales_views import SaleItemsListAPIView, SaleListWithDatesAPIView
+from .views_reports import AnalyticsHoursSourcesAPIView, ProductHistoryAPIView, ProductsSalesVelocityAPIView
 from .views import (
     BootstrapAPIView,
     ClientDebtsAPIView,
@@ -36,6 +37,9 @@ main_urlpatterns = [
     path("deals/<uuid:pk>/unpay/", ClientDealRefundWithCashflowAPIView.as_view(), name="possync-deal-unpay-legacy"),
     path("clientdeals/<uuid:pk>/", ClientDealDestroyWithCashflowAPIView.as_view(), name="possync-clientdeal-detail"),
     path("pos/checkout/", PosQuickCheckoutGuardedAPIView.as_view(), name="possync-pos-quick-checkout"),
+    path("products/sales-velocity/", ProductsSalesVelocityAPIView.as_view(), name="possync-sales-velocity"),
+    path("products/<uuid:product_id>/history/", ProductHistoryAPIView.as_view(), name="possync-product-history"),
+    path("analytics/market/hours-sources/", AnalyticsHoursSourcesAPIView.as_view(), name="possync-hours-sources"),
     path("products/barcode/<str:barcode>/", ProductByBarcodeWithVariantsAPIView.as_view(), name="possync-product-by-barcode"),
 ]
 
