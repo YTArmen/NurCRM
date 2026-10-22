@@ -350,3 +350,70 @@ class ProductHistoryAPIView(CompanyBranchRestrictedMixin, APIView):
 
     def _transfers_in(self, company, product, branch, start, end):
         return self._transfers(company, branch, start, end, Q(dest_product=product), "to_branch", "transfer_in", 1)
+
+
+# ======================================================================
+# 2. Продажи по часам и источникам
+# ======================================================================
+
+SOURCE_LABELS = {
+    "cashbox": "Касса (смена/касса указаны)",
+    "showcase": "Витрина / онлайн-заказы",
+    "other": "Прочее (веб-касса, мобильное приложение — в чеке не различаются)",
+}
+
+
+class AnalyticsHoursSourcesAPIView(APIView):
+    """
+    GET /api/main/analytics/market/hours-sources/?date_from&date_to&branch
+    Период и филиал — как в analytics/market (по умолчанию текущий месяц; чеки paid и
+    partially_returned по paid_at). Часы — по Asia/Bishkek.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        company = _get_company(request.user)
+        if company is None:
+            raise NotFound()
+        branch = _get_active_branch(request)
+        period = _get_period(request)
+
+        qs = Sale.objects.filter(
+            company=company,
+            status__in=(Sale.Status.PAID, Sale.Status.PARTIALLY_RETURNED),
+            paid_at__gte=period.start, paid_at__lt=period.end,
+        )
+        if branch is not None:
+            qs = qs.filter(branch=branch)
+
+        hours_rows = (
+            qs.annotate(h=ExtractHour("paid_at", tzinfo=BISHKEK))
+            .values("h").annotate(c=Count("id"), s=Coalesce(Sum("total"), Value(D0, output_field=DecimalField())))
+        )
+        by_hour = {h: {"hour": h, "count": 0, "sum": "0.00"} for h in range(24)}
+        for r in hours_rows:
+            by_hour[r["h"]] = {"hour": r["h"], "count": r["c"], "sum": str(r["s"])}
+
+        showcase = ShowcaseOrder.objects.filter(sale_id=OuterRef("pk"))
+        src_rows = (
+            qs.annotate(
+                src=Case(
+                    When(Exists(showcase), then=Value("showcase")),
+                    When(Q(cashbox__isnull=False) | Q(shift__isnull=False), then=Value("cashbox")),
+                    default=Value("other"),
+                )
+            )
+            .values("src").annotate(c=Count("id"), s=Coalesce(Sum("total"), Value(D0, output_field=DecimalField())))
+        )
+        by_src = {k: {"source": k, "label": v, "count": 0, "sum": "0.00"} for k, v in SOURCE_LABELS.items()}
+        for r in src_rows:
+            by_src[r["src"]].update(count=r["c"], sum=str(r["s"]))
+
+        return Response({
+            "period": {"date_from": period.start.isoformat(), "date_to_exclusive": period.end.isoformat()},
+            "timezone": "Asia/Bishkek",
+            "branch": str(branch.id) if branch else None,
+            "hours": [by_hour[h] for h in range(24)],
+            "sources": list(by_src.values()),
+        })

@@ -106,3 +106,38 @@ class ProductHistoryTests(PossyncBase):
         self.assertEqual(self.api.get(self.url(other.id)).data["count"], 0)
         import uuid
         self.assertEqual(self.api.get(self.url(uuid.uuid4())).status_code, 404)
+
+
+class HoursSourcesTests(PossyncBase):
+    URL = "/api/main/analytics/market/hours-sources/"
+
+    def test_hours_and_sources(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from apps.main.models import ShowcaseOrder
+        tz = ZoneInfo("Asia/Bishkek")
+        s1, _ = mk_sale(self.company, self.product, cashbox=self.cashbox, qty="1", price="100.00")
+        s2, _ = mk_sale(self.company, self.product, cashbox=self.cashbox, qty="2", price="100.00")
+        s3, _ = mk_sale(self.company, self.product, cashbox=self.cashbox, qty="1", price="50.00")
+        Sale.objects.filter(pk=s1.pk).update(paid_at=datetime(2026, 10, 5, 9, 30, tzinfo=tz))
+        Sale.objects.filter(pk=s2.pk).update(paid_at=datetime(2026, 10, 5, 9, 59, tzinfo=tz))
+        Sale.objects.filter(pk=s3.pk).update(paid_at=datetime(2026, 10, 6, 23, 10, tzinfo=tz))
+        ShowcaseOrder.objects.create(company=self.company, number=1, sale=s3, total=Decimal("50"))
+        # вне периода и отменённая не считаются
+        s4, _ = mk_sale(self.company, self.product, cashbox=self.cashbox, qty="1")
+        Sale.objects.filter(pk=s4.pk).update(paid_at=datetime(2026, 9, 1, 9, 0, tzinfo=tz))
+        mk_sale(self.company, self.product, cashbox=self.cashbox, qty="1", status=Sale.Status.CANCELED)
+
+        r = self.api.get(self.URL + "?date_from=2026-10-01&date_to=2026-10-31")
+        self.assertEqual(r.status_code, 200, r.data)
+        hours = {h["hour"]: h for h in r.data["hours"]}
+        self.assertEqual(len(r.data["hours"]), 24)
+        self.assertEqual(hours[9]["count"], 2)
+        self.assertEqual(Decimal(hours[9]["sum"]), Decimal("300.00"))
+        self.assertEqual(hours[23]["count"], 1)
+        self.assertEqual(hours[0]["count"], 0)
+        src = {x["source"]: x for x in r.data["sources"]}
+        self.assertEqual(src["cashbox"]["count"], 2)
+        self.assertEqual(src["showcase"]["count"], 1)
+        self.assertEqual(Decimal(src["showcase"]["sum"]), Decimal("50.00"))
+        self.assertEqual(src["other"]["count"], 0)
