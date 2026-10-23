@@ -1012,18 +1012,26 @@ class Product(models.Model):
             if sm_rel and sm_rel.exists():
                 has_history = True
         if has_history:
-            # Удалённый товар освобождает PLU: его можно сразу отдать другому товару.
+            # Удалённый товар освобождает PLU и штрихкоды: их можно сразу отдать другому товару
+            # (в строках чеков штрихкод сохранён в barcode_snapshot).
             # Через update(), а не save(): save() выдал бы весовому товару новый PLU.
+            from django.core.cache import cache
+
             old_plu = self.plu
+            old_barcodes = [self.barcode, *self.alternate_barcodes.values_list("barcode", flat=True)]
             self.status = self.Status.ARCHIVED
             self.plu = None
+            self.barcode = None
             self.updated_at = timezone.now()
             Product.objects.filter(pk=self.pk).update(
-                status=self.status, plu=None, updated_at=self.updated_at
+                status=self.status, plu=None, barcode=None, updated_at=self.updated_at
             )
+            self.alternate_barcodes.all().delete()
             if old_plu is not None:
-                from django.core.cache import cache
                 cache.delete(f"product_plu:{self.company_id}:{old_plu}")
+            for bc in old_barcodes:
+                if (bc or "").strip():
+                    cache.delete(f"product_barcode:{self.company_id}:{bc.strip()}")
             # Для кассы архивный товар — удалённый: убирает его из каталога при синхронизации.
             ProductDeletion.objects.create(company_id=self.company_id, product_id=self.pk)
             return 1, {self._meta.label: 1}
