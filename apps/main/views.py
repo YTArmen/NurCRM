@@ -171,6 +171,31 @@ def _parse_payment_type(raw):
     return SupplierPurchase.PaymentType.CASH
 
 
+def _receipt_drawer_shift(request, company):
+    """
+    ТЗ Н-03: приход «оплачено из ящика смены» — поле `shift` (uuid открытой смены).
+    Смена должна быть открыта и принадлежать кассиру; владелец и админ могут
+    платить из любой смены своей компании. Без поля — None (касса расходов).
+    """
+    raw = request.data.get("shift") or request.data.get("shift_id")
+    if not raw:
+        return None
+    from apps.construction.models import CashShift
+
+    try:
+        shift = CashShift.objects.select_related("cashbox").filter(company=company, id=raw).first()
+    except Exception:  # не uuid
+        shift = None
+    if shift is None:
+        raise ValidationError({"code": "shift_not_found", "detail": "Смена не найдена."})
+    if shift.status != CashShift.Status.OPEN:
+        raise ValidationError({"code": "shift_closed", "detail": "Смена уже закрыта."})
+    user = request.user
+    if shift.cashier_id != user.id and getattr(user, "role", "") not in ("owner", "admin"):
+        raise PermissionDenied({"code": "shift_not_owned", "detail": "Это смена другого кассира."})
+    return shift
+
+
 def _parse_recipe_input(recipe_input):
     """
     Парсит массив recipe из запроса.
@@ -5413,6 +5438,7 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
 
         items = ser.validated_data["items"]
         product_ids = [it["product"].id for it in items]
+        drawer_shift = _receipt_drawer_shift(request, company)
 
         prod_qs = self._filter_qs_company_branch(Product.objects.all()).select_for_update()
         products = list(prod_qs.filter(id__in=product_ids))
@@ -5535,20 +5561,22 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
             if total_receipt_amount > Decimal("0"):
                 from apps.construction.auto_cashflow import create_auto_cashflow, serialize_auto_cashflows
                 from apps.construction.models import CashFlow
+                # ТЗ Н-03: «оплачено из ящика смены» — один расход из кассы этой смены.
                 cf = create_auto_cashflow(
                     company=company,
                     branch=branch,
-                    cashbox_id=request.data.get("cashbox_id"),
+                    cashbox=drawer_shift.cashbox if drawer_shift else None,
+                    cashbox_id=request.data.get("cashbox_id") or request.data.get("cashbox"),
                     cashbox_role=request.data.get("cashbox_role") or "expense_variable",
                     user=request.user,
-                    shift=None,
+                    shift=drawer_shift,
                     type=CashFlow.Type.EXPENSE,
                     amount=total_receipt_amount,
                     source_kind=CashFlow.SourceKind.PROCUREMENT_RECEIPT,
                     source_id=str(receipt.id),
                     name=f"Приход поставщика: {supplier.full_name or supplier.title or 'Поставщик'}",
                     source_business_operation_id="Закупки",
-                    affects_shift_drawer=False,
+                    affects_shift_drawer=drawer_shift is not None,
                 )
                 if cf:
                     receipt_cashflows.append(cf)
@@ -5567,6 +5595,9 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
             "supplier": str(supplier.id),
             "products": ProductListSerializer(refreshed, many=True, context={"request": request}).data,
             "cashflows": serialize_auto_cashflows(receipt_cashflows),
+            "cashflow_id": str(receipt_cashflows[0].id) if receipt_cashflows else None,
+            "cashbox": str(receipt_cashflows[0].cashbox_id) if receipt_cashflows and receipt_cashflows[0].cashbox_id else None,
+            "shift": str(receipt_cashflows[0].shift_id) if receipt_cashflows and receipt_cashflows[0].shift_id else None,
         }
         return Response(resp_data, status=status.HTTP_200_OK)
 

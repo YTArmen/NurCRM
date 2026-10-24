@@ -427,6 +427,10 @@ def create_auto_cashflow(
                 cashier=user,
                 status=CashShift.Status.OPEN,
             ).first() if (user and getattr(user, "is_authenticated", False)) else None
+    elif shift is not None and affects_shift_drawer and cashbox and shift.cashbox_id == cashbox.id:
+        # Явная оплата из ящика открытой смены (закупка «из кассы смены», ТЗ Н-03):
+        # один расход, привязанный к смене и входящий в expected_cash.
+        actual_shift = shift
 
     actual_cashier = (
         user
