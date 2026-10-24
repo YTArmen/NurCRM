@@ -117,6 +117,12 @@ from apps.main.part12_views import (
 from apps.main.views_payables import SupplierPayablesAPIView
 from apps.main.views_idempotency import IdempotencyLookupAPIView
 
+from apps.main.client_documents import (
+    ClientDocumentDetailAPIView,
+    ClientDocumentListCreateAPIView,
+    ClientDocumentPayAPIView,
+)
+
 urlpatterns = [
     # ТЗ «Админка»: журнал действий (тот же, что construction/audit-log/) и корзина удалённого
     path("audit-log/", AuditLogView.as_view(), name="main-audit-log"),
@@ -261,6 +267,10 @@ urlpatterns = [
     path('events/<uuid:pk>/', EventRetrieveUpdateDestroyAPIView.as_view(), name='event-detail'),
     path('orders/analytics/', OrderAnalyticsView.as_view(), name='order-analytics'),
     
+    # ТЗ Н-22: клиентские документы (КП, счёт, накладная)
+    path("client-documents/", ClientDocumentListCreateAPIView.as_view(), name="client-documents"),
+    path("client-documents/<uuid:pk>/", ClientDocumentDetailAPIView.as_view(), name="client-document-detail"),
+    path("client-documents/<uuid:pk>/pay/", ClientDocumentPayAPIView.as_view(), name="client-document-pay"),
     path("clients/", ClientListCreateAPIView.as_view(), name="client-list"),
     path("clients/<uuid:pk>/", ClientRetrieveUpdateDestroyAPIView.as_view(), name="client-detail"),
     path(
