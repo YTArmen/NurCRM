@@ -339,6 +339,7 @@ urlpatterns = [
     path("clients/with-debts/", ClientWithDebtsListAPIView.as_view(), name="clients-with-debts"),
     path("clients/debtors/", ClientDebtorsAPIView.as_view(), name="clients-debtors"),
     path("clients/<uuid:pk>/pay-debt/", ClientPayDebtAPIView.as_view(), name="client-pay-debt"),
+    path("clients/<uuid:client_id>/pay-supplier-debt/", SupplierDebtPayAPIView.as_view(), name="client-pay-supplier-debt"),
     path("clients/<uuid:client_id>/debts/", ClientDirectDebtAPIView.as_view(), name="client-direct-debt"),
     path("clients/<uuid:pk>/bonus/", ClientBonusAPIView.as_view(), name="client-bonus"),
     path("clients/<uuid:pk>/bonus/history/", ClientBonusHistoryAPIView.as_view(), name="client-bonus-history"),

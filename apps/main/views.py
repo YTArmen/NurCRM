@@ -4073,7 +4073,11 @@ class ClientDealPayAPIView(APIView, CompanyBranchRestrictedMixin):
             )
         except IntegrityError:
             fresh = ClientDeal.objects.select_related("client").prefetch_related(*_deal_prefetch()).get(pk=deal.pk)
-            return Response(ClientDealSerializer(fresh, context={"request": request}).data, status=status.HTTP_200_OK)
+            prior = DealPayment.objects.filter(deal=deal, idempotency_key=idem).first()
+            return Response(
+                self._with_cashflow_id(ClientDealSerializer(fresh, context={"request": request}).data, prior),
+                status=status.HTTP_200_OK,
+            )
 
         # auto-cashflow: customer vs supplier
         is_supplier = False
@@ -4141,7 +4145,23 @@ class ClientDealPayAPIView(APIView, CompanyBranchRestrictedMixin):
         inst.save(update_fields=["paid_amount", "paid_on"])
 
         fresh = ClientDeal.objects.select_related("client").prefetch_related(*_deal_prefetch()).get(pk=deal.pk)
-        return Response(ClientDealSerializer(fresh, context={"request": request}).data, status=status.HTTP_200_OK)
+        return Response(
+            self._with_cashflow_id(ClientDealSerializer(fresh, context={"request": request}).data, deal_payment),
+            status=status.HTTP_200_OK,
+        )
+
+    @staticmethod
+    def _with_cashflow_id(data, payment):
+        """ТЗ Н-11: в ответ оплаты добавляется cashflow_id движения денег (расход для поставщика)."""
+        from apps.construction.models import CashFlow
+        cf = None
+        if payment is not None:
+            cf = CashFlow.objects.filter(
+                company=payment.company, idempotency_key=f"deal-pay:{payment.pk}"
+            ).first()
+        out = dict(data)
+        out["cashflow_id"] = str(cf.id) if cf else None
+        return out
 
 
 @read_only_guard("can_edit_clients")
@@ -4165,6 +4185,7 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
     def pay(self, request, client_id, raw_data):
         """Распределяет оплату; распределение по сделкам кладёт в self.applied [(deal, amount)]."""
         self.applied = []
+        self.payments_made = []  # ТЗ Н-11: созданные DealPayment (для pay-supplier-debt)
         inp = DealPayAnyInputSerializer(data=raw_data)
         inp.is_valid(raise_exception=True)
         data = inp.validated_data
@@ -4292,6 +4313,7 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
             if deal.id not in affected_ids:
                 affected_ids.append(deal.id)
             self.applied.append((deal, pay_amount))
+            self.payments_made.append(payment)
             left = (left - pay_amount).quantize(Decimal("0.01"))
 
         fresh_deals = list(
@@ -4304,6 +4326,73 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
         operation.affected_deal_ids = [str(deal_id) for deal_id in affected_ids]
         operation.save(update_fields=["affected_deal_ids"])
         return Response({"paid_total": str(amount), "deals": self._serialize_deals(request, ordered)})
+
+
+@read_only_guard("can_edit_clients")
+class SupplierDebtPayAPIView(ClientDealsPayAnyAPIView):
+    """
+    ТЗ Н-11: POST /api/main/clients/<id>/pay-supplier-debt/ — оплата долга поставщику одной суммой.
+    Тонкая обёртка над pay-any (гасит от старых взносов к новым, расход на каждый взнос,
+    «из ящика» — по shift). Idempotency-Key (заголовок или idempotency_key) обязателен.
+    body: {"amount", "method": "cash|transfer", "cashbox?", "shift?", "date?", "comment?"}
+    → {paid, left, applied:[{deal, installment, amount}], cashflows:[{id, cashbox, shift, amount}],
+       paid_by:{id, name}, replayed}
+    """
+
+    @idempotent(body_key=True, replay_flag=True)
+    @transaction.atomic
+    def post(self, request, client_id, *args, **kwargs):
+        from apps.construction.models import CashFlow
+
+        raw_key = request.headers.get("Idempotency-Key") or request.data.get("idempotency_key") or ""
+        raw_key = str(raw_key).strip()
+        if not raw_key:
+            raise ValidationError({"code": "idempotency_key_required", "detail": "Нужен Idempotency-Key."})
+        try:
+            idem = UUID(raw_key)
+        except ValueError:
+            idem = uuid5(UUID(int=0), raw_key)
+
+        client = get_object_or_404(self._filter_qs_company_branch(Client.objects.all()), id=client_id)
+        if client.type != Client.StatusClient.SUPPLIERS:
+            raise ValidationError({"code": "not_supplier", "detail": "Контрагент не поставщик."})
+
+        body = {
+            "amount": request.data.get("amount"),
+            "idempotency_key": str(idem),
+            "payment_method": request.data.get("method") or request.data.get("payment_method") or "cash",
+            "date": request.data.get("date"),
+            "note": request.data.get("comment") or request.data.get("note") or "",
+            "cashbox_id": request.data.get("cashbox") or request.data.get("cashbox_id"),
+            "shift_id": request.data.get("shift") or request.data.get("shift_id"),
+        }
+        body = {k: v for k, v in body.items() if v not in (None, "")}
+        resp = self.pay(request, client_id, body)
+        if resp.status_code != 200:
+            return resp
+
+        payments = list(getattr(self, "payments_made", []))
+        flows = list(CashFlow.objects.filter(
+            source_kind=CashFlow.SourceKind.SUPPLIER_DEBT_PAYMENT,
+            source_id__in=[str(p.id) for p in payments],
+        ))
+        user = request.user
+        name = f"{getattr(user, 'first_name', '') or ''} {getattr(user, 'last_name', '') or ''}".strip() or getattr(user, "email", "")
+        return Response({
+            "paid": f"{Decimal(str(resp.data['paid_total'])):.2f}",
+            "left": f"{_supplier_debt_total(client.company, client.id):.2f}",
+            "applied": [
+                {"deal": str(p.deal_id), "installment": str(p.installment_id), "amount": f"{p.amount:.2f}"}
+                for p in payments
+            ],
+            "cashflows": [
+                {"id": str(cf.id), "cashbox": str(cf.cashbox_id) if cf.cashbox_id else None,
+                 "shift": str(cf.shift_id) if cf.shift_id else None, "amount": f"{cf.amount:.2f}"}
+                for cf in flows
+            ],
+            "paid_by": {"id": str(user.id), "name": name},
+            "replayed": False,
+        })
 
 
 # ===== REFUND (создаём DealPayment refund + уменьшаем paid_amount) =====

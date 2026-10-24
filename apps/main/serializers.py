@@ -2314,6 +2314,37 @@ class DealPaymentSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSeriali
     installment_number = serializers.IntegerField(source="installment.number", read_only=True)
 
     created_by = serializers.ReadOnlyField(source="created_by.id")
+    # ТЗ Н-11: кто принял/выплатил и из какой кассы (касса — по связанному движению денег)
+    created_by_name = serializers.SerializerMethodField()
+    cashbox = serializers.SerializerMethodField()
+    cashbox_name = serializers.SerializerMethodField()
+
+    def get_created_by_name(self, obj):
+        u = obj.created_by
+        if u is None:
+            return None
+        full = f"{getattr(u, 'first_name', '') or ''} {getattr(u, 'last_name', '') or ''}".strip()
+        return full or getattr(u, "email", None)
+
+    def _cashflow(self, obj):
+        cache = self.context.setdefault("_deal_pay_cf", {})
+        if obj.pk not in cache:
+            from django.db.models import Q
+            from apps.construction.models import CashFlow
+            cache[obj.pk] = (
+                CashFlow.objects.select_related("cashbox")
+                .filter(Q(idempotency_key=f"deal-pay:{obj.pk}") | Q(source_id=str(obj.pk)))
+                .order_by("created_at").first()
+            )
+        return cache[obj.pk]
+
+    def get_cashbox(self, obj):
+        cf = self._cashflow(obj)
+        return str(cf.cashbox_id) if cf and cf.cashbox_id else None
+
+    def get_cashbox_name(self, obj):
+        cf = self._cashflow(obj)
+        return cf.cashbox.name if cf and cf.cashbox_id else None
 
     class Meta:
         model = DealPayment
@@ -2332,6 +2363,9 @@ class DealPaymentSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSeriali
             "note",
             "payment_method",
             "created_at",
+            "created_by_name",
+            "cashbox",
+            "cashbox_name",
         )
         read_only_fields = fields
 
