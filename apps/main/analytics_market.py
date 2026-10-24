@@ -3915,6 +3915,27 @@ class AnalyticsView(APIView):
                 }
             )
 
+        # ТЗ Н-18: начислено / выплачено / аванс / премия / удержания / остаток по сотруднику
+        from apps.main.market_salary_views import salary_payout_totals
+
+        _pay = salary_payout_totals(company, period.start, period.end)
+        _tot_paid = Z_MONEY
+        _tot_left = Z_MONEY
+        for r in rows:
+            pt = _pay.get(r["user_id"]) or {}
+            accrued = Decimal(r["total"])
+            paid = pt.get("salary", Z_MONEY)
+            adv = pt.get("advance", Z_MONEY)
+            bon = pt.get("bonus", Z_MONEY)
+            ded = pt.get("deduction", Z_MONEY)
+            left = accrued + bon - ded - paid - adv
+            r.update({
+                "accrued": str(_money(accrued)), "paid": str(_money(paid)), "advance": str(_money(adv)),
+                "bonus": str(_money(bon)), "deductions": str(_money(ded)), "left": str(_money(left)),
+            })
+            _tot_paid += paid + adv
+            _tot_left += left
+
         rows.sort(key=lambda r: r["employee_label"].lower())
 
         total_payroll = Z_MONEY
@@ -4028,6 +4049,8 @@ class AnalyticsView(APIView):
             "cards": {
                 "employees_with_profile": len(rows),
                 "total_payroll": str(total_payroll),
+                "total_paid": str(_money(_tot_paid)),
+                "total_left": str(_money(_tot_left)),
                 "total_base_prorated": str(total_base_prorated),
                 "total_percent_bonus": str(total_percent_bonus),
                 "total_per_item_bonus": str(_money(total_per_item_bonus)),

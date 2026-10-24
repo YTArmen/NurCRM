@@ -104,6 +104,7 @@ from apps.main.production_salary_views import (
     ProductionSalarySummaryAPIView,
     ProductionPayoutListCreateAPIView,
 )
+from apps.main.market_salary_views import MarketSalaryPayoutDetailAPIView, MarketSalaryPayoutListCreateAPIView
 from apps.construction.views import CashFlowListCreateView
 from apps.users.app_settings_views import CompanyAppSettingsAPIView
 from apps.main.part12_views import (
@@ -202,6 +203,8 @@ urlpatterns = [
     path("production/salary/accruals/", ProductionAccrualListAPIView.as_view(), name="production-salary-accruals"),
     path("production/salary/summary/", ProductionSalarySummaryAPIView.as_view(), name="production-salary-summary"),
     path("production/salary/payouts/", ProductionPayoutListCreateAPIView.as_view(), name="production-salary-payouts"),
+    path("market-salary/payouts/", MarketSalaryPayoutListCreateAPIView.as_view(), name="market-salary-payouts"),
+    path("market-salary/payouts/<uuid:pk>/", MarketSalaryPayoutDetailAPIView.as_view(), name="market-salary-payout-detail"),
 
     # Инвентаризация товаров (остаток Product.quantity)
     path("inventory/sessions/", ProductInventorySessionListCreateAPIView.as_view(), name="product-inventory-session-list"),
