@@ -195,6 +195,14 @@ def process_telegram_update(settings_id: str, update_data: dict, enqueued_at: fl
         is_owner = (settings.owner_chat_id and str(settings.owner_chat_id) == str(chat_id))
         audience = "owner" if is_owner else "customers"
 
+        # ТЗ Н-23 (2): 6 цифр от не-владельца — возможно, код подтверждения владельца
+        if not is_owner and text and not message.get("voice"):
+            from apps.main.telegram_bot.services import owner_notify
+            if owner_notify.try_bind_owner_from_message(settings, chat_id, from_user, chat_title, text):
+                from django.utils import timezone
+                TelegramBotSettings.objects.filter(id=settings.id).update(last_reply_at=timezone.now())
+                return
+
         # Логируем для detect-owner-chat
         TelegramMessageLog.objects.create(
             bot_settings=settings,

@@ -118,6 +118,10 @@ from apps.main.part12_views import (
 
 
 from apps.main.views_payables import SupplierPayablesAPIView
+from apps.main.telegram_bot.views import BotNotifyOwnerView
+from apps.main.ai_agent_api import (
+    ProductVoiceSearchAPIView, OrderDraftAPIView, OrderDraftStatusAPIView, VoiceCallAPIView,
+)
 from apps.main.views_idempotency import IdempotencyLookupAPIView
 
 from apps.main.client_documents import (
@@ -627,6 +631,12 @@ urlpatterns = [
     # ==========================
     # Telegram Bot & AI (TZ-BE-2026-06 / Часть 5)
     # ==========================
+    # ТЗ Н-24: голосовой агент и ИИ
+    path("products/search/", ProductVoiceSearchAPIView.as_view(), name="product-voice-search"),
+    path("orders/draft/", OrderDraftAPIView.as_view(), name="order-draft"),
+    path("orders/draft/status/", OrderDraftStatusAPIView.as_view(), name="order-draft-status"),
+    path("voice/calls/", VoiceCallAPIView.as_view(), name="voice-calls"),
+    path("bot/notify-owner/", BotNotifyOwnerView.as_view(), name="bot-notify-owner"),  # ТЗ Н-23
     path("telegram-bot/", include("apps.main.telegram_bot.urls")),
     path("telegram/", include("apps.main.telegram_bot.urls")),
 ]

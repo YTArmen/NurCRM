@@ -17,6 +17,8 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.integrations.permissions import HasApiKeyScope
+from apps.main.ai_agent_api import client_debt_summary
 from apps.main.kassa_views import change_bonus
 from apps.main.models import Client, ClientBonusTransaction
 from apps.main.phone_utils import normalize_phone_e164
@@ -59,7 +61,14 @@ class _StaffBase(CompanyBranchRestrictedMixin, APIView):
 
 
 class ClientByPhoneAPIView(_StaffBase):
-    """GET /api/main/clients/by-phone/?phone=0555123456 — точное совпадение нормализованного номера."""
+    """
+    GET /api/main/clients/by-phone/?phone=0555123456 — точное совпадение нормализованного номера.
+    ТЗ Н-24 (3): + debt_total, since, next_due_date (то же число, что в clients/debtors/).
+    Ключ API — с областью client:read_self.
+    """
+
+    permission_classes = [permissions.IsAuthenticated, HasApiKeyScope]
+    required_scope = "client:read_self"
 
     def get(self, request):
         company = self.company_or_400()
@@ -91,6 +100,7 @@ class ClientByPhoneAPIView(_StaffBase):
             "client": client_payload(clients[0], created) if clients else None,
             "results": [client_payload(c, created and c is clients[0]) for c in clients],
             "has_app": services.confirmed_customer_for_phone(phone) is not None,
+            **client_debt_summary(company, clients[0] if clients else None),
         })
 
 

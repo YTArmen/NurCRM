@@ -35,6 +35,7 @@ from .views import (
 from apps.integrations.views import (
     ApiKeyListCreateAPIView,
     ApiKeyRevokeAPIView,
+    ApiKeyCallLogAPIView,
     WebhookDetailAPIView,
     WebhookEventsAPIView,
     WebhookListCreateAPIView,
@@ -55,6 +56,7 @@ urlpatterns = [
     path("scales/token/", get_scale_api_token, name="scale-api-token"),
     path("api-keys/", ApiKeyListCreateAPIView.as_view(), name="api-key-list"),
     path("api-keys/<uuid:pk>/", ApiKeyRevokeAPIView.as_view(), name="api-key-revoke"),
+    path("api-keys/<uuid:pk>/calls/", ApiKeyCallLogAPIView.as_view(), name="api-key-calls"),
     path("webhooks/", WebhookListCreateAPIView.as_view(), name="webhook-list"),
     path("webhooks/events/", WebhookEventsAPIView.as_view(), name="webhook-events"),
     path("webhooks/<uuid:pk>/", WebhookDetailAPIView.as_view(), name="webhook-detail"),
