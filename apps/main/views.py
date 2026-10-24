@@ -196,6 +196,143 @@ def _receipt_drawer_shift(request, company):
     return shift
 
 
+def _truthy(raw):
+    return str(raw).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _receipt_marker(receipt_id):
+    """ТЗ Н-10/Н-12: метка прихода в note сделки (без миграции: связь сделка ↔ приход)."""
+    return f"[receipt:{receipt_id}]"
+
+
+def _find_receipt_deal(company, supplier_id, receipt_id):
+    """Сделка поставщика, созданная по приходу (по метке в note), или None."""
+    return (
+        ClientDeal.objects.filter(
+            company=company, client_id=supplier_id, note__contains=_receipt_marker(receipt_id)
+        )
+        .order_by("created_at")
+        .first()
+    )
+
+
+def _supplier_debt_total(company, supplier_id):
+    """Реальный долг поставщика: остаток по сделкам kind=debt (как kpis.debt)."""
+    total = Decimal("0.00")
+    deals = ClientDeal.objects.filter(
+        company=company, client_id=supplier_id, kind=ClientDeal.Kind.DEBT
+    ).prefetch_related("installments")
+    for d in deals:
+        rem = d.remaining_debt
+        if rem > 0:
+            total += rem
+    return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _receipt_payment_info(receipts):
+    """
+    ТЗ Н-10: способ оплаты прихода для списка/карточки. Поля у прихода нет (без миграции),
+    поэтому выводим: сделка по метке → debt/prepayment; расход (source_id = id прихода) → cash/prepayment;
+    иначе — строки SupplierPurchase того же поставщика, записанные в момент прихода.
+    Возвращает {receipt_id: {payment_type, paid_amount, debt_amount, deal_id, cashbox, cashbox_name, shift}}.
+    """
+    from datetime import timedelta
+    from apps.construction.models import CashFlow
+
+    receipts = list(receipts)
+    out = {}
+    if not receipts:
+        return out
+    ids = [str(r.id) for r in receipts]
+
+    def _total(r):
+        t = getattr(r, "total_amount", None)
+        if t is not None:
+            return Decimal(str(t)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        tot = Decimal("0")
+        for it in r.items.all():
+            tot += Decimal(str(it.qty)) * Decimal(str(it.purchase_price if it.purchase_price is not None else 0))
+        return tot.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    flows = {}
+    for cf in CashFlow.objects.filter(
+        source_kind=CashFlow.SourceKind.PROCUREMENT_RECEIPT, source_id__in=ids, type=CashFlow.Type.EXPENSE
+    ).select_related("cashbox"):
+        flows.setdefault(cf.source_id, []).append(cf)
+
+    deal_q = Q()
+    for i in ids:
+        deal_q |= Q(note__contains=_receipt_marker(i))
+    deals = {}
+    for d in ClientDeal.objects.filter(deal_q).prefetch_related("installments"):
+        for i in ids:
+            if _receipt_marker(i) in (d.note or "") and i not in deals:
+                deals[i] = d
+
+    lo = min(r.created_at for r in receipts)
+    hi = max(r.created_at for r in receipts) + timedelta(seconds=60)
+    sup_ids = {r.supplier_id for r in receipts}
+    purchases = list(
+        SupplierPurchase.objects.filter(
+            supplier_id__in=sup_ids, purchased_at__gte=lo, purchased_at__lte=hi
+        ).values("supplier_id", "purchased_at", "payment_type")
+    )
+    # строка закупки принадлежит последнему приходу поставщика, созданному до неё
+    rcpt_times = {}
+    for sid, ca in SupplierReceipt.objects.filter(
+        supplier_id__in=sup_ids, created_at__gte=lo, created_at__lte=hi
+    ).values_list("supplier_id", "created_at"):
+        rcpt_times.setdefault(sid, []).append(ca)
+
+    for r in receipts:
+        rid = str(r.id)
+        total = _total(r)
+        cfs = flows.get(rid, [])
+        paid_cf = sum((cf.amount for cf in cfs), Decimal("0.00"))
+        deal = deals.get(rid)
+        ptype = None
+        if deal is not None:
+            ptype = "prepayment" if paid_cf > 0 else "debt"
+            debt_amount = deal.debt_amount
+        else:
+            for pu in purchases:
+                if (
+                    pu["supplier_id"] == r.supplier_id
+                    and r.created_at <= pu["purchased_at"] <= r.created_at + timedelta(seconds=60)
+                    and not any(r.created_at < ca <= pu["purchased_at"] for ca in rcpt_times.get(r.supplier_id, []))
+                ):
+                    ptype = pu["payment_type"]
+                    break
+            if ptype is None:
+                ptype = "prepayment" if (cfs and paid_cf < total) else ("cash" if cfs else None)
+            debt_amount = None
+        if ptype in ("cash", "transfer"):
+            paid, debt_amount = total, Decimal("0.00")
+        elif ptype == "debt" and debt_amount is None:
+            paid, debt_amount = Decimal("0.00"), total
+        elif ptype == "prepayment":
+            paid = paid_cf if cfs else None
+            if debt_amount is None and paid is not None:
+                debt_amount = max(Decimal("0.00"), total - paid)
+        else:
+            paid = Decimal("0.00") if ptype == "debt" else None
+        if ptype == "debt" and deal is not None:
+            paid = Decimal("0.00")
+        if ptype == "prepayment" and deal is not None:
+            paid = paid_cf
+        cf0 = cfs[0] if cfs else None
+        out[rid] = {
+            "payment_type": ptype,
+            "paid_amount": f"{paid:.2f}" if paid is not None else None,
+            "debt_amount": f"{debt_amount:.2f}" if debt_amount is not None else None,
+            "deal_id": str(deal.id) if deal is not None else None,
+            "cashbox": str(cf0.cashbox_id) if cf0 and cf0.cashbox_id else None,
+            "cashbox_name": cf0.cashbox.name if cf0 and cf0.cashbox_id else None,
+            "shift": str(cf0.shift_id) if cf0 and cf0.shift_id else None,
+        }
+    return out
+
+
 def _parse_recipe_input(recipe_input):
     """
     Парсит массив recipe из запроса.
@@ -5427,16 +5564,60 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
           {"product": "<uuid>", "qty": 3}
         ]
       }
+
+    ТЗ Н-10 (опционально, правило ОДНО): если в теле "create_deal": true — сервер в одной
+    транзакции сам создаёт долг поставщику и принимает Idempotency-Key (заголовок или
+    idempotency_key в теле; повтор → тот же ответ, replayed=true).
+      payment_type: cash|transfer|debt|prepayment, paid_amount, first_due_date (YYYY-MM-DD,
+      без неё — сегодня+30 дней), comment, shift/cashbox как в Н-03.
+      debt → сделка kind=debt на всю сумму, ОДИН взнос на first_due_date, расхода нет;
+      prepayment → один расход на paid_amount + сделка kind=debt на остаток.
+      Связь сделка ↔ приход — метка [receipt:<id>] в note сделки (миграций нет).
+    Ответ добавляет: payment_type, paid_amount, debt_amount, total_amount, deal_id,
+    cashflow_id, supplier_debt_total, replayed. Ошибки: items_empty, payment_type_invalid,
+    paid_amount_exceeds_total, paid_amount_invalid, first_due_date_invalid.
+    БЕЗ "create_deal" запрос работает как раньше (сайт сам создаёт сделку).
     """
     permission_classes = [permissions.IsAuthenticated]
 
-    @transaction.atomic
     def post(self, request, supplier_id):
+        # ТЗ Н-10: серверная сделка-долг и идемпотентность — только по явному "create_deal": true.
+        # Без флага запрос работает как раньше (сайт сам создаёт сделку отдельным запросом).
+        if _truthy(request.data.get("create_deal")):
+            handler = idempotent(body_key=True, replay_flag=True)(type(self)._post_impl)
+            return handler(self, request, supplier_id)
+        return self._post_impl(request, supplier_id)
+
+    @transaction.atomic
+    def _post_impl(self, request, supplier_id):
+        opt_in = _truthy(request.data.get("create_deal"))
         company = self._company()
         branch = self._auto_branch()
 
         sup_qs = self._filter_qs_company_branch(Client.objects.all())
         supplier = get_object_or_404(sup_qs, id=supplier_id, type=Client.StatusClient.SUPPLIERS)
+
+        paid_amount_in = None
+        if opt_in:
+            if not request.data.get("items"):
+                raise ValidationError({"code": "items_empty", "detail": "Нет строк прихода."})
+            raw_pt = str(request.data.get("payment_type") or "cash").strip().lower()
+            if raw_pt not in SupplierPurchase.PaymentType.values:
+                raise ValidationError({"code": "payment_type_invalid", "detail": "payment_type: cash | transfer | debt | prepayment."})
+            raw_paid = request.data.get("paid_amount")
+            if raw_paid not in (None, ""):
+                try:
+                    paid_amount_in = Decimal(str(raw_paid)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                except Exception:
+                    paid_amount_in = None
+                if paid_amount_in is None or paid_amount_in < 0:
+                    raise ValidationError({"code": "paid_amount_invalid", "detail": "paid_amount — неотрицательная сумма."})
+            first_due = None
+            raw_due = request.data.get("first_due_date")
+            if raw_due:
+                first_due = parse_date(str(raw_due)) if not hasattr(raw_due, "year") else raw_due
+                if first_due is None:
+                    raise ValidationError({"code": "first_due_date_invalid", "detail": "first_due_date: YYYY-MM-DD."})
 
         ser = SupplierReceiptCreateSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
@@ -5555,15 +5736,25 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
 
         # auto-cashflow для закупок за наличные
         receipt_cashflows = []
-        if payment_type == "cash":
-            total_receipt_amount = Decimal("0.00")
-            for it in receipt_items:
-                pp = it.purchase_price
-                if pp is None:
-                    pp = it.product.purchase_price or Decimal("0.00")
-                total_receipt_amount += Decimal(str(it.qty)) * Decimal(str(pp))
+        total_receipt_amount = Decimal("0.00")
+        for it in receipt_items:
+            pp = it.purchase_price
+            if pp is None:
+                pp = it.product.purchase_price or Decimal("0.00")
+            total_receipt_amount += Decimal(str(it.qty)) * Decimal(str(pp))
+        total_receipt_amount = total_receipt_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-            if total_receipt_amount > Decimal("0"):
+        # ТЗ Н-10: сколько заплачено сразу и сколько уходит в долг (только с create_deal).
+        paid_now = total_receipt_amount if payment_type in ("cash", "transfer") else Decimal("0.00")
+        if opt_in and payment_type == "prepayment":
+            paid_now = paid_amount_in or Decimal("0.00")
+        if opt_in and paid_now > total_receipt_amount:
+            raise ValidationError({"code": "paid_amount_exceeds_total", "detail": "paid_amount больше суммы прихода."})
+        debt_part = (total_receipt_amount - paid_now) if payment_type in ("debt", "prepayment") else Decimal("0.00")
+
+        if payment_type == "cash" or (opt_in and payment_type == "prepayment"):
+            expense_amount = paid_now if (opt_in and payment_type == "prepayment") else total_receipt_amount
+            if expense_amount > Decimal("0"):
                 from apps.construction.auto_cashflow import create_auto_cashflow, serialize_auto_cashflows
                 from apps.construction.models import CashFlow
                 # ТЗ Н-03: «оплачено из ящика смены» — один расход из кассы этой смены.
@@ -5576,7 +5767,7 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
                     user=request.user,
                     shift=drawer_shift,
                     type=CashFlow.Type.EXPENSE,
-                    amount=total_receipt_amount,
+                    amount=expense_amount,
                     source_kind=CashFlow.SourceKind.PROCUREMENT_RECEIPT,
                     source_id=str(receipt.id),
                     name=f"Приход поставщика: {supplier.full_name or supplier.title or 'Поставщик'}",
@@ -5604,6 +5795,34 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
             "cashbox": str(receipt_cashflows[0].cashbox_id) if receipt_cashflows and receipt_cashflows[0].cashbox_id else None,
             "shift": str(receipt_cashflows[0].shift_id) if receipt_cashflows and receipt_cashflows[0].shift_id else None,
         }
+        if opt_in:
+            # ТЗ Н-10: сделка-долг одним взносом на first_due_date, в той же транзакции.
+            deal = None
+            if debt_part > 0:
+                from datetime import timedelta
+                due = first_due or (timezone.localdate() + timedelta(days=30))
+                name = supplier.full_name or supplier.title or "Поставщик"
+                note = f"Приход поставщика {_receipt_marker(receipt.id)}"
+                comment = str(request.data.get("comment") or "").strip()
+                if comment:
+                    note += f" {comment}"
+                deal = ClientDeal(
+                    company=company, branch=branch, client=supplier,
+                    title=f"Долг {name}", kind=ClientDeal.Kind.DEBT,
+                    amount=debt_part, prepayment=Decimal("0.00"),
+                    debt_months=1, interval_months=1, first_due_date=due,
+                    auto_schedule=True, note=note,
+                )
+                deal.save()
+            resp_data.update({
+                "payment_type": payment_type,
+                "paid_amount": f"{paid_now:.2f}",
+                "debt_amount": f"{debt_part:.2f}",
+                "total_amount": f"{total_receipt_amount:.2f}",
+                "deal_id": str(deal.id) if deal else None,
+                "supplier_debt_total": f"{_supplier_debt_total(company, supplier.id):.2f}",
+                "replayed": False,
+            })
         return Response(resp_data, status=status.HTTP_200_OK)
 
 
@@ -5644,6 +5863,42 @@ class SupplierReceiptQuerysetMixin:
         if dt:
             qs = qs.filter(created_at__date__lte=dt)
 
+        # ТЗ Н-10: фильтр по способу оплаты (строки журнала закупок, записанные в момент прихода)
+        from datetime import timedelta
+        pt = (qp.get("payment_type") or "").strip().lower()
+        if pt:
+            if pt not in SupplierPurchase.PaymentType.values:
+                return qs.none()
+            # строка закупки принадлежит последнему приходу поставщика, созданному до неё
+            later_receipt = SupplierReceipt.objects.filter(
+                supplier_id=OuterRef("supplier_id"),
+                created_at__gt=OuterRef(OuterRef("created_at")),
+                created_at__lte=OuterRef("purchased_at"),
+            )
+            qs = qs.filter(Exists(
+                SupplierPurchase.objects.filter(
+                    supplier_id=OuterRef("supplier_id"),
+                    payment_type=pt,
+                    purchased_at__gte=OuterRef("created_at"),
+                    purchased_at__lte=OuterRef("created_at") + timedelta(seconds=60),
+                ).filter(~Exists(later_receipt))
+            ))
+
+        # ТЗ Н-10: поиск — поставщик (имя/телефон/ООО), товар (название/штрихкод/код); Exists, чтобы не задвоить суммы
+        search = (qp.get("search") or "").strip()
+        if search:
+            items_match = SupplierReceiptItem.objects.filter(receipt_id=OuterRef("pk")).filter(
+                Q(product__name__icontains=search)
+                | Q(product__barcode__icontains=search)
+                | Q(product__code__icontains=search)
+            )
+            qs = qs.filter(
+                Q(supplier__full_name__icontains=search)
+                | Q(supplier__phone__icontains=search)
+                | Q(supplier__llc__icontains=search)
+                | Exists(items_match)
+            )
+
         return qs
 
 
@@ -5668,7 +5923,8 @@ class SupplierReceiptListAPIView(
         total_amount = _aggregate_supplier_receipts_total_amount(queryset)
 
         page = self.paginate_queryset(queryset)
-        serializer = self.get_serializer(page, many=True)
+        info = _receipt_payment_info(page)  # ТЗ Н-10: один пакет запросов на страницу
+        serializer = self.get_serializer(page, many=True, context={**self.get_serializer_context(), "receipt_info": info})
         return self.paginator.get_paginated_response(serializer.data, total_amount=total_amount)
 
 

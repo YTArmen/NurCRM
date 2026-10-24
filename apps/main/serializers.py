@@ -3460,6 +3460,14 @@ class SupplierReceiptReadSerializer(serializers.ModelSerializer):
     returned_amount = serializers.SerializerMethodField()
     returned_qty = serializers.SerializerMethodField()
     has_returns = serializers.SerializerMethodField()
+    # ТЗ Н-10: способ оплаты прихода (выводится из сделки/расхода/журнала закупок)
+    payment_type = serializers.SerializerMethodField()
+    paid_amount = serializers.SerializerMethodField()
+    debt_amount = serializers.SerializerMethodField()
+    deal_id = serializers.SerializerMethodField()
+    cashbox = serializers.SerializerMethodField()
+    cashbox_name = serializers.SerializerMethodField()
+    shift = serializers.SerializerMethodField()
 
     class Meta:
         model = SupplierReceipt
@@ -3479,8 +3487,46 @@ class SupplierReceiptReadSerializer(serializers.ModelSerializer):
             "returned_amount",
             "returned_qty",
             "has_returns",
+            "payment_type",
+            "paid_amount",
+            "debt_amount",
+            "deal_id",
+            "cashbox",
+            "cashbox_name",
+            "shift",
             "items",
         ]
+
+    def _pay_info(self, obj):
+        from apps.main.views import _receipt_payment_info
+        cache = self.context.get("receipt_info")
+        if cache is None:
+            cache = self.context["receipt_info"] = {}
+        key = str(obj.id)
+        if key not in cache:
+            cache.update(_receipt_payment_info([obj]))
+        return cache.get(key) or {}
+
+    def get_payment_type(self, obj):
+        return self._pay_info(obj).get("payment_type")
+
+    def get_paid_amount(self, obj):
+        return self._pay_info(obj).get("paid_amount")
+
+    def get_debt_amount(self, obj):
+        return self._pay_info(obj).get("debt_amount")
+
+    def get_deal_id(self, obj):
+        return self._pay_info(obj).get("deal_id")
+
+    def get_cashbox(self, obj):
+        return self._pay_info(obj).get("cashbox")
+
+    def get_cashbox_name(self, obj):
+        return self._pay_info(obj).get("cashbox_name")
+
+    def get_shift(self, obj):
+        return self._pay_info(obj).get("shift")
 
     def get_created_by_name(self, obj):
         u = obj.created_by
