@@ -166,6 +166,42 @@ class Cashbox(models.Model):
             return self.CashboxRole.POS_MAIN
         return self.CashboxRole.POS_MAIN
 
+    def drawer_cash_info(self):
+        """
+        ТЗ Н-06: наличные в ящике кассы сейчас. Только для pos_branch/pos_main, иначе None.
+        Открыта смена — её expected_cash; иначе пересчитанная сумма (closing_cash) последней
+        закрытой смены + наличные приходы − расходы вне смены (shift пуст) после её закрытия.
+        Возвращает dict {drawer_cash, drawer_cash_at, last_closed_shift} или None.
+        """
+        if self.get_inferred_role() not in (self.CashboxRole.POS_BRANCH, self.CashboxRole.POS_MAIN):
+            return None
+        z = Decimal("0.00")
+        q = lambda v: (v or z).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)  # noqa: E731
+        shifts = CashShift.objects.filter(cashbox=self)
+        last_closed = shifts.filter(status=CashShift.Status.CLOSED).order_by("-closed_at", "-opened_at").first()
+        last_id = str(last_closed.id) if last_closed else None
+        open_shift = shifts.filter(status=CashShift.Status.OPEN).order_by("-opened_at").first()
+        now = timezone.now()
+        if open_shift is not None:
+            cash = open_shift.calc_live_totals(refresh=True).get("expected_cash", z)
+        elif last_closed is not None:
+            base = last_closed.closing_cash
+            if base is None:
+                base = last_closed.calc_live_totals().get("expected_cash", z)
+            out = (
+                CashFlow.objects.money()
+                .filter(cashbox=self, shift__isnull=True, created_at__gt=last_closed.closed_at)
+                .filter(Q(payment_method__isnull=True) | Q(payment_method="") | Q(payment_method="cash"))
+            )
+            agg = out.aggregate(
+                inc=Sum("amount", filter=Q(type=CashFlow.Type.INCOME)),
+                exp=Sum("amount", filter=Q(type=CashFlow.Type.EXPENSE)),
+            )
+            cash = base + (agg["inc"] or z) - (agg["exp"] or z)
+        else:
+            return {"drawer_cash": None, "drawer_cash_at": now, "last_closed_shift": None}
+        return {"drawer_cash": q(cash), "drawer_cash_at": now, "last_closed_shift": last_id}
+
     def clean(self):
         if self.branch_id and self.branch.company_id != self.company_id:
             raise ValidationError({"branch": "Филиал принадлежит другой компании."})

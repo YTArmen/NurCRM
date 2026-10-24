@@ -352,6 +352,15 @@ class CashFlowInsideCashboxSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+def _add_drawer_cash(data, cashbox):
+    """ТЗ Н-06: наличные в ящике (только pos_branch/pos_main), у остальных касс — null."""
+    info = cashbox.drawer_cash_info()
+    data["drawer_cash"] = str(info["drawer_cash"]) if info and info["drawer_cash"] is not None else None
+    data["drawer_cash_at"] = info["drawer_cash_at"].isoformat() if info else None
+    data["last_closed_shift"] = info["last_closed_shift"] if info else None
+    return data
+
+
 class CashboxWithFlowsSerializer(CompanyBranchReadOnlyMixin):
     cashflows = CashFlowInsideCashboxSerializer(source="flows", many=True, read_only=True)
     is_consumption = serializers.BooleanField(read_only=True)
@@ -381,6 +390,9 @@ class CashboxWithFlowsSerializer(CompanyBranchReadOnlyMixin):
 
     def get_current_balance(self, obj):
         return self.get_balance(obj)
+
+    def to_representation(self, instance):
+        return _add_drawer_cash(super().to_representation(instance), instance)
 
 
 
@@ -454,6 +466,8 @@ class CashboxSerializer(CompanyBranchReadOnlyMixin):
 
         if not data.get("role"):
             data["role"] = instance.get_inferred_role()
+
+        _add_drawer_cash(data, instance)
 
         return data
     def get_analytics(self, obj):
