@@ -334,16 +334,31 @@ def _is_uuid(raw):
         return False
 
 
+def _client_ip(request):
+    fwd = (request.META.get("HTTP_X_FORWARDED_FOR") or "").split(",")[0].strip()
+    return fwd or request.META.get("REMOTE_ADDR") or None
+
+
+KEY_ATTEMPTS_PER_HOUR = 10
+
+
 class CompanyFeatureActivateAPIView(APIView):
     """
     POST /api/users/company/features/activate/  {"key": "ABCD-…"}   (ТЗ ч.13, 2.3)
     Ключ включает функцию компании (CompanyAddon) на свой срок и запоминается как использованный.
     → 200 {"code": "ai", "until": "2027-10-06" | null, "features": [...]}
+
+    ТЗ Н-32 (3): ключ одноразовый — привязан к первой компании. Повтор той же компанией →
+    200 + replayed:true (срок не продлевается); другая компания → 409 key_already_used.
+    Больше 10 неверных ключей за час с компании или IP → 429 too_many_attempts.
     """
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        from datetime import timedelta as _td
+
+        from apps.users.models import FeatureKeyAttempt
         from apps.users.serializers import company_feature_codes
 
         company = _company_of(request.user)
@@ -355,15 +370,32 @@ class CompanyFeatureActivateAPIView(APIView):
         if not raw:
             raise ValidationError({"key": "Введите ключ."})
 
+        ip = _client_ip(request)
+        since = timezone.now() - _td(hours=1)
+        recent = FeatureKeyAttempt.objects.filter(created_at__gte=since)
+        by_company = recent.filter(company=company).count()
+        by_ip = recent.filter(ip=ip).count() if ip else 0
+        if max(by_company, by_ip) >= KEY_ATTEMPTS_PER_HOUR:
+            resp = Response(
+                {"detail": "Слишком много неверных ключей. Попробуйте через час.", "code": "too_many_attempts"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+            resp["Retry-After"] = "3600"
+            return resp
+
         with transaction.atomic():
             key = FeatureActivationKey.objects.select_for_update().filter(key__iexact=raw).first()
             if key is None:
+                FeatureKeyAttempt.objects.create(company=company, ip=ip)
                 return Response({"detail": "Ключ не найден.", "code": "invalid_key"}, status=status.HTTP_400_BAD_REQUEST)
             if key.used_by_company_id and key.used_by_company_id != company.id:
-                return Response({"detail": "Ключ уже использован.", "code": "key_used"}, status=status.HTTP_400_BAD_REQUEST)
+                FeatureKeyAttempt.objects.create(company=company, ip=ip)
+                return Response({"detail": "Ключ уже использован другой компанией.", "code": "key_already_used"},
+                                status=status.HTTP_409_CONFLICT)
 
             addon = CompanyAddon.objects.select_for_update().filter(company=company, code=key.code).first()
-            if key.used_by_company_id is None:
+            replayed = key.used_by_company_id is not None
+            if not replayed:
                 today = timezone.localdate()
                 if key.days:
                     start = today
@@ -378,6 +410,7 @@ class CompanyFeatureActivateAPIView(APIView):
                 if not already_forever:  # бессрочную функцию ключ со сроком не укорачивает
                     addon.until = until
                 addon.active = True
+                addon.source = "key"
                 addon.note = (f"ключ {key.key}")[:255]
                 addon.save()
                 key.used_by_company = company
@@ -385,8 +418,75 @@ class CompanyFeatureActivateAPIView(APIView):
                 key.used_at = timezone.now()
                 key.save(update_fields=["used_by_company", "used_by_user", "used_at"])
 
-        return Response({
+        data = {
             "code": key.code,
             "until": addon.until.isoformat() if addon and addon.until else None,
             "features": company_feature_codes(company),
-        })
+        }
+        if replayed:
+            data["replayed"] = True
+        return Response(data)
+
+
+class CompanyFeatureTrialAPIView(APIView):
+    """
+    POST /api/users/company/features/trial/  {"code": "ai"}   (ТЗ Н-32, 3)
+    Пробный доступ на settings.FEATURE_TRIAL_DAYS дней (по умолчанию 7), один раз на функцию
+    для компании. → 200 {code, expires_at}; повтор → 409 trial_used; функция уже действует → 409 already_active.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from django.conf import settings as dj_settings
+
+        from apps.users.models import Feature, FeatureTrial
+
+        company = _company_of(request.user)
+        if company is None:
+            raise PermissionDenied("Пользователь не привязан к компании.")
+        if not _is_owner_or_admin(request.user, company):
+            raise PermissionDenied("Включить пробный доступ может владелец или администратор.")
+        code = str(request.data.get("code") or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9_-]{1,64}", code):
+            raise ValidationError({"code": "Укажите код функции."})
+        known = (
+            Feature.objects.filter(name=code).exists()
+            or FeatureActivationKey.objects.filter(code=code).exists()
+            or CompanyAddon.objects.filter(code=code).exists()
+        )
+        if not known:
+            return Response({"detail": "Неизвестная функция.", "code": "unknown_feature"}, status=status.HTTP_400_BAD_REQUEST)
+        today = timezone.localdate()
+        with transaction.atomic():
+            if FeatureTrial.objects.select_for_update().filter(company=company, code=code).exists():
+                return Response({"detail": "Пробный доступ к этой функции уже использован.", "code": "trial_used"},
+                                status=status.HTTP_409_CONFLICT)
+            addon = CompanyAddon.objects.select_for_update().filter(company=company, code=code).first()
+            if addon is not None and addon.is_effective(today):
+                return Response({"detail": "Функция уже включена.", "code": "already_active"}, status=status.HTTP_409_CONFLICT)
+            expires = today + timedelta(days=int(getattr(dj_settings, "FEATURE_TRIAL_DAYS", 7)))
+            if addon is None:
+                addon = CompanyAddon(company=company, code=code)
+            addon.active = True
+            addon.until = expires
+            addon.source = "trial"
+            addon.note = "пробный доступ"
+            addon.save()
+            FeatureTrial.objects.create(company=company, code=code, expires_at=expires)
+        return Response({"code": code, "expires_at": expires.isoformat()})
+
+
+class CompanyFeaturesListAPIView(APIView):
+    """GET /api/users/company/features/ → [{code, until, source: tariff|key|trial|support}] (ТЗ Н-32, 3)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from apps.users.serializers import company_features_with_source
+
+        company = _company_of(request.user)
+        if company is None:
+            raise PermissionDenied("Пользователь не привязан к компании.")
+        end = getattr(company, "end_date", None)
+        return Response(company_features_with_source(company, plan_until=end.isoformat() if end else None))

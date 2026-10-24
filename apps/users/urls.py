@@ -1,4 +1,4 @@
-from apps.users.app_settings_views import CompanyFeatureActivateAPIView, UserAppSettingsAPIView
+from apps.users.app_settings_views import CompanyFeatureActivateAPIView, CompanyFeatureTrialAPIView, CompanyFeaturesListAPIView, UserAppSettingsAPIView
 from django.urls import path
 from .views import (
     CompanyAddonListAPIView,
@@ -66,6 +66,8 @@ urlpatterns = [
     # ⚙️ Настройки
     path('ui-preferences/', UserUiPreferencesAPIView.as_view(), name='user-ui-preferences'),
     path('app-settings/<str:app>/', UserAppSettingsAPIView.as_view(), name='user-app-settings'),
+    path('company/features/', CompanyFeaturesListAPIView.as_view(), name='company-features'),
+    path('company/features/trial/', CompanyFeatureTrialAPIView.as_view(), name='company-feature-trial'),
     path('company/features/activate/', CompanyFeatureActivateAPIView.as_view(), name='company-feature-activate'),
     path('settings/change-password/', ChangePasswordView.as_view(), name='change-password'),
     path('settings/company/', CompanyUpdateAPIView.as_view(), name='company-update'),
