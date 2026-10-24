@@ -1197,7 +1197,7 @@ class CashShiftListView(CompanyBranchScopedMixin, generics.ListAPIView):
 
 def build_shift_report(shift: CashShift) -> dict:
     """Сводка смены для владельца/кассы: продажи по способам оплаты, скидки, возвраты, внесения, изъятия."""
-    from apps.main.models import Sale, SalePayment
+    from apps.main.models import Sale, SalePayment, SaleReturn
 
     z = Decimal("0.00")
     q2 = lambda v: str((v or z).quantize(Decimal("0.01")))  # noqa: E731
@@ -1238,6 +1238,63 @@ def build_shift_report(shift: CashShift) -> dict:
 
     expected = totals.get("expected_cash", shift.expected_cash)
     counted = shift.closing_cash if shift.status == CashShift.Status.CLOSED else None
+
+    # ТЗ Н-05. Правило предоплаты по чеку в долг: в старом ключе `cash_sales` она уже
+    # лежит (cash_sales_total + debt_prepayments_cash — числа не меняем), а в
+    # `cash_in_drawer_breakdown` — РОВНО один раз, строкой `prepayments_cash`;
+    # строка `cash_sales` раскладки — только чистые наличные продажи без предоплат.
+    debt_prepay_cash = totals.get("debt_prepayments_cash") or z
+    debt_prepay_noncash = totals.get("debt_prepayments_noncash") or z
+    debt_paid_cash = totals.get("debt_payments_cash") or z
+    # Долговая часть чеков смены (debt_initial), без отменённых.
+    credit_total = (
+        sales.filter(
+            status__in=[Sale.Status.DEBT, Sale.Status.PAID, Sale.Status.PARTIALLY_RETURNED], debt_initial__gt=0
+        ).aggregate(s=Sum("debt_initial"))["s"]
+        or z
+    )
+    debt_paid_all = (
+        shift.shift_flows.filter(
+            status=CashFlow.Status.APPROVED,
+            request_kind__isnull=True,
+            type=CashFlow.Type.INCOME,
+            source_kind=CashFlow.SourceKind.DEBT_REPAYMENT,
+        ).aggregate(s=Sum("amount"))["s"]
+        or z
+    )
+    debt_paid_noncash = max(debt_paid_all - debt_paid_cash, z)
+    # Возвраты нашей же смены по своим чекам: payment-строки таких чеков уже уменьшены
+    # (или чек отменён), поэтому в раскладке «наличные продажи» показываем брутто, а
+    # возврат — отдельной минус-строкой; сумма не меняется.
+    own_returns_cash = (
+        SaleReturn.objects.filter(
+            shift_id=shift.id,
+            sale__shift_id=shift.id,
+            sale__status__in=[Sale.Status.CANCELED, Sale.Status.PARTIALLY_RETURNED],
+        ).aggregate(s=Sum("refund_cash"))["s"]
+        or z
+    )
+    deposits = drawer.get(CashFlow.SourceKind.SHIFT_DRAWER_INFLOW) or z
+    withdrawals = drawer.get(CashFlow.SourceKind.SHIFT_DRAWER_OUTFLOW) or z
+    cash_sales_gross = (totals.get("drawer_cash_sales_net") or z) + own_returns_cash
+    rows = [
+        ("opening", shift.opening_cash or z),
+        ("cash_sales", cash_sales_gross),
+        ("prepayments_cash", debt_prepay_cash),
+        ("debt_payments_cash", debt_paid_cash),
+        ("returns_cash", -own_returns_cash),
+        ("deposits", deposits),
+        ("withdrawals", -withdrawals),
+    ]
+    # Прочие приходы/расходы ящика (не внесение/изъятие/долг) — чтобы сумма сходилась с expected_cash.
+    other = (
+        (totals.get("non_sale_income") or z) - (totals.get("expense_total") or z)
+        - debt_paid_cash - deposits + withdrawals
+    )
+    if other != z:
+        rows.append(("other", other))
+    rows.append(("expected_cash", expected))
+
     return {
         "shift": str(shift.id),
         "status": shift.status,
@@ -1269,6 +1326,18 @@ def build_shift_report(shift: CashShift) -> dict:
         "expected_cash": q2(expected),
         "counted_cash": q2(counted) if counted is not None else None,
         "difference": q2(counted - expected) if counted is not None else None,
+        # ТЗ Н-05: выручка без долга = продажи смены минус долговая часть (предоплата входит).
+        # sales_total уже за вычетом возвратов (Sale.total уменьшается, полные возвраты отменены),
+        # поэтому повторно вычитать возвраты не нужно: includes_returns = false.
+        "revenue_excl_debt": q2((totals.get("sales_total") or z) - credit_total),
+        "revenue_excl_debt_includes_returns": False,
+        "credit_sales_total": q2(credit_total),
+        "debt_repaid_total": q2(debt_paid_all),
+        "debt_repaid_cash": q2(debt_paid_cash),
+        "debt_repaid_noncash": q2(debt_paid_noncash),
+        "prepayment_total": q2(debt_prepay_cash + debt_prepay_noncash),
+        "closing_cash": q2(counted) if counted is not None else None,
+        "cash_in_drawer_breakdown": [{"code": c, "amount": q2(a)} for c, a in rows],
     }
 
 

@@ -620,6 +620,9 @@ class CashShift(models.Model):
             "debt_prepayments_cash": debt_prepayments_cash,
             "debt_prepayments_noncash": debt_prepayments_noncash,
             "debt_payments_cash": debt_payments_cash,
+            # ТЗ Н-05: слагаемые expected_cash для раскладки «в ящике» (та же формула, без второй)
+            "drawer_cash_sales_net": drawer_cash_in + drawer_legacy_cash,
+            "non_sale_income": non_sale_income,
         }
 
         # Приводим деньги к 2 знакам. Произведение numeric(12,2) * numeric(…,3)
