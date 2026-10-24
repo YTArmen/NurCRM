@@ -115,6 +115,7 @@ from apps.main.part12_views import (
 
 
 from apps.main.views_payables import SupplierPayablesAPIView
+from apps.main.telegram_bot.views import BotNotifyOwnerView
 from apps.main.views_idempotency import IdempotencyLookupAPIView
 
 urlpatterns = [
@@ -609,6 +610,7 @@ urlpatterns = [
     # ==========================
     # Telegram Bot & AI (TZ-BE-2026-06 / Часть 5)
     # ==========================
+    path("bot/notify-owner/", BotNotifyOwnerView.as_view(), name="bot-notify-owner"),  # ТЗ Н-23
     path("telegram-bot/", include("apps.main.telegram_bot.urls")),
     path("telegram/", include("apps.main.telegram_bot.urls")),
 ]

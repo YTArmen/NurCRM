@@ -33,6 +33,8 @@ class TelegramBotSettings(models.Model):
     owner_chat_id = models.CharField("Chat ID владельца", max_length=64, blank=True, null=True, db_index=True)
     owner_chat_title = models.CharField("Название чата владельца", max_length=255, blank=True, null=True)
     owner_phone = models.CharField("Телефон владельца", max_length=32, blank=True, null=True)
+    # ТЗ Н-23 (2): владелец определяется по from.id Telegram, общий для всех касс компании
+    owner_user_id = models.CharField("Telegram from.id владельца", max_length=64, blank=True, default="", db_default="")
 
     shift_summary_enabled = models.BooleanField("Сводка при закрытии смены", default=True)
     commands_enabled = models.BooleanField("Команды владельца включены", default=True)
@@ -347,3 +349,40 @@ class TelegramBotAudit(models.Model):
 
     def __str__(self):
         return f"TelegramBotAudit({self.company_id}, {self.action}, {self.created_at})"
+
+
+# ТЗ Н-23 (1): журнал уведомлений владельцу с ключом идемпотентности
+class TelegramOwnerNotification(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(
+        "users.Company", on_delete=models.CASCADE, related_name="telegram_owner_notifications",
+    )
+    dedupe_key = models.CharField("Ключ идемпотентности", max_length=128, blank=True, default="")
+    text = models.TextField("Текст", blank=True, default="")
+    ok = models.BooleanField("Отправлено", default=False)
+    error = models.CharField("Ошибка", max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "telegram_owner_notifications"
+        indexes = [models.Index(fields=["company", "dedupe_key", "-created_at"], name="main_tgown_notif_idx")]
+
+
+# ТЗ Н-23 (2): одноразовый код подтверждения владельца (хранится хешем)
+class TelegramOwnerCode(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(
+        "users.Company", on_delete=models.CASCADE, related_name="telegram_owner_codes",
+    )
+    code_hash = models.CharField(max_length=64)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    created_by = models.ForeignKey(
+        django_settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "telegram_owner_codes"
+        indexes = [models.Index(fields=["company", "-created_at"], name="main_tgown_code_idx")]
