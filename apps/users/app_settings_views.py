@@ -17,7 +17,7 @@ from datetime import timedelta
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, NotFound, PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -34,6 +34,22 @@ from apps.users.models import (
 APP_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 MAX_BYTES = 256 * 1024
 SECRETS_KEY = "secrets"
+META_KEY = "_meta"  # ТЗ Н-17: служебные версии по ключам внутри JSON, клиенту не отдаются и не пишутся
+EXPECTED_KEY = "_expected"
+MAX_KEY_BYTES = 64 * 1024
+SECRET_PREFIX = "secret_"
+
+
+class TooLarge(APIException):
+    """ТЗ Н-17: 413 too_large."""
+
+    status_code = 413
+    default_code = "too_large"
+
+
+class KeyVersionConflict(Exception):
+    def __init__(self, keys):
+        self.keys = keys
 
 
 def _check_app(app):
@@ -66,10 +82,17 @@ def _decrypt_all(enc):
 
 def _payload(obj, *, with_secrets):
     settings = dict(obj.settings or {}) if obj else {}
+    settings.pop(META_KEY, None)  # ТЗ Н-17: служебное
+    if not with_secrets:  # ТЗ Н-17: secret_* только владельцу/админу
+        settings = {k: v for k, v in settings.items() if not str(k).startswith(SECRET_PREFIX)}
     if obj and obj.secrets and with_secrets:
         settings[SECRETS_KEY] = _decrypt_all(obj.secrets)
+    kv = {k: int((v or {}).get("version") or 0) for k, v in _key_versions(obj.settings or {}).items()} if obj else {}
+    if not with_secrets:
+        kv = {k: v for k, v in kv.items() if not str(k).startswith(SECRET_PREFIX)}
     return {
         "settings": settings,
+        "key_versions": kv,  # ТЗ Н-17: версии по ключам для _expected
         "version": obj.version if obj else 0,
         "updated_at": obj.updated_at.isoformat() if obj and obj.updated_at else None,
     }
@@ -92,14 +115,37 @@ def _if_match(request):
         raise ValidationError({"If-Match": "Ожидается номер версии."})
 
 
-def _apply_patch(obj, body):
+def _key_versions(settings):
+    meta = settings.get(META_KEY)
+    keys = meta.get("keys") if isinstance(meta, dict) else None
+    return keys if isinstance(keys, dict) else {}
+
+
+def _apply_patch(obj, body, user=None, expected_keys=None):
     """Сливает тело в obj.settings / obj.secrets. Возвращает True, если что-то изменилось."""
     if not isinstance(body, dict):
         raise ValidationError({"detail": "Тело — JSON-объект с настройками."})
+    body = dict(body)
+    if META_KEY in body:
+        raise ValidationError({"detail": "Ключ _meta зарезервирован.", "code": "reserved_key"})
+    exp = body.pop(EXPECTED_KEY, None)
+    if exp is not None:
+        if not isinstance(exp, dict) or any(isinstance(v, bool) or not isinstance(v, int) for v in exp.values()):
+            raise ValidationError({EXPECTED_KEY: "Ожидается объект {ключ: версия}."})
+        expected_keys = exp
+    for k, v in body.items():  # ТЗ Н-17: лимит на ключ
+        if k != SECRETS_KEY and len(json.dumps(v, ensure_ascii=False).encode("utf-8")) > MAX_KEY_BYTES:
+            raise TooLarge({"detail": f"Ключ «{k}» больше 64 КБ.", "code": "too_large"})
     settings = dict(obj.settings or {})
     secrets = dict(obj.secrets or {})
     before = (json.dumps(settings, sort_keys=True), dict(secrets))
     plain_secrets = None
+    if expected_keys:  # ТЗ Н-17: условная запись по ключам
+        cur = _key_versions(settings)
+        bad = [k for k, n in expected_keys.items() if int((cur.get(k) or {}).get("version") or 0) != n]
+        if bad:
+            raise KeyVersionConflict(bad)
+    touched = []
 
     for key, value in body.items():
         if key == SECRETS_KEY:
@@ -117,13 +163,30 @@ def _apply_patch(obj, body):
                     secrets[sk] = encrypt_secret(json.dumps(sv, ensure_ascii=False))
                     plain_secrets[sk] = sv
         elif value is None:
+            if key in settings:
+                touched.append(key)
             settings.pop(key, None)
         else:
+            if settings.get(key) != value or key not in settings:
+                touched.append(key)
             settings[key] = value
+
+    if touched:
+        meta = dict(settings.get(META_KEY) or {})
+        keys = dict(meta.get("keys") or {})
+        now = timezone.now().isoformat()
+        for k in touched:
+            keys[k] = {
+                "version": int((keys.get(k) or {}).get("version") or 0) + 1,
+                "updated_at": now,
+                "updated_by": str(getattr(user, "id", "") or "") or None,
+            }
+        meta["keys"] = keys
+        settings[META_KEY] = meta
 
     size = len(json.dumps(settings, ensure_ascii=False).encode("utf-8")) + len(json.dumps(secrets).encode("utf-8"))
     if size > MAX_BYTES:
-        raise ValidationError({"detail": "Настройки больше 256 КБ.", "code": "too_large"})
+        raise TooLarge({"detail": "Настройки больше 256 КБ.", "code": "too_large"})
 
     changed = (json.dumps(settings, sort_keys=True), secrets) != before
     if changed:
@@ -174,7 +237,18 @@ class _AppSettingsMixin:
                         payload["detail"] = "Настройки изменились на другом устройстве — перечитайте и слейте."
                         payload["code"] = "version_conflict"
                         return _response(payload, status.HTTP_412_PRECONDITION_FAILED)
-                    changed = _apply_patch(obj, request.data)
+                    try:
+                        changed = _apply_patch(obj, request.data, request.user)
+                    except KeyVersionConflict as e:  # ТЗ Н-17: 409 с текущими значениями этих ключей
+                        payload = _payload(obj if obj.pk else None, with_secrets=self._with_secrets(request))
+                        cur_keys = _key_versions(obj.settings or {})
+                        payload["conflict_keys"] = {
+                            k: {"value": payload["settings"].get(k), "version": int((cur_keys.get(k) or {}).get("version") or 0)}
+                            for k in e.keys
+                        }
+                        payload["detail"] = "Ключи изменились на другом устройстве — перечитайте и слейте."
+                        payload["code"] = "version_conflict"
+                        return _response(payload, status.HTTP_409_CONFLICT)
                     if changed or not obj.pk:
                         if hasattr(obj, "updated_by_id"):
                             obj.updated_by = request.user
