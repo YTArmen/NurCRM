@@ -211,7 +211,7 @@ class RentalTests(KassaBase):
         self.m.refresh_from_db()
         self.assertEqual(self.m.quantity, Decimal("1"))
         self.assertEqual(self.shift.calc_live_totals(refresh=True)["expected_cash"], Decimal("6000.00"))
-        self.assertEqual(len(self.api.get("/api/rentals/?status=active").data), 1)
+        self.assertEqual(self.api.get("/api/rentals/?status=active").data["count"], 1)  # ТЗ Н-21: count/results
 
         r = self.api.post(f"/api/rentals/{rent['id']}/return/", {"condition": "ok"}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
@@ -236,7 +236,7 @@ class RentalTests(KassaBase):
         past = timezone.localdate() - timedelta(days=5)
         self._rent(deposit_type="document", deposit_document="паспорт AN123",
                    date_from=past.isoformat(), date_to=(past + timedelta(days=1)).isoformat())
-        rows = self.api.get("/api/rentals/?status=overdue").data
+        rows = self.api.get("/api/rentals/?status=overdue").data["results"]
         self.assertEqual(len(rows), 1)
         self.assertTrue(rows[0]["overdue"])
         self.assertEqual(rows[0]["deposit_amount"], "0.00")

@@ -6,6 +6,7 @@
                                        tariff, deposit_type: money|document, deposit_amount}
     GET  /api/rentals/{id}/
     PATCH /api/rentals/{id}/          {rent_amount?, sale?, note?}
+    POST /api/rentals/{id}/extend/    {new_date_to, extra_amount, payment_method, shift?}  (Idempotency-Key; ТЗ Н-21)
     POST /api/rentals/{id}/return/    {condition: ok|damaged, penalty, payment: {method, received},
                                        items?: [{variant} | {product, qty}]  — возврат части вещей}
 
@@ -23,17 +24,19 @@ from decimal import Decimal
 
 from django.core.cache import cache
 from django.db import IntegrityError, transaction
-from django.db.models import Prefetch
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import permissions, serializers, status
 from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.main.kassa_stage3 import _checkout_payload, _move_stock, _new_cart, _open_shift
 from apps.main.kassa_views import _company
-from apps.main.models import CartItem, Client, Product, ProductVariant, Rental, RentalItem, Sale
+from apps.main.models import CartItem, Client, Product, ProductVariant, Rental, RentalExtension, RentalItem, Sale
 from apps.main.pos_serializers import MoneyField, QtyField
 from apps.main.pos_utils import money, qty3
 
@@ -77,8 +80,11 @@ class RentalCreateSerializer(serializers.Serializer):
     )
     deposit_document = serializers.CharField(required=False, allow_blank=True, max_length=255)
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    late_penalty_per_day = MoneyField(required=False, default=ZERO)  # ТЗ Н-21
 
     def validate(self, attrs):
+        if attrs.get("late_penalty_per_day") is not None and attrs["late_penalty_per_day"] < 0:
+            raise serializers.ValidationError({"late_penalty_per_day": "Пеня не может быть отрицательной."})
         if attrs["date_to"] < attrs["date_from"]:
             raise serializers.ValidationError({"date_to": "Дата возврата раньше даты выдачи."})
         if attrs["deposit_amount"] < 0:
@@ -96,6 +102,12 @@ class RentalUpdateSerializer(serializers.Serializer):
     rent_amount = MoneyField(required=False)
     sale = serializers.UUIDField(required=False, allow_null=True)
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    late_penalty_per_day = MoneyField(required=False)  # ТЗ Н-21
+
+    def validate_late_penalty_per_day(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("Пеня не может быть отрицательной.")
+        return value
 
     def validate_rent_amount(self, value):
         if value is not None and value < 0:
@@ -134,10 +146,58 @@ def _rental_items(r: Rental):
     return r.items.select_related("product", "variant")
 
 
+def _mask_phone(phone: str) -> str:
+    """ТЗ Н-21: телефон клиента для сотрудников без доступа к клиентам: +996 *** ** 12 34 → остаются последние 4 цифры."""
+    digits = [c for c in (phone or "") if c.isdigit()]
+    if len(digits) <= 4:
+        return "*" * len(digits)
+    return "*" * (len(digits) - 4) + "".join(digits[-4:])
+
+
+def _money_fields(r: Rental, today):
+    """ТЗ Н-21: price, paid, deposit_refunded/withheld, penalty_due (считаются на лету, без хранения)."""
+    ext_sum = sum((e.amount for e in r.extensions.all()), ZERO)
+    price = money((r.rent_amount or ZERO) + ext_sum)
+    # Оплачено: доплаты продлений + стоимость проката, если она проведена продажей
+    paid = money(ext_sum + ((r.rent_amount or ZERO) if r.sale_id else ZERO))
+    deposit = r.deposit_amount if r.deposit_type == Rental.DepositType.MONEY else ZERO
+    if r.status == Rental.Status.RETURNED:
+        accrued = r.penalty or ZERO
+        withheld = money(min(deposit, accrued))
+        refunded = money(deposit - withheld)
+    else:
+        days = (today - r.date_to).days if r.date_to < today else 0
+        accrued = money((r.late_penalty_per_day or ZERO) * days)
+        withheld = refunded = ZERO
+    return {
+        "price": str(price),
+        "paid": str(paid),
+        "deposit_refunded": str(refunded),
+        "deposit_withheld": str(withheld),
+        "penalty_due": str(money(max(ZERO, accrued - deposit))),
+    }
+
+
 def _payload(r: Rental, user=None):
     today = timezone.localdate()
     show_document = _can_view_client_details(user)
+    phone = r.client.phone if r.client_id else None
     return {
+        "client_phone": (phone if show_document else _mask_phone(phone)) if phone else None,
+        **_money_fields(r, today),
+        "late_penalty_per_day": str(r.late_penalty_per_day or ZERO),
+        "created_by": str(r.created_by_id) if r.created_by_id else None,
+        "cashbox": str(r.cashbox_id) if r.cashbox_id else None,
+        "shift": str(r.shift_id) if r.shift_id else None,
+        "extensions": [
+            {
+                "at": e.created_at.isoformat() if e.created_at else None,
+                "old_date_to": e.old_date_to.isoformat(),
+                "new_date_to": e.new_date_to.isoformat(),
+                "amount": str(e.amount),
+            }
+            for e in r.extensions.all()
+        ],
         "id": str(r.id),
         "number": r.number,
         "client": str(r.client_id),
@@ -197,6 +257,11 @@ def _deposit_flow(rental, user, shift, amount, *, refund):
     )
 
 
+class _RentalPagination(LimitOffsetPagination):
+    default_limit = 500
+    max_limit = 500
+
+
 class RentalListCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -205,18 +270,46 @@ class RentalListCreateAPIView(APIView):
         qs = (
             Rental.objects.filter(company=company)
             .select_related("client")
-            .prefetch_related(Prefetch("items", queryset=RentalItem.objects.select_related("product", "variant")))
+            .prefetch_related(
+                Prefetch("items", queryset=RentalItem.objects.select_related("product", "variant")),
+                "extensions",
+            )
         )
-        st = request.query_params.get("status")
+        qp = request.query_params
+        st = qp.get("status")
         if st == "overdue":
             qs = qs.filter(status=Rental.Status.ACTIVE, date_to__lt=timezone.localdate())
         elif st in Rental.Status.values:
             qs = qs.filter(status=st)
         elif st:
             raise ValidationError({"status": "Допустимо: active, overdue, returned."})
-        if request.query_params.get("client"):
-            qs = qs.filter(client_id=request.query_params["client"])
-        return Response([_payload(r, request.user) for r in qs[:500]])
+        if qp.get("client"):
+            qs = qs.filter(client_id=qp["client"])
+        # ТЗ Н-21: date_from/date_to — по дате выдачи
+        try:
+            if qp.get("date_from"):
+                qs = qs.filter(date_from__gte=qp["date_from"])
+            if qp.get("date_to"):
+                qs = qs.filter(date_from__lte=qp["date_to"])
+        except (ValueError, DjangoValidationError):
+            raise ValidationError({"date_from": "Дата в формате YYYY-MM-DD."})
+        search = (qp.get("search") or "").strip()
+        if search:
+            cond = Q(client__full_name__icontains=search) | Q(client__phone__icontains=search) | Q(tariff__icontains=search)
+            if search.isdigit():
+                cond |= Q(number=int(search))
+            qs = qs.filter(cond)
+        ordering = qp.get("ordering") or ""
+        allowed = {"created_at", "date_from", "date_to", "number", "rent_amount"}
+        fields = [f for f in ordering.split(",") if f.strip().lstrip("-") in allowed]
+        qs = qs.order_by(*[f.strip() for f in fields], "-created_at") if fields else qs.order_by("-created_at")
+        # Один формат ответа для любого status: count/next/previous/results
+        paginator = _RentalPagination()
+        try:
+            page = paginator.paginate_queryset(qs, request)
+        except Exception:
+            raise ValidationError({"detail": "Некорректные limit/offset."})
+        return paginator.get_paginated_response([_payload(r, request.user) for r in page])
 
     def post(self, request):
         company = _company(request)
@@ -254,6 +347,9 @@ class RentalListCreateAPIView(APIView):
                         deposit_document=data.get("deposit_document") or "",
                         note=data.get("note") or "",
                         created_by=request.user,
+                        late_penalty_per_day=money(data.get("late_penalty_per_day") or ZERO),
+                        cashbox=getattr(shift, "cashbox", None),
+                        shift=shift,
                     )
                     for idx, it in enumerate(data["items"]):
                         variant = None
@@ -286,7 +382,8 @@ class RentalDetailAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, pk):
-        return Response(_payload(get_object_or_404(Rental, pk=pk, company=_company(request)), request.user))
+        qs = Rental.objects.select_related("client").prefetch_related("extensions")
+        return Response(_payload(get_object_or_404(qs, pk=pk, company=_company(request)), request.user))
 
     def patch(self, request, pk):
         company = _company(request)
@@ -310,6 +407,9 @@ class RentalDetailAPIView(APIView):
             if "note" in data:
                 rental.note = data["note"] or ""
                 fields.append("note")
+            if "late_penalty_per_day" in data:
+                rental.late_penalty_per_day = money(data["late_penalty_per_day"] or ZERO)
+                fields.append("late_penalty_per_day")
             if fields:
                 rental.save(update_fields=fields)
         return Response(_payload(rental, request.user))
@@ -481,3 +581,83 @@ class RentalReturnAPIView(APIView):
             except Exception:
                 pass
         return Response(body)
+
+
+class RentalExtendSerializer(serializers.Serializer):
+    new_date_to = serializers.DateField()
+    extra_amount = MoneyField(required=False, default=ZERO)
+    payment_method = serializers.ChoiceField(
+        choices=Rental.DepositMethod.choices, required=False, default=Rental.DepositMethod.CASH
+    )
+
+
+class RentalExtendAPIView(APIView):
+    """
+    ТЗ Н-21: POST /api/rentals/{id}/extend/ {new_date_to, extra_amount, payment_method, shift?}
+    Заголовок Idempotency-Key. Доплата — приход в кассу (наличные — в ящик смены).
+    Ошибки: rental_returned, date_not_later, shift_closed.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        from apps.construction.auto_cashflow import create_auto_cashflow
+        from apps.construction.models import CashFlow
+        from apps.main.views import _receipt_drawer_shift
+
+        company = _company(request)
+        ser = RentalExtendSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+        extra = money(data.get("extra_amount") or ZERO)
+        if extra < 0:
+            raise ValidationError({"extra_amount": "Сумма не может быть отрицательной."})
+        idem = (request.headers.get("Idempotency-Key") or "").strip()[:128] or None
+
+        with transaction.atomic():
+            rental = get_object_or_404(Rental.objects.select_for_update(), pk=pk, company=company)
+            if idem and RentalExtension.objects.filter(rental=rental, idempotency_key=idem).exists():
+                rental = Rental.objects.select_related("client").prefetch_related("extensions").get(pk=rental.pk)
+                return Response({**_payload(rental, request.user), "replayed": True})
+            if rental.status == Rental.Status.RETURNED:
+                raise ValidationError({"code": "rental_returned", "detail": "Прокат уже возвращён."})
+            if data["new_date_to"] <= rental.date_to:
+                raise ValidationError(
+                    {"code": "date_not_later", "detail": "Новая дата должна быть позже текущей даты возврата."}
+                )
+            shift = _receipt_drawer_shift(request, company)
+            if shift is None and extra > 0:
+                from apps.main.pos_views import _find_open_shift_for_cashier
+
+                shift = _find_open_shift_for_cashier(company=company, cashier=request.user)
+            method = data["payment_method"] or "cash"
+            ext = RentalExtension.objects.create(
+                rental=rental,
+                old_date_to=rental.date_to,
+                new_date_to=data["new_date_to"],
+                amount=extra,
+                payment_method=method,
+                shift=shift,
+                idempotency_key=idem,
+                created_by=request.user,
+            )
+            if extra > 0:
+                create_auto_cashflow(
+                    company=company,
+                    branch=getattr(shift, "branch", None),
+                    cashbox=getattr(shift, "cashbox", None),
+                    user=request.user,
+                    shift=shift,
+                    type=CashFlow.Type.INCOME,
+                    amount=extra,
+                    source_kind=CashFlow.SourceKind.MANUAL,
+                    source_id=str(ext.id),
+                    payment_method=method,
+                    affects_shift_drawer=(method == "cash" and shift is not None),
+                    name=f"Продление проката №{rental.number}",
+                    source_business_operation_id="rental_extend",
+                )
+            rental.date_to = data["new_date_to"]
+            rental.save(update_fields=["date_to"])
+        rental = Rental.objects.select_related("client").prefetch_related("extensions").get(pk=rental.pk)
+        return Response(_payload(rental, request.user))

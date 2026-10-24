@@ -7161,6 +7161,12 @@ class Rental(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     returned_at = models.DateTimeField(null=True, blank=True)
+    # ТЗ Н-21: пеня за день просрочки, касса и смена выдачи
+    late_penalty_per_day = models.DecimalField(
+        "Пеня за день просрочки", max_digits=12, decimal_places=2, default=Decimal("0.00"), db_default=Decimal("0.00")
+    )
+    cashbox = models.ForeignKey("construction.Cashbox", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    shift = models.ForeignKey("construction.CashShift", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 
     class Meta:
         ordering = ("-created_at",)
@@ -7177,6 +7183,99 @@ class RentalItem(models.Model):
     variant = models.ForeignKey(ProductVariant, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
     quantity = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("1"))
     returned_quantity = models.DecimalField("Возвращено", max_digits=12, decimal_places=3, default=Decimal("0"))
+
+
+class RentalExtension(models.Model):
+    """ТЗ Н-21: продление проката (новая дата возврата и доплата)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rental = models.ForeignKey(Rental, on_delete=models.CASCADE, related_name="extensions")
+    old_date_to = models.DateField()
+    new_date_to = models.DateField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    payment_method = models.CharField(max_length=32, blank=True, default="cash")
+    shift = models.ForeignKey("construction.CashShift", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    idempotency_key = models.CharField(max_length=128, null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["rental", "idempotency_key"],
+                condition=models.Q(idempotency_key__isnull=False),
+                name="uniq_rental_extension_idem",
+            )
+        ]
+
+
+class ClientDocument(models.Model):
+    """ТЗ Н-22: клиентский документ — КП, счёт, накладная (номер выдаёт сервер, удаление мягкое)."""
+
+    class Type(models.TextChoices):
+        QUOTE = "quote", "Коммерческое предложение"
+        INVOICE = "invoice", "Счёт"
+        WAYBILL = "waybill", "Накладная"
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Черновик"
+        SENT = "sent", "Отправлен"
+        ACCEPTED = "accepted", "Принят"
+        PAID = "paid", "Оплачен"
+        CANCELED = "canceled", "Отменён"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="client_documents")
+    type = models.CharField(max_length=16, choices=Type.choices)
+    number = models.PositiveIntegerField()
+    client = models.ForeignKey(Client, on_delete=models.PROTECT, null=True, blank=True, related_name="documents")
+    lines = models.JSONField(default=list, blank=True)
+    discount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    valid_until = models.DateField(null=True, blank=True)
+    due_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    note = models.CharField(max_length=500, blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_deleted = models.BooleanField(default=False, db_default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        constraints = [models.UniqueConstraint(fields=["company", "type", "number"], name="uniq_client_doc_number")]
+        indexes = [models.Index(fields=["company", "type", "status"], name="main_clientdoc_idx")]
+
+
+class ClientDocumentPayment(models.Model):
+    """ТЗ Н-22: оплата по документу (ключ идемпотентности хранится 7+ суток — вечно)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document = models.ForeignKey(ClientDocument, on_delete=models.CASCADE, related_name="payments")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    payment_method = models.CharField(max_length=32, blank=True, default="cash")
+    shift = models.ForeignKey("construction.CashShift", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    idempotency_key = models.CharField(max_length=128, null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document", "idempotency_key"],
+                condition=models.Q(idempotency_key__isnull=False),
+                name="uniq_client_doc_pay_idem",
+            )
+        ]
 
 
 class ProductDeletion(models.Model):
