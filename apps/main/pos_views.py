@@ -1389,8 +1389,12 @@ def _resolve_requested_open_shift(*, company, cashier, shift_id, cashbox_id=None
         .first()
     )
     if not shift or shift.status != CashShift.Status.OPEN:
+        # ТЗ Н-09: машинный код отказа (текст и статус 400 прежние)
         raise ValidationError(
-            {"detail": "Смена не открыта. Сначала откройте смену на кассе, затем начните продажу."}
+            {
+                "detail": "Смена не открыта. Сначала откройте смену на кассе, затем начните продажу.",
+                "code": "shift_not_found" if not shift else "shift_closed",
+            }
         )
     if cashbox_id and str(shift.cashbox_id) != str(cashbox_id):
         raise ValidationError({"cashbox_id": "Переданная смена относится к другой кассе."})
@@ -2325,7 +2329,7 @@ class SaleStartAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, API
 
         if not shift:
             raise ValidationError(
-                {"detail": "Смена не открыта. Сначала откройте смену на кассе, затем начните продажу."}
+                {"detail": "Смена не открыта. Сначала откройте смену на кассе, затем начните продажу.", "code": "shift_closed"}
             )
 
         if not cashbox:
@@ -2775,7 +2779,7 @@ class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
 
                 if not shift:
                     raise ValidationError(
-                        {"detail": "Смена не открыта. Сначала откройте смену на кассе, затем завершите продажу."}
+                        {"detail": "Смена не открыта. Сначала откройте смену на кассе, затем завершите продажу.", "code": "shift_closed"}
                     )
                 cart.shift = shift
                 if (branch or shift.branch) and cart.branch_id != getattr(shift.branch, "id", None):

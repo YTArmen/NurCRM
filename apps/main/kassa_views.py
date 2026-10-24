@@ -414,7 +414,7 @@ class PosQuickCheckoutAPIView(APIView):
                     shift = _find_open_shift_for_cashier(company=company, cashier=user)
                 if shift is None:
                     raise ValidationError(
-                        {"detail": "Смена не открыта. Сначала откройте смену на кассе, затем завершите продажу."}
+                        {"detail": "Смена не открыта. Сначала откройте смену на кассе, затем завершите продажу.", "code": "shift_closed"}
                     )
 
                 cart = Cart.objects.create(

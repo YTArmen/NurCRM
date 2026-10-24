@@ -87,6 +87,9 @@ class CashShiftListSerializer(serializers.ModelSerializer):
     cashier_breakdown = serializers.SerializerMethodField()
     resolved_cashbox_id = serializers.SerializerMethodField()
     resolved_cashbox_name = serializers.SerializerMethodField()
+    closed_by = serializers.SerializerMethodField()
+    close_reason = serializers.SerializerMethodField()
+    auto_close_at = serializers.SerializerMethodField()
 
     class Meta:
         model = CashShift
@@ -118,8 +121,33 @@ class CashShiftListSerializer(serializers.ModelSerializer):
             "cash_diff",
             "payment_breakdown",
             "cashier_breakdown",
+            "closed_by",
+            "close_reason",
+            "auto_close_at",
         ]
         read_only_fields = fields
+
+    # ТЗ Н-09: без миграции — «кто закрыл» выводим из close_reason модели.
+    _SYSTEM_REASONS = ("auto_timeout_24h", "employee_deleted")
+
+    def get_closed_by(self, obj):
+        if obj.status != CashShift.Status.CLOSED:
+            return None
+        return "system" if (obj.close_reason or "") in self._SYSTEM_REASONS else "user"
+
+    def get_close_reason(self, obj):
+        if obj.status != CashShift.Status.CLOSED:
+            return None
+        r = obj.close_reason or ""
+        if r == "auto_timeout_24h":
+            return "auto_24h"
+        return r or "manual"
+
+    def get_auto_close_at(self, obj):
+        from apps.construction.services_shifts import shift_auto_close_at
+
+        dt = shift_auto_close_at(obj)
+        return dt.isoformat() if dt else None
 
     def get_cashbox_name(self, obj):
         if obj.cashbox and obj.cashbox.branch:
