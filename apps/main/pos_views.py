@@ -3374,8 +3374,12 @@ def _rescale_sale_payments_after_partial_return(sale: Sale, old_total: Decimal, 
         p.save(update_fields=["amount"])
 
 
-def _recalc_sale_headers_from_items(sale: Sale) -> None:
-    """Пересчитать суммы шапки чека по оставшимся строкам."""
+def _recalc_sale_headers_from_items(sale: Sale, total_override: Optional[Decimal] = None) -> None:
+    """Пересчитать суммы шапки чека по оставшимся строкам.
+
+    total_override — точный остаток чека после возврата (ТЗ Н-02): скидка на чек
+    сохраняется в discount_total, а не теряется при пересчёте по строкам.
+    """
     rows = list(SaleItem.objects.filter(sale=sale).order_by("id"))
     if not rows:
         return
@@ -3395,6 +3399,9 @@ def _recalc_sale_headers_from_items(sale: Sale) -> None:
     else:
         new_tax = d0
     new_total = money(new_taxable + new_tax)
+    if total_override is not None:
+        new_total = money(total_override)
+        new_line_disc = money(new_subtotal + new_tax - new_total)
     sale.subtotal = new_subtotal
     sale.discount_total = new_line_disc
     sale.tax_total = new_tax
@@ -3766,6 +3773,23 @@ def _effective_refund_method(sale, refund_method) -> str:
     return str(sale.payment_method or "cash")[:16]
 
 
+def _refund_summary(sale, debt_adj) -> Optional[Dict]:
+    """ТЗ Н-02: разбивка последнего возврата — {id, amount, cash, noncash, debt_reduced, method}."""
+    from apps.main.models import SaleReturn
+
+    ret = SaleReturn.objects.filter(sale=sale).order_by("-created_at").first()
+    if ret is None:
+        return None
+    return {
+        "id": str(ret.id),
+        "amount": str(money(ret.returned_amount or 0)),
+        "cash": str(money(ret.refund_cash or 0)),
+        "noncash": str(money(ret.refund_noncash or 0)),
+        "debt_reduced": str(money(Decimal(str((debt_adj or {}).get("reduced_by") or 0)))),
+        "method": ret.refund_method,
+    }
+
+
 def _execute_sale_return(
     sale: Sale,
     partial_items: Optional[List[tuple]],
@@ -3824,6 +3848,14 @@ def _execute_sale_return(
             raise ValidationError({"items": "Есть позиции не из этого чека или несуществующие sale_item_id."})
 
         total_returned_money = Decimal("0.00")
+        # ТЗ Н-02: доля скидки на чек. Строка возвращается по цене после скидки
+        # на позицию × (итог чека / сумма строк); последний возврат — ровно остаток.
+        old_total = money(sale.total or Decimal("0.00"))
+        lines_net = money(sum(
+            (Decimal(str(it.unit_price or 0)) * Decimal(str(it.quantity or 0)) - Decimal(str(it.line_discount or 0)))
+            for it in sale.items.all()
+        ))
+        check_ratio = (old_total / lines_net) if lines_net > 0 else Decimal("1")
 
         for sid, rq in partial_items:
             item = (
@@ -3839,9 +3871,13 @@ def _execute_sale_return(
             unit_price = item.unit_price or Decimal("0.00")
             old_disc = Decimal(str(item.line_discount or 0))
             item_disc = money(old_disc * (rq / old_q)) if old_q > 0 else Decimal("0.00")
-            item_returned_money = money((unit_price * rq) - item_disc)
+            item_net = money((unit_price * rq) - item_disc)
+            item_returned_money = money(item_net * check_ratio)
             total_returned_money += item_returned_money
-            returned_lines.append(_return_line(item, rq, item_disc, reason=line_reason, restock=not is_defect))
+            # В строке возврата — цена со скидкой (и на позицию, и на чек), чтобы сверка сходилась.
+            returned_lines.append(_return_line(
+                item, rq, money(item_disc + item_net - item_returned_money), reason=line_reason, restock=not is_defect,
+            ))
 
             if is_agent_sale:
                 if rq != rq.to_integral_value():
@@ -3868,13 +3904,21 @@ def _execute_sale_return(
 
         is_full = not SaleItem.objects.filter(sale=sale).exists()
         if is_full:
+            # Последний возврат — ровно остаток чека (копейки округления — в последнюю строку).
+            diff = old_total - total_returned_money
+            total_returned_money = old_total
+            if diff and returned_lines:
+                last = returned_lines[-1]
+                last["discount"] = str(money(Decimal(last["discount"]) - diff))
+                last["total"] = last["amount"] = str(money(Decimal(last["total"]) + diff))
             sale.status = Sale.Status.CANCELED
         else:
+            total_returned_money = min(total_returned_money, old_total)
             sale.status = getattr(Sale.Status, "PARTIALLY_RETURNED", "partially_returned")
         sale.save(update_fields=["status"])
 
         if not is_full:
-            _recalc_sale_headers_from_items(sale)
+            _recalc_sale_headers_from_items(sale, total_override=old_total - total_returned_money)
 
         returned_money = total_returned_money
         debt_adj = adjust_sale_debt_on_return(sale, total_returned_money, is_full_return=is_full)
@@ -4089,7 +4133,7 @@ class SaleReturnAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, AP
                 sale_id=pk, idempotency_key=str(idempotency_key)
             ).first()
             if existing_ret and existing_ret.response_data:
-                return Response(existing_ret.response_data, status=status.HTTP_200_OK)
+                return Response({**existing_ret.response_data, "replayed": True}, status=status.HTTP_200_OK)
 
         locked_qs = Sale.objects.select_for_update()
         locked_qs = self._filter_qs_company_branch(locked_qs)
@@ -4100,9 +4144,10 @@ class SaleReturnAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, AP
         ensure_period_open_api(company=sale.company, dates=[timezone.now()], user=request.user)
 
         if sale.status == Sale.Status.CANCELED:
+            # ТЗ Н-02: всё уже возвращено (или чек отменён) — больше вернуть нельзя.
             return Response(
-                {"detail": "Продажа уже отменена."},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"code": "refund_exceeds_paid", "detail": "Продажа уже отменена или полностью возвращена."},
+                status=status.HTTP_409_CONFLICT,
             )
         valid_return_statuses = (
             Sale.Status.PAID,
@@ -4131,6 +4176,7 @@ class SaleReturnAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, AP
         sale.refresh_from_db()
         data = SaleDetailSerializer(sale, context={"request": request}).data
         data["debt_adjustment"] = debt_adj
+        data["refund"] = _refund_summary(sale, debt_adj)
 
         if idempotency_key:
             from apps.main.models import SaleReturn
@@ -4165,7 +4211,7 @@ class AgentSaleReturnAPIView(SaleReturnAPIView):
                 sale_id=pk, idempotency_key=str(idempotency_key)
             ).first()
             if existing_ret and existing_ret.response_data:
-                return Response(existing_ret.response_data, status=status.HTTP_200_OK)
+                return Response({**existing_ret.response_data, "replayed": True}, status=status.HTTP_200_OK)
 
         allowed_qs = (
             Sale.objects.filter(
@@ -4181,9 +4227,10 @@ class AgentSaleReturnAPIView(SaleReturnAPIView):
         sale = Sale.objects.select_for_update().get(id=pk)
 
         if sale.status == Sale.Status.CANCELED:
+            # ТЗ Н-02: всё уже возвращено (или чек отменён) — больше вернуть нельзя.
             return Response(
-                {"detail": "Продажа уже отменена."},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"code": "refund_exceeds_paid", "detail": "Продажа уже отменена или полностью возвращена."},
+                status=status.HTTP_409_CONFLICT,
             )
         valid_return_statuses = (
             Sale.Status.PAID,
@@ -4211,6 +4258,7 @@ class AgentSaleReturnAPIView(SaleReturnAPIView):
         sale.refresh_from_db()
         data = SaleDetailSerializer(sale, context={"request": request}).data
         data["debt_adjustment"] = debt_adj
+        data["refund"] = _refund_summary(sale, debt_adj)
 
         if idempotency_key:
             from apps.main.models import SaleReturn
