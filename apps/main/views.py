@@ -1,5 +1,5 @@
 from apps.integrations.idempotency import idempotent
-from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP, InvalidOperation
 from uuid import UUID, uuid4, uuid5
 
 from django.db import transaction, IntegrityError
@@ -5257,6 +5257,32 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     GET /api/main/suppliers/<uuid:supplier_id>/recommendations/
     Маркет — Рекомендуемый заказ
+
+    ТЗ Н-30. Параметры: analysis_days (7|14|30, по умолчанию 30), coverage_days (целое >= 0, 7),
+    safety_days (целое >= 0, 2), search, only_needed=true (синоним only_required: только строки с
+    recommended_quantity > 0), critical=true (только critical и out_of_stock), stock_status
+    (critical|ending|low|ok|no_sales|out_of_stock), ordering, page, page_size (<= 500).
+    Ошибка параметра: 400 {code: "invalid_param", detail, field}.
+
+    Правила stock_forecast.status (пороги зашиты в коде, от настроек компании не зависят;
+    avg_per_day = продажи за analysis_days / analysis_days):
+      no_sales     — продаж за период нет (avg_per_day = 0), days_remaining = null;
+      out_of_stock — есть продажи, остаток <= 0;
+      critical     — остатка хватит меньше чем на 2 дня (days_remaining < 2);
+      ending       — хватит на 2..4 дня (days_remaining < 4);
+      low          — остатка хватает на 4+ дней, но до целевого запаса
+                     (avg_per_day * (coverage_days + safety_days)) не хватает (recommended_quantity > 0);
+      ok           — остатка достаточно.
+    Для совместимости critical_products_count и фильтры critical=true / stock_status=critical
+    включают и out_of_stock.
+
+    Количество к заказу: недостача до целевого запаса. Штучный товар округляется ВВЕРХ до целого, а при
+    pack_size > 1 (кратность упаковки) — вверх до кратного pack_size. Весовой товар: вверх до 0.001
+    (кратность упаковки не применяется).
+    Порядок строк по умолчанию (и при ordering=urgency): out_of_stock, critical, ending, low, ok,
+    no_sales; внутри — days_remaining по возрастанию, затем название и id (порядок стабильный).
+    ordering: urgency, name, days_remaining, recommended_quantity, current_stock, estimated_cost;
+    «-» перед именем — по убыванию. summary.estimated_total — всегда число (0, если нечего заказывать).
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -5266,48 +5292,34 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
 
         qp = request.query_params
 
-        # 1. Валидация параметров
-        raw_analysis_days = qp.get("analysis_days", "30")
-        try:
-            analysis_days = int(raw_analysis_days)
-            if analysis_days not in (7, 14, 30):
-                return Response(
-                    {"detail": "analysis_days должен быть 7, 14 или 30."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        except (ValueError, TypeError):
+        # 1. Валидация параметров (ТЗ Н-30: единый код invalid_param)
+        def _bad(field, detail):
             return Response(
-                {"detail": "Некорректное значение analysis_days."},
+                {"code": "invalid_param", "detail": detail, "field": field},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        raw_coverage_days = qp.get("coverage_days", "7")
-        try:
-            coverage_days = int(raw_coverage_days)
-            if coverage_days < 0:
-                return Response(
-                    {"detail": "coverage_days не может быть отрицательным."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        except (ValueError, TypeError):
-            return Response(
-                {"detail": "Некорректное значение coverage_days."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        def _int_param(field, default):
+            raw = qp.get(field, default)
+            raw = str(default) if raw is None or str(raw).strip() == "" else str(raw).strip()
+            if not raw.lstrip("-").isdigit():
+                return None, _bad(field, f"{field}: нужно целое число >= 0.")
+            val = int(raw)
+            if val < 0:
+                return None, _bad(field, f"{field} не может быть отрицательным.")
+            return val, None
 
-        raw_safety_days = qp.get("safety_days", "2")
-        try:
-            safety_days = int(raw_safety_days)
-            if safety_days < 0:
-                return Response(
-                    {"detail": "safety_days не может быть отрицательным."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        except (ValueError, TypeError):
-            return Response(
-                {"detail": "Некорректное значение safety_days."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        analysis_days, err = _int_param("analysis_days", "30")
+        if err:
+            return err
+        if analysis_days not in (7, 14, 30):
+            return _bad("analysis_days", "analysis_days должен быть 7, 14 или 30.")
+        coverage_days, err = _int_param("coverage_days", "7")
+        if err:
+            return err
+        safety_days, err = _int_param("safety_days", "2")
+        if err:
+            return err
 
         raw_page_size = qp.get("page_size", "500")
         try:
@@ -5334,13 +5346,18 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
             page = 1
 
         search = (qp.get("search") or "").strip()
-        only_required = (qp.get("only_required") or "").strip().lower() in ("true", "1")
+        only_required = (
+            (qp.get("only_required") or "").strip().lower() in ("true", "1")
+            or (qp.get("only_needed") or "").strip().lower() in ("true", "1")
+        )
+        critical_only = (qp.get("critical") or "").strip().lower() in ("true", "1")
+        ordering_raw = (qp.get("ordering") or "").strip() or "urgency"
+        ordering_key = ordering_raw.lstrip("-")
+        if ordering_key not in ("urgency", "name", "days_remaining", "recommended_quantity", "current_stock", "estimated_cost"):
+            return _bad("ordering", "ordering: urgency, name, days_remaining, recommended_quantity, current_stock, estimated_cost (с «-» — по убыванию).")
         stock_status_filter = (qp.get("stock_status") or "").strip().lower()
-        if stock_status_filter and stock_status_filter not in ("critical", "ending", "low", "ok"):
-            return Response(
-                {"detail": "stock_status должен быть одним из: critical, ending, low, ok."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        if stock_status_filter and stock_status_filter not in ("critical", "ending", "low", "ok", "no_sales", "out_of_stock"):
+            return _bad("stock_status", "stock_status: critical, ending, low, ok, no_sales, out_of_stock.")
 
         # 2. Поставщик и компания
         sup_qs = self._filter_qs_company_branch(Client.objects.all())
@@ -5529,7 +5546,8 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
             pack_size = pack_size_map.get(p_id)
 
             if is_weight:
-                rec_qty = round(raw_rec, 3)
+                # ТЗ Н-30: весовой товар — вверх до 0.001 (упаковка не применяется)
+                rec_qty = float(Decimal(str(round(raw_rec, 9))).quantize(Decimal("0.001"), rounding=ROUND_CEILING))
             else:
                 raw_ceil = math.ceil(raw_rec)
                 if pack_size and pack_size > 1:
@@ -5537,10 +5555,11 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
                 else:
                     rec_qty = raw_ceil
 
-            if stock <= 0:
-                st_status = "critical"
-            elif avg_per_day <= 0:
-                st_status = "ok"
+            # ТЗ Н-30: no_sales / out_of_stock (правила — в докстринге)
+            if avg_per_day <= 0:
+                st_status = "no_sales"
+            elif stock <= 0:
+                st_status = "out_of_stock"
             elif days_remaining is not None and days_remaining < 2:
                 st_status = "critical"
             elif days_remaining is not None and days_remaining < 4:
@@ -5550,7 +5569,7 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
             else:
                 st_status = "ok"
 
-            if st_status == "critical":
+            if st_status in ("critical", "out_of_stock"):
                 critical_products_count += 1
 
             p_price = float(prod.purchase_price) if prod.purchase_price is not None else None
@@ -5586,10 +5605,39 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
 
             if only_required and rec_qty <= 0:
                 continue
-            if stock_status_filter and st_status != stock_status_filter:
+            if stock_status_filter == "critical":
+                if st_status not in ("critical", "out_of_stock"):
+                    continue
+            elif stock_status_filter and st_status != stock_status_filter:
+                continue
+            if critical_only and st_status not in ("critical", "out_of_stock"):
                 continue
 
+            _cost = (Decimal(str(rec_qty)) * Decimal(str(p_price))) if (rec_qty > 0 and p_price) else Decimal("0")
+            row_data["_sort"] = (None, None, _cost)
             items_result.append(row_data)
+
+        # ТЗ Н-30: стабильный порядок. Базово — срочность, затем остаток дней, имя, id.
+        _urgency_order = {"out_of_stock": 0, "critical": 1, "ending": 2, "low": 3, "ok": 4, "no_sales": 5}
+        items_result.sort(key=lambda r: (str(r["product_name"] or "").lower(), r["product_id"]))
+        _desc = ordering_raw.startswith("-")
+        if ordering_key == "urgency":
+            items_result.sort(key=lambda r: (
+                _urgency_order[r["stock_forecast"]["status"]],
+                r["stock_forecast"]["days_remaining"] if r["stock_forecast"]["days_remaining"] is not None else 10**9,
+            ), reverse=_desc)
+        elif ordering_key == "days_remaining":
+            items_result.sort(key=lambda r: r["stock_forecast"]["days_remaining"] if r["stock_forecast"]["days_remaining"] is not None else 10**9, reverse=_desc)
+        elif ordering_key == "name":
+            items_result.sort(key=lambda r: str(r["product_name"] or "").lower(), reverse=_desc)
+        elif ordering_key == "recommended_quantity":
+            items_result.sort(key=lambda r: r["recommended_quantity"], reverse=_desc)
+        elif ordering_key == "current_stock":
+            items_result.sort(key=lambda r: r["current_stock"], reverse=_desc)
+        elif ordering_key == "estimated_cost":
+            items_result.sort(key=lambda r: r["_sort"][2], reverse=_desc)
+        for r in items_result:
+            r.pop("_sort", None)
 
         # 9. Пагинация
         total_count = len(items_result)
@@ -5606,7 +5654,7 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
         next_url = make_page_url(page + 1) if end_idx < total_count else None
         prev_url = make_page_url(page - 1) if page > 1 and start_idx < total_count else None
 
-        estimated_total = float(estimated_total_sum) if has_estimated_total_price else None
+        estimated_total = float(estimated_total_sum) if has_estimated_total_price else 0
         supplier_name = supplier.full_name or supplier.llc or str(supplier)
 
         response_data = {
