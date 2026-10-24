@@ -14,16 +14,17 @@ _LETTER_SIZES = ["XXXS", "XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL", "4XL",
 _LETTER_INDEX = {s: i for i, s in enumerate(_LETTER_SIZES)}
 _LETTER_ALIASES = {"2XS": "XXS", "3XS": "XXXS", "2XL": "XXL", "3XL": "XXXL"}
 _NUM_RE = re.compile(r"^\d+([.,]\d+)?")
+_W_RE = re.compile(r"^W(\d+)(?:[/L\d]*)$", re.I)  # джинсовые W26…W36
 
 
 def size_sort_key(size) -> tuple:
     """
-    Порядок размеров: буквенные XS…XXL по порядку, затем числовые по возрастанию,
-    затем прочие по алфавиту, пустой размер — в конце.
+    ТЗ Н-26. Порядок размеров по умолчанию: буквенные XXS…5XL по порядку, затем числовые
+    по возрастанию, затем W26…W36 (по числу), затем прочие по алфавиту, пустой размер — в конце.
     """
     s = str(size or "").strip()
     if not s:
-        return (3, 0, "")
+        return (4, 0, "")
     up = s.upper().replace(" ", "")
     up = _LETTER_ALIASES.get(up, up)
     if up in _LETTER_INDEX:
@@ -34,11 +35,16 @@ def size_sort_key(size) -> tuple:
             return (1, float(m.group(0).replace(",", ".")), s.lower())
         except ValueError:
             pass
-    return (2, 0, s.lower())
+    mw = _W_RE.match(s.replace(" ", ""))
+    if mw:
+        return (2, int(mw.group(1)), s.lower())
+    return (3, 0, s.lower())
 
 
 def variant_sort_key(variant) -> tuple:
-    return size_sort_key(getattr(variant, "size", "")) + (str(getattr(variant, "color", "") or "").lower(),)
+    """ТЗ Н-26: ручной sort_order (если задан, не 0) важнее; при равных — порядок размеров, затем цвет."""
+    so = getattr(variant, "sort_order", 0) or 0
+    return (so,) + size_sort_key(getattr(variant, "size", "")) + (str(getattr(variant, "color", "") or "").lower(),)
 
 
 def sort_variants(variants: Iterable) -> list:
@@ -164,6 +170,51 @@ def release_stock(lines: List[dict]) -> None:
     _apply(products, variants, need_p, need_v, sign=1)
 
 
+def recalc_product_quantity(product_id) -> Optional[Decimal]:
+    """
+    ТЗ Н-27: у товара с вариантами остаток = сумма остатков АКТИВНЫХ вариантов (сервер пересчитывает сам).
+    Если вариантов нет вообще — остаток не трогаем (возвращает None).
+    """
+    from django.db.models import Sum
+
+    from apps.main.models import Product, ProductVariant
+
+    qs = ProductVariant.objects.filter(product_id=product_id)
+    if not qs.exists():
+        return None
+    total = qs.filter(is_active=True).aggregate(s=Sum("quantity"))["s"] or Decimal("0")
+    Product.objects.filter(pk=product_id).update(quantity=total)
+    return total
+
+
+def notify_variants_in_stock(variant_ids) -> int:
+    """
+    ТЗ Н-27: у варианта появился остаток > 0 → заявки «сообщить о поступлении» помечаются ready.
+    TODO: отправка покупателю (SMS/Telegram по phone / telegram_chat_id) — готового помощника для
+    покупательских уведомлений в проекте нет; пока только notified_at/статус, владелец видит заявки
+    в GET main/showcase/stock-requests/?status=ready.
+    """
+    from django.utils import timezone
+
+    from apps.main.models import ShowcaseStockRequest, ProductVariant
+
+    ids = [v for v in variant_ids if v]
+    if not ids:
+        return 0
+    open_ids = list(
+        ShowcaseStockRequest.objects.filter(variant_id__in=ids, status=ShowcaseStockRequest.Status.OPEN)
+        .values_list("variant_id", flat=True).distinct()
+    )
+    if not open_ids:
+        return 0
+    in_stock = list(ProductVariant.objects.filter(id__in=open_ids, is_active=True, quantity__gt=0).values_list("id", flat=True))
+    if not in_stock:
+        return 0
+    return ShowcaseStockRequest.objects.filter(variant_id__in=in_stock, status=ShowcaseStockRequest.Status.OPEN).update(
+        status=ShowcaseStockRequest.Status.READY, notified_at=timezone.now()
+    )
+
+
 def _apply(products, variants, need_p, need_v, *, sign: int) -> None:
     from apps.main.models import Product, ProductVariant
 
@@ -174,16 +225,31 @@ def _apply(products, variants, need_p, need_v, *, sign: int) -> None:
         changed_v.append(v)
     if changed_v:
         ProductVariant.objects.bulk_update(changed_v, ["quantity"])
+        if sign > 0:
+            notify_variants_in_stock([v.id for v in changed_v])
+
+    # ТЗ Н-27: товары с вариантами — остаток пересчитывается суммой активных вариантов
+    recalculated = {v.product_id for v in changed_v}
+    for pid in recalculated:
+        p = products.get(pid)
+        if p is None or p.kind == Product.Kind.SERVICE:
+            continue
+        total = recalc_product_quantity(pid)
+        if total is not None:
+            p.quantity = total
 
     changed_p = []
     for pid, qty in need_p.items():
         p = products.get(pid)
         if p is None or p.kind == Product.Kind.SERVICE:
             continue
+        if pid in recalculated:
+            changed_p.append(p)  # остаток уже пересчитан; ниже — только сброс кеша
+            continue
         p.quantity = Decimal(str(p.quantity or 0)) + sign * qty
         changed_p.append(p)
     if changed_p:
-        Product.objects.bulk_update(changed_p, ["quantity"])
+        Product.objects.bulk_update([p for p in changed_p if p.id not in recalculated], ["quantity"])
         for p in changed_p:
             if getattr(p, "company_id", None):
                 try:

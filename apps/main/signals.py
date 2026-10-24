@@ -443,3 +443,15 @@ def _connect_market_analytics_invalidation():
 
 
 _connect_market_analytics_invalidation()
+
+
+@receiver(post_save, sender=ProductVariant)
+def tz_n27_variant_back_in_stock(sender, instance, **kwargs):
+    """ТЗ Н-27: остаток варианта стал > 0 — заявки «сообщить о поступлении» помечаются ready."""
+    if instance.is_active and (instance.quantity or 0) > 0:
+        from apps.main.variant_utils import notify_variants_in_stock
+
+        try:
+            notify_variants_in_stock([instance.id])
+        except Exception:  # не мешаем сохранению варианта
+            logger.exception("notify_variants_in_stock failed")

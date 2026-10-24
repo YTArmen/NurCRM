@@ -650,7 +650,7 @@ class OrdersEventsTests(ShowcaseEditorV2Base):
         r = self.order({"customer": {"phone": "+996555123456"}, "items": [{"product": str(self.pear.id), "qty": "1"}]})
         self.assertEqual((r.status_code, r.data["code"]), (400, "variant_required"))
         r = self.order({"customer": {"phone": "+996555123456"}, "items": [{"product": str(self.pear.id), "variant": str(v.id), "qty": "5"}]})
-        self.assertEqual((r.status_code, r.data["code"]), (400, "not_enough_stock"))
+        self.assertEqual((r.status_code, r.data["code"]), (409, "variant_out_of_stock"))
         self.assertEqual(ShowcaseOrder.objects.filter(company=self.company).count(), 0)
         r = self.order({"customer": {"phone": "+996555123456"}, "items": [{"product": str(self.pear.id), "variant": str(v.id), "qty": "2"}]})
         self.assertEqual(r.status_code, 201, r.content)

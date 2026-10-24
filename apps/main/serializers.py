@@ -160,7 +160,7 @@ class ProductImageReadSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProductImage
-        fields = ["id", "image_url", "alt", "is_primary", "created_at"]
+        fields = ["id", "image_url", "alt", "is_primary", "color", "created_at"]
         read_only_fields = fields  # всё только на чтение тут
 
     def get_image_url(self, obj):
@@ -805,7 +805,7 @@ class ProductImageSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProductImage
-        fields = ["id", "image", "image_url", "alt", "is_primary", "created_at"]
+        fields = ["id", "image", "image_url", "alt", "is_primary", "color", "created_at"]
         read_only_fields = ["id", "image_url", "created_at"]
 
     def get_image_url(self, obj):
@@ -3437,6 +3437,12 @@ class SupplierReceiptItemSerializer(serializers.Serializer):
     )
     # ТЗ Н-04: пересчитать цену продажи от новой закупки по текущей наценке.
     recalc_price = serializers.BooleanField(required=False, default=False)
+    # ТЗ Н-27: приход по варианту (размер/цвет): всё количество строки — в этот вариант;
+    # либо раскладка variants=[{variant, qty}], сумма которой должна равняться qty строки.
+    variant = serializers.UUIDField(required=False, allow_null=True)
+    variants = serializers.ListField(
+        child=serializers.DictField(), required=False, allow_empty=True
+    )
 
 
 class SupplierReceiptCreateSerializer(serializers.Serializer):

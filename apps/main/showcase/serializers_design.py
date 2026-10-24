@@ -17,6 +17,7 @@ from apps.main.models import (
     ShowcaseOrderItem,
     ShowcasePromoBlock,
     ShowcaseStats,
+    ShowcaseStockRequest,
     _cart_item_promotion,
     _money,
 )
@@ -374,3 +375,21 @@ class ShowcaseOrderCreateSerializer(serializers.Serializer):
     delivery = ShowcaseOrderDeliverySerializer(required=False, default=dict)
     comment = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
     source = serializers.CharField(required=False, default="showcase", allow_blank=True, max_length=32)
+
+
+class ShowcaseStockRequestSerializer(serializers.ModelSerializer):
+    """ТЗ Н-27: заявка «сообщить о поступлении» для владельца."""
+
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    variant_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ShowcaseStockRequest
+        fields = ["id", "product", "product_name", "variant", "variant_label", "phone", "telegram_chat_id",
+                  "status", "created_at", "notified_at"]
+        read_only_fields = fields
+
+    def get_variant_label(self, obj):
+        from apps.main.variant_utils import variant_label
+
+        return variant_label(obj.variant)

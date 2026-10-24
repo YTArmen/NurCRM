@@ -250,10 +250,13 @@ class ShowcaseFieldError(APIException):
     status_code = status.HTTP_400_BAD_REQUEST
     default_code = "invalid"
 
-    def __init__(self, field: Optional[str], detail: str, code: str = "invalid", status_code: Optional[int] = None):
+    def __init__(self, field: Optional[str], detail: str, code: str = "invalid", status_code: Optional[int] = None,
+                 extra: Optional[dict] = None):
         payload = {"detail": detail, "code": code}
         if field:
             payload["field"] = field
+        if extra:
+            payload.update(extra)  # ТЗ Н-27: index, available
         if status_code:
             self.status_code = status_code
         super().__init__(detail=payload, code=code)

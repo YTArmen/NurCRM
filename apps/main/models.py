@@ -1566,6 +1566,8 @@ class ProductImage(models.Model):
     image = models.ImageField(upload_to=product_image_upload_to, null=True, blank=True, verbose_name="Изображение (WebP)")
     alt = models.CharField(max_length=255, blank=True, verbose_name="Alt-текст")
     is_primary = models.BooleanField(default=False, verbose_name="Основное изображение")
+    # ТЗ Н-26: фото конкретного цвета (название цвета варианта), пусто = общее фото
+    color = models.CharField("Цвет", max_length=64, blank=True, default="", db_default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -6840,6 +6842,9 @@ class ProductVariant(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="variants")
     size = models.CharField("Размер", max_length=32, blank=True, default="")
     color = models.CharField("Цвет", max_length=64, blank=True, default="")
+    # ТЗ Н-26: цвет в виде #RRGGBB (необязательно) и ручной порядок (0 = по умолчанию, по размерам)
+    color_hex = models.CharField("Цвет (#RRGGBB)", max_length=7, blank=True, default="", db_default="")
+    sort_order = models.IntegerField("Порядок", default=0, db_default=0)
     barcode = models.CharField("Штрихкод", max_length=64, null=True, blank=True)
     quantity = models.DecimalField("Остаток", max_digits=12, decimal_places=3, default=Decimal("0"))
     price = models.DecimalField("Цена", max_digits=12, decimal_places=2, null=True, blank=True)
@@ -7799,6 +7804,36 @@ class ShowcaseOrderItem(models.Model):
 
     def __str__(self):
         return f"{self.product_name} x {self.qty}"
+
+
+class ShowcaseStockRequest(models.Model):
+    """ТЗ Н-27: «Сообщить о поступлении» — заявка покупателя на вариант товара, которого нет в наличии."""
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Ждёт поступления"
+        READY = "ready", "Поступило (покупателю нужно сообщить)"
+        NOTIFIED = "notified", "Покупателю сообщили"
+        CANCELED = "canceled", "Отменена"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="showcase_stock_requests")
+    product = models.ForeignKey("Product", on_delete=models.CASCADE, related_name="+")
+    variant = models.ForeignKey("ProductVariant", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    phone = models.CharField("Телефон", max_length=64, blank=True, default="", db_default="")
+    telegram_chat_id = models.CharField("Telegram chat id", max_length=64, blank=True, default="", db_default="")
+    client_ip = models.CharField("IP", max_length=64, blank=True, default="", db_default="")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.OPEN, db_default="open", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    notified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        verbose_name = "Заявка «сообщить о поступлении»"
+        verbose_name_plural = "Заявки «сообщить о поступлении»"
+        indexes = [models.Index(fields=["company", "status"], name="idx_sc_stockreq_co_status")]
+
+    def __str__(self):
+        return f"{self.product_id} {self.variant_id} {self.phone or self.telegram_chat_id}"
 
 
 class ShowcaseStats(models.Model):

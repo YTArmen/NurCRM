@@ -330,6 +330,7 @@ def _price_lines(company, items_input, catalog: svc.PublicCatalog):
     variants_by_id = {str(v.id): v for v in ProductVariant.objects.filter(company=company, id__in=variant_ids)}
 
     lines = []
+    variant_asked: dict = {}
     items_total = Decimal("0.00")
     for idx, item in enumerate(items_input):
         pid = str(item["product"])
@@ -342,13 +343,33 @@ def _price_lines(company, items_input, catalog: svc.PublicCatalog):
         variant_obj = None
         if vid:
             variant_obj = variants_by_id.get(str(vid))
-            if not variant_obj or variant_obj.product_id != prod.id or not variant_obj.is_active:
-                raise ShowcaseFieldError(f"items[{idx}].variant", f"Вариант {vid} не найден для товара {prod.name}.", "variant_not_found")
+            if variant_obj is not None and variant_obj.product_id != prod.id:
+                # ТЗ Н-27: вариант чужого товара
+                raise ShowcaseFieldError(
+                    f"items[{idx}].variant", f"Вариант {vid} не относится к товару «{prod.name}».",
+                    "variant_mismatch", extra={"index": idx})
+            if not variant_obj or not variant_obj.is_active:
+                raise ShowcaseFieldError(
+                    f"items[{idx}].variant", f"Вариант {vid} не найден для товара {prod.name}.",
+                    "variant_not_found", extra={"index": idx})
         elif list(prod.variants.all()):
-            raise ShowcaseFieldError(f"items[{idx}].variant", f"Выберите размер и цвет для товара «{prod.name}».", "variant_required")
+            raise ShowcaseFieldError(
+                f"items[{idx}].variant", f"Выберите размер и цвет для товара «{prod.name}».",
+                "variant_required", extra={"index": idx})
         qty = Decimal(str(item["qty"]))
         if not prod.is_weight and qty != qty.to_integral_value():
             raise ShowcaseFieldError(f"items[{idx}].qty", f"Товар «{prod.name}» продаётся только целыми штуками.")
+        if variant_obj is not None:
+            # ТЗ Н-27: хватает ли остатка (с учётом одинаковых вариантов в разных строках корзины)
+            asked = variant_asked.get(variant_obj.id, Decimal("0")) + qty
+            variant_asked[variant_obj.id] = asked
+            have = max(Decimal(str(variant_obj.quantity or 0)), Decimal("0"))
+            if asked > have:
+                raise ShowcaseFieldError(
+                    f"items[{idx}].variant",
+                    f"Недостаточно остатка «{name_with_variant(prod.name, variant_obj)}»: доступно {have:g}.",
+                    "variant_out_of_stock", status_code=status.HTTP_409_CONFLICT,
+                    extra={"index": idx, "available": int(have) if have == have.to_integral_value() else str(have)})
         unit_price = variant_prices(variant_obj, prod)[0] if variant_obj is not None else Decimal(str(prod.price or 0))
         gross, line_discount, net, tier = svc.kassa_line(prod, unit_price, qty, company)
         items_total += net
@@ -530,7 +551,8 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
             try:
                 reserve_stock(lines)
             except InsufficientStock as exc:
-                raise ShowcaseFieldError("items", str(exc), "not_enough_stock")
+                # гонка: остаток разобрали между проверкой и резервом
+                raise ShowcaseFieldError("items", str(exc), "variant_out_of_stock", status_code=status.HTTP_409_CONFLICT)
             order.stock_reserved = True
             order.save(update_fields=["stock_reserved"])
 
@@ -566,6 +588,75 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
             pass
 
         return Response(_order_response(order, whatsapp_url), status=status.HTTP_201_CREATED)
+
+
+class PublicCompanyShowcaseNotifyAPIView(PublicAPIView):
+    """
+    ТЗ Н-27. POST /public/companies/{slug}/showcase/{product_id}/notify/
+    {"variant": "<uuid>", "phone": "+996…" | "telegram_chat_id": "…"} — «сообщить о поступлении».
+    До 5 заявок в сутки на номер/chat id и на IP. Повтор той же заявки возвращает существующую (200).
+    """
+
+    def post(self, request, slug: str, product_id):
+        from apps.main.models import ShowcaseStockRequest
+
+        company = resolve_public_company(slug, request)
+        data = request.data if isinstance(request.data, dict) else {}
+        product = Product.objects.filter(company=company, id=product_id).first()
+        if product is None:
+            raise ShowcaseFieldError("product", "Товар не найден.", "product_not_found", status_code=status.HTTP_404_NOT_FOUND)
+        catalog = svc.get_public_catalog(company)
+        if str(product.id) in catalog.hidden_products or (
+            product.category_id and str(product.category_id) in catalog.hidden_categories
+        ):
+            raise ShowcaseFieldError("product", "Товар скрыт с витрины.", "product_hidden", status_code=status.HTTP_404_NOT_FOUND)
+
+        phone = re.sub(r"[^\d+]", "", str(data.get("phone") or ""))[:64]
+        chat_id = str(data.get("telegram_chat_id") or "").strip()[:64]
+        if len(re.sub(r"\D", "", phone)) < 9:
+            phone = ""
+        if not phone and not chat_id:
+            raise ShowcaseFieldError("phone", "Укажите телефон или Telegram.", "required")
+
+        vid = data.get("variant")
+        variant = None
+        if vid:
+            try:
+                variant = ProductVariant.objects.filter(id=vid, is_active=True).first()
+            except Exception:
+                variant = None
+            if variant is None:
+                raise ShowcaseFieldError("variant", "Вариант не найден.", "variant_not_found")
+            if variant.product_id != product.id:
+                raise ShowcaseFieldError("variant", "Вариант не относится к товару.", "variant_mismatch")
+        elif product.variants.filter(is_active=True).exists():
+            raise ShowcaseFieldError("variant", "Выберите размер и цвет.", "variant_required")
+
+        in_stock = (variant.quantity if variant is not None else product.quantity) or 0
+        if in_stock > 0:
+            raise ShowcaseFieldError("variant", "Товар уже есть в наличии.", "already_in_stock")
+
+        existing = ShowcaseStockRequest.objects.filter(
+            company=company, product=product, variant=variant, status=ShowcaseStockRequest.Status.OPEN
+        )
+        existing = existing.filter(phone=phone) if phone else existing.filter(telegram_chat_id=chat_id)
+        row = existing.first()
+        if row is not None:
+            return Response({"id": str(row.id), "status": row.status}, status=status.HTTP_200_OK)
+
+        ip = _client_ip(request)
+        contact = phone or chat_id
+        if _rate_limited(f"showcase:notify:ip:{company.id}:{ip}", 5, 86400) or _rate_limited(
+            f"showcase:notify:ct:{company.id}:{contact}", 5, 86400
+        ):
+            return Response(
+                {"detail": "Слишком много заявок. Попробуйте завтра.", "code": "throttled"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        row = ShowcaseStockRequest.objects.create(
+            company=company, product=product, variant=variant, phone=phone, telegram_chat_id=chat_id, client_ip=ip[:64]
+        )
+        return Response({"id": str(row.id), "status": row.status}, status=status.HTTP_201_CREATED)
 
 
 # ======================================================================

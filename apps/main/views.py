@@ -5809,6 +5809,44 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     permission_classes = [permissions.IsAuthenticated]
 
+    @staticmethod
+    def _receipt_apply_variants(company, prod, it, qty):
+        """ТЗ Н-27: variant / variants[] строки прихода → остаток варианта(ов); остаток товара = сумма активных."""
+        from apps.main.models import ProductVariant
+        from apps.main.variant_utils import notify_variants_in_stock, recalc_product_quantity
+
+        parts = []
+        if it.get("variants"):
+            for row in it["variants"]:
+                try:
+                    vq = Decimal(str(row.get("qty")))
+                except Exception:
+                    raise ValidationError({"code": "variant_qty_mismatch", "detail": "Неверное количество в variants."})
+                if vq <= 0 or not row.get("variant"):
+                    raise ValidationError({"code": "variant_qty_mismatch", "detail": "variants: нужны variant и qty > 0."})
+                parts.append((str(row["variant"]), vq))
+            if sum((q for _, q in parts), Decimal("0")) != Decimal(qty):
+                raise ValidationError({
+                    "code": "variant_qty_mismatch",
+                    "detail": "Сумма по размерам не равна количеству строки.",
+                })
+        elif it.get("variant"):
+            parts.append((str(it["variant"]), Decimal(qty)))
+        if not parts:
+            return
+        ids = [v for v, _ in parts]
+        try:
+            found = {str(v.id): v for v in ProductVariant.objects.select_for_update().filter(company=company, id__in=ids)}
+        except Exception:
+            found = {}
+        for vid, vq in parts:
+            v = found.get(vid)
+            if v is None or v.product_id != prod.id:
+                raise ValidationError({"code": "variant_mismatch", "detail": "Вариант не относится к товару."})
+            ProductVariant.objects.filter(pk=v.pk).update(quantity=F("quantity") + vq)
+        recalc_product_quantity(prod.id)
+        notify_variants_in_stock([v.pk for v in found.values()])
+
     def post(self, request, supplier_id):
         # ТЗ Н-10: серверная сделка-долг и идемпотентность — только по явному "create_deal": true.
         # Без флага запрос работает как раньше (сайт сам создаёт сделку отдельным запросом).
@@ -5930,6 +5968,8 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
                     ).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
             type(prod).objects.filter(id=pid).update(**upd)
+            # ТЗ Н-27: приход по варианту — остаток варианта и товара в этой же транзакции.
+            self._receipt_apply_variants(company, prod, it, qty)
             # The batch retains the shelf-life configuration at the receipt moment.
             from apps.main.services.product_expiry_batches import receive_stock
             receive_stock(prod, qty, source_kind="purchase", source_id=receipt.id, user=request.user)
