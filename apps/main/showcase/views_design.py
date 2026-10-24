@@ -32,6 +32,7 @@ from apps.main.models import (
     ShowcaseDesignVersion,
     ShowcaseMedia,
     ShowcaseOrder,
+    ShowcaseStockRequest,
     ShowcaseOrderItem,
     ShowcasePage,
     ShowcaseProductSettings,
@@ -43,7 +44,7 @@ from apps.main.showcase import design_schema as ds
 from apps.main.showcase import entities
 from apps.main.showcase import services as svc
 from apps.main.showcase.design_schema import ShowcaseFieldError
-from apps.main.showcase.serializers_design import ShowcaseDesignVersionSerializer, ShowcaseOrderSerializer
+from apps.main.showcase.serializers_design import ShowcaseDesignVersionSerializer, ShowcaseOrderSerializer, ShowcaseStockRequestSerializer
 from apps.main.showcase.services import (
     IsShowcaseEditorPermission,
     IsShowcaseStaffPermission,
@@ -947,3 +948,25 @@ class ShowcaseStatsAPIView(EditorAPIView):
             "banner_clicks": banner_clicks,
             "daily": daily,
         })
+
+
+class ShowcaseStockRequestListAPIView(ShowcaseErrorMixin, generics.ListAPIView):
+    """
+    ТЗ Н-27. GET main/showcase/stock-requests/?status=open|ready|notified|canceled
+    Заявки «сообщить о поступлении» (по умолчанию все). Пагинация count/next/previous/results.
+    """
+
+    serializer_class = ShowcaseStockRequestSerializer
+    permission_classes = [IsShowcaseStaffPermission]
+
+    def get_queryset(self):
+        company = _get_user_company(self.request)
+        qs = ShowcaseStockRequest.objects.filter(company=company).select_related("product", "variant")
+        status_param = self.request.query_params.get("status")
+        if status_param:
+            statuses = [x.strip() for x in status_param.split(",") if x.strip()]
+            bad = [x for x in statuses if x not in ShowcaseStockRequest.Status.values]
+            if bad:
+                raise ShowcaseFieldError("status", f"Недопустимый статус. Допустимые: {', '.join(ShowcaseStockRequest.Status.values)}")
+            qs = qs.filter(status__in=statuses)
+        return qs.order_by("-created_at")

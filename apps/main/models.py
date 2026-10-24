@@ -7651,6 +7651,36 @@ class ShowcaseOrderItem(models.Model):
         return f"{self.product_name} x {self.qty}"
 
 
+class ShowcaseStockRequest(models.Model):
+    """ТЗ Н-27: «Сообщить о поступлении» — заявка покупателя на вариант товара, которого нет в наличии."""
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Ждёт поступления"
+        READY = "ready", "Поступило (покупателю нужно сообщить)"
+        NOTIFIED = "notified", "Покупателю сообщили"
+        CANCELED = "canceled", "Отменена"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="showcase_stock_requests")
+    product = models.ForeignKey("Product", on_delete=models.CASCADE, related_name="+")
+    variant = models.ForeignKey("ProductVariant", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    phone = models.CharField("Телефон", max_length=64, blank=True, default="", db_default="")
+    telegram_chat_id = models.CharField("Telegram chat id", max_length=64, blank=True, default="", db_default="")
+    client_ip = models.CharField("IP", max_length=64, blank=True, default="", db_default="")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.OPEN, db_default="open", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    notified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        verbose_name = "Заявка «сообщить о поступлении»"
+        verbose_name_plural = "Заявки «сообщить о поступлении»"
+        indexes = [models.Index(fields=["company", "status"], name="idx_sc_stockreq_co_status")]
+
+    def __str__(self):
+        return f"{self.product_id} {self.variant_id} {self.phone or self.telegram_chat_id}"
+
+
 class ShowcaseStats(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(

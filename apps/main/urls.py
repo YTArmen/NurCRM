@@ -41,6 +41,7 @@ from apps.main.recommendations import (
 )
 from apps.main.showcase.views_design import (
     ShowcaseDesignAPIView,
+    ShowcaseStockRequestListAPIView,
     ShowcaseDraftUpdateAPIView,
     ShowcaseDraftProductOrderAPIView,
     ShowcasePreviewLinkAPIView,
@@ -81,6 +82,7 @@ from apps.main.showcase.views_public_design import (
     PublicCompanyShowcasePageAPIView,
     PublicCompanyShowcaseCategoriesAPIView,
     PublicCompanyShowcaseCartQuoteAPIView,
+    PublicCompanyShowcaseNotifyAPIView,
 )
 from apps.main.inventory_views import (
     ProductInventorySessionListCreateAPIView,
@@ -540,6 +542,7 @@ urlpatterns = [
 
     path("public/companies/<slug:slug>/", PublicCompanyAPIView.as_view()),
     path("public/companies/<slug:slug>/showcase/", PublicCompanyShowcaseAPIView.as_view()),
+    path("public/companies/<slug:slug>/showcase/<uuid:product_id>/notify/", PublicCompanyShowcaseNotifyAPIView.as_view(), name="public-company-showcase-notify"),
     path("public/companies/<slug:slug>/showcase/facets/", PublicCompanyShowcaseFacetsAPIView.as_view(), name="public-company-showcase-facets"),
     path("public/companies/<slug:slug>/showcase/<uuid:product_id>/", PublicCompanyProductDetailAPIView.as_view()),
     path("public/companies/<slug:slug>/showcase/design/", PublicCompanyShowcaseDesignAPIView.as_view(), name="public-company-showcase-design"),
@@ -593,6 +596,7 @@ urlpatterns = [
 
     path("showcase/slug-check/", ShowcaseSlugCheckAPIView.as_view(), name="showcase-slug-check"),
 
+    path("showcase/stock-requests/", ShowcaseStockRequestListAPIView.as_view(), name="showcase-stock-requests"),
     path("showcase/orders/", ShowcaseOrderListAPIView.as_view(), name="showcase-orders-list"),
     path("showcase/orders/<uuid:pk>/", ShowcaseOrderDetailAPIView.as_view(), name="showcase-orders-detail"),
 

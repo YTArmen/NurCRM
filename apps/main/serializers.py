@@ -3437,6 +3437,12 @@ class SupplierReceiptItemSerializer(serializers.Serializer):
     )
     # ТЗ Н-04: пересчитать цену продажи от новой закупки по текущей наценке.
     recalc_price = serializers.BooleanField(required=False, default=False)
+    # ТЗ Н-27: приход по варианту (размер/цвет): всё количество строки — в этот вариант;
+    # либо раскладка variants=[{variant, qty}], сумма которой должна равняться qty строки.
+    variant = serializers.UUIDField(required=False, allow_null=True)
+    variants = serializers.ListField(
+        child=serializers.DictField(), required=False, allow_empty=True
+    )
 
 
 class SupplierReceiptCreateSerializer(serializers.Serializer):
