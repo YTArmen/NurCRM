@@ -3,6 +3,7 @@ from django.urls import path, include
 from apps.main.mass_incoming_views import ProductMassIncomingAPIView
 from .views import *
 from .price_check import ProductCatalogVersionView, ProductPriceCheckView
+from .change_views import ChangesFeedView  # ТЗ Н-31
 from .pos_views import *
 from apps.construction.views_buhgalter import AuditLogView
 from apps.construction.views_admin import TrashListView, TrashRestoreView
@@ -170,6 +171,7 @@ urlpatterns = [
     path('products/list/', ProductListView.as_view(), name='product-list'),
     path('products/compact-list/', ProductCompactListView.as_view(), name='product-compact-list'),
     path('products/price-check/', ProductPriceCheckView.as_view(), name='product-price-check'),
+    path('changes/', ChangesFeedView.as_view(), name='changes-feed'),  # ТЗ Н-31
     path('products/catalog-version/', ProductCatalogVersionView.as_view(), name='product-catalog-version'),
     path('products/scale-export/', WeightProductsScaleExportAPIView.as_view(), name='product-scale-export'),
     path('products/create-by-barcode/', ProductCreateByBarcodeAPIView.as_view(), name='product-create-by-barcode'),

@@ -4469,6 +4469,11 @@ class SupplierDebtPayAPIView(ClientDealsPayAnyAPIView):
             return resp
 
         payments = list(getattr(self, "payments_made", []))
+        # ТЗ Н-31: событие ленты — долг поставщику изменился
+        from apps.integrations.events import emit_event as _emit_sup
+        _emit_sup(client.company_id, "supplier_debt_changed", {
+            "supplier": client.id, "paid": resp.data.get("paid_total"), "actor": request.user.id,
+        })
         flows = list(CashFlow.objects.filter(
             source_kind=CashFlow.SourceKind.SUPPLIER_DEBT_PAYMENT,
             source_id__in=[str(p.id) for p in payments],

@@ -222,6 +222,17 @@ def checkout_cart(
         Product.objects.bulk_update(changed, ["quantity"])
         changed_ids = [p.id for p in changed if getattr(p, "id", None)]
 
+        # ТЗ Н-31: одно событие stock_changed на всё списание (одна вставка в ленту)
+        try:
+            from apps.integrations.events import emit_event as _emit_stock
+            _emit_stock(cart.company_id, "stock_changed", {
+                "products": [str(i) for i in changed_ids][:200],
+                "reason": "sale",
+                "branch": getattr(cart, "branch_id", None),
+            })
+        except Exception:
+            pass
+
         def _send_webhooks():
             from apps.main.services.webhooks import send_product_webhook
 
