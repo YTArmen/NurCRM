@@ -31,6 +31,7 @@ from .kassa_views import (
 from .analytics_market import *
 from .analytics_dashboard import *
 from .document import SaleReceiptAPIView, SaleInvoiceAPIView
+from apps.main.media_receipts import MainMediaListCreateAPIView, MainMediaDetailAPIView, SalePublicLinkAPIView
 from apps.main.showcase.views_public import PublicCompanyShowcaseFacetsAPIView, PublicCompanyProductDetailAPIView, PublicCompanyAPIView, PublicCompanyShowcaseAPIView
 from apps.main.recommendations import (
     RecommendationEventsAPIView,
@@ -379,6 +380,9 @@ urlpatterns = [
     path("pos/checkout/batch/", PosCheckoutBatchAPIView.as_view(), name="pos-checkout-batch"),
     path("pos/checkout/", PosQuickCheckoutAPIView.as_view(), name="pos-quick-checkout"),
     path("pos/returns/", SaleReturnListAPIView.as_view(), name="pos-return-list"),
+    path("pos/sales/<uuid:pk>/public-link/", SalePublicLinkAPIView.as_view(), name="pos-sale-public-link"),  # ТЗ Н-32
+    path("media/", MainMediaListCreateAPIView.as_view(), name="main-media"),  # ТЗ Н-32
+    path("media/<uuid:pk>/", MainMediaDetailAPIView.as_view(), name="main-media-detail"),
     path("pos/sales/<uuid:pk>/exchange/", SaleExchangeAPIView.as_view(), name="pos-sale-exchange"),
     path("products/<uuid:pk>/variants/", ProductVariantListCreateAPIView.as_view(), name="product-variants"),
     path("products/<uuid:pk>/variants/<uuid:vid>/", ProductVariantDetailAPIView.as_view(), name="product-variant-detail"),
