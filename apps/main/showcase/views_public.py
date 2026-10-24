@@ -1,3 +1,5 @@
+import operator
+from functools import reduce
 from datetime import timedelta
 from decimal import Decimal
 
@@ -5,6 +7,7 @@ from django.db.models import Q, F, Value, ExpressionWrapper, DecimalField, Case,
 from django.utils import timezone
 from django.db.models.functions import Coalesce, Lower
 from rest_framework import generics
+from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.filters import SearchFilter, OrderingFilter
@@ -153,6 +156,44 @@ class _CatalogMixin(ShowcaseErrorMixin):
         return ctx
 
 
+def _csv(value):
+    return [x.strip() for x in str(value or "").split(",") if x.strip()]
+
+
+def filter_by_variants(qs, params):
+    """
+    ТЗ Н-26: ?size=M,L &color=Чёрный &in_stock=1 — по реальным вариантам в наличии.
+    size/color/in_stock=1: у товара должен быть активный вариант с остатком > 0 (size и color — в одном варианте).
+    in_stock=1 без размера/цвета: товары без вариантов — по остатку (услуги всегда в наличии).
+    in_stock=0: товары, которых нет в наличии.
+    """
+    sizes, colors = _csv(params.get("size")), _csv(params.get("color"))
+    in_stock = params.get("in_stock")
+    in_stock = None if in_stock in (None, "") else str(in_stock).lower() in ("1", "true", "yes")
+    if not (sizes or colors or in_stock is not None):
+        return qs
+    vq = Q(is_active=True, quantity__gt=0)
+    if sizes:
+        vq &= reduce(operator.or_, [Q(size__iexact=x) for x in sizes])
+    if colors:
+        vq &= reduce(operator.or_, [Q(color__iexact=x) for x in colors])
+    has_stock_variant = Exists(ProductVariant.objects.filter(product=OuterRef("pk")).filter(vq))
+    if sizes or colors or in_stock is True:
+        cond = Q(has_stock_variant_flag=True)
+        if not (sizes or colors):
+            has_any = Exists(ProductVariant.objects.filter(product=OuterRef("pk"), is_active=True))
+            qs = qs.annotate(has_any_variant_flag=has_any)
+            cond |= Q(has_any_variant_flag=False) & (Q(quantity__gt=0) | ~Q(kind=Product.Kind.PRODUCT))
+        return qs.annotate(has_stock_variant_flag=has_stock_variant).filter(cond)
+    # in_stock=0
+    has_any = Exists(ProductVariant.objects.filter(product=OuterRef("pk"), is_active=True))
+    return (
+        qs.annotate(has_stock_variant_flag=has_stock_variant, has_any_variant_flag=has_any)
+        .filter(has_stock_variant_flag=False)
+        .filter(Q(has_any_variant_flag=True) | Q(kind=Product.Kind.PRODUCT, quantity__lte=0))
+    )
+
+
 class PublicCompanyShowcaseAPIView(_CatalogMixin, generics.ListAPIView):
     permission_classes = [AllowAny]
     serializer_class = PublicProductListSerializer
@@ -163,7 +204,7 @@ class PublicCompanyShowcaseAPIView(_CatalogMixin, generics.ListAPIView):
     search_fields = ["name", "barcode", "article", "code"]
     ordering_fields = ["name", "final_price", "discount_percent", "created_at", "price"]
     ordering = ["-created_at", "id"]
-
+    apply_variant_filters = True
 
     def get_queryset(self):
         company = self.get_company()
@@ -232,6 +273,8 @@ class PublicCompanyShowcaseAPIView(_CatalogMixin, generics.ListAPIView):
         pinned = _bool_qp(self.request, "pinned")
         if pinned is True:
             qs = qs.filter(sc_pinned=True)
+        if self.apply_variant_filters:
+            qs = filter_by_variants(qs, self.request.query_params)
         return qs
 
 
@@ -256,3 +299,58 @@ class PublicCompanyProductDetailAPIView(_CatalogMixin, generics.RetrieveAPIView)
         qs = showcase_svc.apply_catalog_visibility(qs, catalog)
         return annotate_showcase_settings(qs, company, catalog)
 
+
+
+class PublicCompanyShowcaseFacetsAPIView(PublicCompanyShowcaseAPIView):
+    """
+    ТЗ Н-26. GET public/companies/{slug}/showcase/facets/?category=&search=
+    → {sizes:[{value,count}], colors:[{name,hex,count}], price:{min,max}} по вариантам в наличии.
+    count — число товаров. Фильтры size/color/in_stock здесь не применяются.
+    """
+
+    apply_variant_filters = False
+    pagination_class = None
+
+    def list(self, request, *args, **kwargs):
+        from apps.main.variant_utils import size_sort_key
+
+        qs = self.filter_queryset(self.get_queryset())
+        pids = qs.order_by().values("pk")
+        sizes: dict = {}
+        colors: dict = {}
+        prices = []
+
+        def _final(price, disc):
+            price = Decimal(str(price or 0))
+            disc = Decimal(str(disc or 0))
+            return price * (Decimal("1") - disc / Decimal("100")) if disc > 0 else price
+
+        with_variants = set()
+        for v in ProductVariant.objects.filter(product__in=pids, is_active=True).values(
+            "product_id", "size", "color", "color_hex", "quantity", "price", "product__price", "product__discount_percent"
+        ):
+            with_variants.add(v["product_id"])
+            if (v["quantity"] or 0) <= 0:
+                continue
+            if v["size"]:
+                sizes.setdefault(v["size"], set()).add(v["product_id"])
+            if v["color"]:
+                c = colors.setdefault(v["color"].lower(), {"name": v["color"], "hex": None, "p": set()})
+                c["p"].add(v["product_id"])
+                if not c["hex"] and v["color_hex"]:
+                    c["hex"] = v["color_hex"]
+            base = v["price"] if v["price"] is not None else v["product__price"]
+            prices.append(_final(base, v["product__discount_percent"]))
+        for row in qs.order_by().exclude(pk__in=with_variants).values_list("price", "discount_percent"):
+            prices.append(_final(*row))
+        return Response({
+            "sizes": [{"value": k, "count": len(ids)} for k, ids in sorted(sizes.items(), key=lambda kv: size_sort_key(kv[0]))],
+            "colors": [
+                {"name": c["name"], "hex": c["hex"], "count": len(c["p"])}
+                for c in sorted(colors.values(), key=lambda c: c["name"].lower())
+            ],
+            "price": {
+                "min": str(min(prices).quantize(Decimal("0.01"))) if prices else None,
+                "max": str(max(prices).quantize(Decimal("0.01"))) if prices else None,
+            },
+        })

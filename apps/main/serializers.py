@@ -160,7 +160,7 @@ class ProductImageReadSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProductImage
-        fields = ["id", "image_url", "alt", "is_primary", "created_at"]
+        fields = ["id", "image_url", "alt", "is_primary", "color", "created_at"]
         read_only_fields = fields  # всё только на чтение тут
 
     def get_image_url(self, obj):
@@ -805,7 +805,7 @@ class ProductImageSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProductImage
-        fields = ["id", "image", "image_url", "alt", "is_primary", "created_at"]
+        fields = ["id", "image", "image_url", "alt", "is_primary", "color", "created_at"]
         read_only_fields = ["id", "image_url", "created_at"]
 
     def get_image_url(self, obj):

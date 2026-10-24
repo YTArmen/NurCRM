@@ -4,7 +4,7 @@ from rest_framework import serializers
 
 from apps.users.models import Company
 from ..models import Product, ProductCharacteristics, ProductPackage
-from ..variant_utils import active_variants, variant_prices
+from ..variant_utils import active_variants, size_sort_key, variant_prices
 
 # Открытая витрина не раскрывает точный остаток: только «есть в наличии» и «осталось мало».
 LOW_STOCK_THRESHOLD = Decimal("5")
@@ -57,6 +57,9 @@ class PublicProductSerializer(serializers.ModelSerializer):
     has_variants = serializers.SerializerMethodField()
     price_range = serializers.SerializerMethodField()
     variants = serializers.SerializerMethodField()
+    # ТЗ Н-26: цвета (с фото по цвету) и размеры по порядку
+    colors = serializers.SerializerMethodField()
+    sizes = serializers.SerializerMethodField()
 
     # Витрина (ТЗ-BE-2026-05, п. 6.4/6.13): бейдж владельца, закрепление, акция кассы.
     badge = serializers.SerializerMethodField()
@@ -94,6 +97,8 @@ class PublicProductSerializer(serializers.ModelSerializer):
             "has_variants",
             "price_range",
             "variants",
+            "colors",
+            "sizes",
             "badge",
             "pinned",
             "on_sale",
@@ -138,6 +143,7 @@ class PublicProductSerializer(serializers.ModelSerializer):
                     "image_url": url,
                     "alt": getattr(img, "alt", "") or "",
                     "is_primary": bool(getattr(img, "is_primary", False)),
+                    "color": getattr(img, "color", "") or "",
                     "created_at": img.created_at.isoformat() if getattr(img, "created_at", None) else None,
                 }
             )
@@ -224,13 +230,20 @@ class PublicProductSerializer(serializers.ModelSerializer):
             if disc > 0:
                 discount_price = (price * (Decimal("1") - disc / Decimal("100"))).quantize(Decimal("0.01"))
             final = discount_price if discount_price is not None else price
+            # ТЗ Н-26, правило old_price: зачёркнутая цена = цена товара, если итоговая цена варианта
+            # (с акцией варианта и скидкой товара) ниже неё; иначе old_price = null.
             pct = None
             if product_price > 0 and final < product_price:
                 pct = int(((product_price - final) / product_price * Decimal("100")).quantize(Decimal("1")))
+            qty = max(qty, Decimal("0"))
             res.append({
                 "id": str(v.id),
                 "size": v.size or "",
                 "color": v.color or "",
+                "color_hex": getattr(v, "color_hex", "") or "",
+                "sort_order": getattr(v, "sort_order", 0) or 0,
+                # ТЗ Н-26: точное число — только если осталось ≤ 5, иначе null (остаток уже за вычетом резервов)
+                "available": int(qty) if qty <= LOW_STOCK_THRESHOLD else None,
                 "in_stock": qty > 0,
                 "low_stock": _stock_flags(qty)[1],
                 "price": str(price.quantize(Decimal("0.01"))),
@@ -241,6 +254,45 @@ class PublicProductSerializer(serializers.ModelSerializer):
             })
         obj._public_variants_cache = res
         return res
+
+    def _images_by_color(self, obj: Product) -> dict:
+        request = self.context.get("request")
+        out: dict = {}
+        for img in self._get_sorted_images(obj):
+            c = (getattr(img, "color", "") or "").strip().lower()
+            if not c:
+                continue
+            url = request.build_absolute_uri(img.image.url) if request else img.image.url
+            out.setdefault(c, []).append(url)
+        return out
+
+    def _colors_data(self, obj: Product, *, only_in_stock=False) -> list:
+        seen: dict = {}
+        for v in self._variants_data(obj):
+            name = v["color"]
+            if not name:
+                continue
+            if only_in_stock and not v["in_stock"]:
+                continue
+            key = name.lower()
+            row = seen.get(key)
+            if row is None:
+                seen[key] = {"name": name, "hex": v["color_hex"] or None}
+            elif not row["hex"] and v["color_hex"]:
+                row["hex"] = v["color_hex"]
+        return list(seen.values())
+
+    def get_colors(self, obj: Product):
+        imgs = self._images_by_color(obj)
+        rows = self._colors_data(obj)
+        for r in rows:
+            r["images"] = imgs.get(r["name"].lower(), [])
+        return rows
+
+    def get_sizes(self, obj: Product):
+        vs = self._variants_data(obj)
+        sizes = {v["size"] for v in vs if v["size"]}
+        return sorted(sizes, key=size_sort_key)
 
     def get_has_variants(self, obj: Product) -> bool:
         return bool(self._variants_data(obj))
@@ -263,4 +315,24 @@ class PublicProductListSerializer(PublicProductSerializer):
     """Список товаров витрины: признак has_variants и диапазон цен, без массива вариантов."""
 
     class Meta(PublicProductSerializer.Meta):
-        fields = [f for f in PublicProductSerializer.Meta.fields if f != "variants"]
+        fields = [f for f in PublicProductSerializer.Meta.fields if f not in ("variants", "sizes")] + ["sizes_in_stock"]
+
+    sizes_in_stock = serializers.SerializerMethodField()
+
+    def get_colors(self, obj: Product):
+        # ТЗ Н-26: в списке — до 8 цветов (в наличии), без фото
+        return self._colors_data(obj, only_in_stock=True)[:8]
+
+    def get_sizes_in_stock(self, obj: Product):
+        sizes = {v["size"] for v in self._variants_data(obj) if v["size"] and v["in_stock"]}
+        return sorted(sizes, key=size_sort_key)
+
+    def get_price_range(self, obj: Product):
+        # ТЗ Н-26: диапазон по вариантам в наличии (если ничего нет в наличии — по всем)
+        variants = self._variants_data(obj)
+        in_stock = [v for v in variants if v["in_stock"]] or variants
+        if not in_stock:
+            return super().get_price_range(obj)
+        prices = [Decimal(v["final_price"]) for v in in_stock]
+        lo, hi = str(min(prices)), str(max(prices))
+        return {"min_price": lo, "max_price": hi, "min": lo, "max": hi}

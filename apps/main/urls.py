@@ -31,7 +31,7 @@ from .kassa_views import (
 from .analytics_market import *
 from .analytics_dashboard import *
 from .document import SaleReceiptAPIView, SaleInvoiceAPIView
-from apps.main.showcase.views_public import PublicCompanyProductDetailAPIView, PublicCompanyAPIView, PublicCompanyShowcaseAPIView
+from apps.main.showcase.views_public import PublicCompanyShowcaseFacetsAPIView, PublicCompanyProductDetailAPIView, PublicCompanyAPIView, PublicCompanyShowcaseAPIView
 from apps.main.recommendations import (
     RecommendationEventsAPIView,
     RecommendationLinkSaleAPIView,
@@ -540,6 +540,7 @@ urlpatterns = [
 
     path("public/companies/<slug:slug>/", PublicCompanyAPIView.as_view()),
     path("public/companies/<slug:slug>/showcase/", PublicCompanyShowcaseAPIView.as_view()),
+    path("public/companies/<slug:slug>/showcase/facets/", PublicCompanyShowcaseFacetsAPIView.as_view(), name="public-company-showcase-facets"),
     path("public/companies/<slug:slug>/showcase/<uuid:product_id>/", PublicCompanyProductDetailAPIView.as_view()),
     path("public/companies/<slug:slug>/showcase/design/", PublicCompanyShowcaseDesignAPIView.as_view(), name="public-company-showcase-design"),
     path("public/companies/<slug:slug>/orders/", PublicCompanyShowcaseOrderCreateAPIView.as_view(), name="public-company-showcase-orders"),

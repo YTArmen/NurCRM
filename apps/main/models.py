@@ -1566,6 +1566,8 @@ class ProductImage(models.Model):
     image = models.ImageField(upload_to=product_image_upload_to, null=True, blank=True, verbose_name="Изображение (WebP)")
     alt = models.CharField(max_length=255, blank=True, verbose_name="Alt-текст")
     is_primary = models.BooleanField(default=False, verbose_name="Основное изображение")
+    # ТЗ Н-26: фото конкретного цвета (название цвета варианта), пусто = общее фото
+    color = models.CharField("Цвет", max_length=64, blank=True, default="", db_default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -6784,6 +6786,9 @@ class ProductVariant(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="variants")
     size = models.CharField("Размер", max_length=32, blank=True, default="")
     color = models.CharField("Цвет", max_length=64, blank=True, default="")
+    # ТЗ Н-26: цвет в виде #RRGGBB (необязательно) и ручной порядок (0 = по умолчанию, по размерам)
+    color_hex = models.CharField("Цвет (#RRGGBB)", max_length=7, blank=True, default="", db_default="")
+    sort_order = models.IntegerField("Порядок", default=0, db_default=0)
     barcode = models.CharField("Штрихкод", max_length=64, null=True, blank=True)
     quantity = models.DecimalField("Остаток", max_digits=12, decimal_places=3, default=Decimal("0"))
     price = models.DecimalField("Цена", max_digits=12, decimal_places=2, null=True, blank=True)

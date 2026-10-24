@@ -13,6 +13,7 @@
     GET/PATCH    /api/main/work-orders/{id}/
     POST         /api/main/work-orders/{id}/issue/
 """
+import re
 import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -106,7 +107,7 @@ def _checkout_payload(payment, total, prepaid=ZERO):
 class ProductVariantSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductVariant
-        fields = ("id", "product", "size", "color", "barcode", "quantity", "price", "is_active", "created_at", "updated_at")
+        fields = ("id", "product", "size", "color", "color_hex", "sort_order", "barcode", "quantity", "price", "is_active", "created_at", "updated_at")
         read_only_fields = ("id", "product", "created_at", "updated_at")
 
     def validate_barcode(self, value):
@@ -125,6 +126,13 @@ class ProductVariantSerializer(serializers.ModelSerializer):
         if value < 0:
             raise serializers.ValidationError("Остаток не может быть отрицательным.")
         return value
+
+    def validate_color_hex(self, value):
+        # ТЗ Н-26: необязательный #RRGGBB
+        value = (value or "").strip()
+        if value and not re.match(r"^#[0-9a-fA-F]{6}$", value):
+            raise serializers.ValidationError("Цвет должен быть в формате #RRGGBB.")
+        return value.upper()
 
 
 def sync_product_quantity_from_variants(product_id):

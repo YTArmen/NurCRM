@@ -14,16 +14,17 @@ _LETTER_SIZES = ["XXXS", "XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL", "4XL",
 _LETTER_INDEX = {s: i for i, s in enumerate(_LETTER_SIZES)}
 _LETTER_ALIASES = {"2XS": "XXS", "3XS": "XXXS", "2XL": "XXL", "3XL": "XXXL"}
 _NUM_RE = re.compile(r"^\d+([.,]\d+)?")
+_W_RE = re.compile(r"^W(\d+)(?:[/L\d]*)$", re.I)  # джинсовые W26…W36
 
 
 def size_sort_key(size) -> tuple:
     """
-    Порядок размеров: буквенные XS…XXL по порядку, затем числовые по возрастанию,
-    затем прочие по алфавиту, пустой размер — в конце.
+    ТЗ Н-26. Порядок размеров по умолчанию: буквенные XXS…5XL по порядку, затем числовые
+    по возрастанию, затем W26…W36 (по числу), затем прочие по алфавиту, пустой размер — в конце.
     """
     s = str(size or "").strip()
     if not s:
-        return (3, 0, "")
+        return (4, 0, "")
     up = s.upper().replace(" ", "")
     up = _LETTER_ALIASES.get(up, up)
     if up in _LETTER_INDEX:
@@ -34,11 +35,16 @@ def size_sort_key(size) -> tuple:
             return (1, float(m.group(0).replace(",", ".")), s.lower())
         except ValueError:
             pass
-    return (2, 0, s.lower())
+    mw = _W_RE.match(s.replace(" ", ""))
+    if mw:
+        return (2, int(mw.group(1)), s.lower())
+    return (3, 0, s.lower())
 
 
 def variant_sort_key(variant) -> tuple:
-    return size_sort_key(getattr(variant, "size", "")) + (str(getattr(variant, "color", "") or "").lower(),)
+    """ТЗ Н-26: ручной sort_order (если задан, не 0) важнее; при равных — порядок размеров, затем цвет."""
+    so = getattr(variant, "sort_order", 0) or 0
+    return (so,) + size_sort_key(getattr(variant, "size", "")) + (str(getattr(variant, "color", "") or "").lower(),)
 
 
 def sort_variants(variants: Iterable) -> list:
