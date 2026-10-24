@@ -3007,6 +3007,14 @@ class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
+def _is_uuid(value) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, APIView):
     """
     Погасить долг конкретной продажи одним запросом (ТЗ ч.12, 2.3).
@@ -3014,13 +3022,16 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
     Idempotency-Key: <строка>  (или поле idempotency_key; повтор с тем же ключом ничего не создаёт)
     Body: {
       "amount": "40.00",            # необязательно; по умолчанию — весь остаток
-      "payment_method": "cash",     # обязательно
+      "payment_method": "cash",     # обязательно (ТЗ Н-13: можно и под именем "method"; разные → 400 field_conflict)
       "shift": "<id смены>",        # необязательно; по умолчанию — открытая смена кассира
       "cashbox_id": "<id кассы>"    # необязательно
     }
-    200 → {"paid": "40.00", "left": "0.00", "sale": {...}, "cashflows": [...]}
+    200 → {"paid": "40.00", "left": "0.00", "sale": {...}, "cashflows": [...],
+           "method", "payment_method", "received_by": {"id", "name"}, "received_at", "shift", "cashbox"}
     400 → {"detail": "Долг по продаже уже погашен", "code": "no_debt"}
 
+    Без `shift` платёж привязывается к открытой смене кассира (как и раньше); «вне смены»
+    не делаем, чтобы не менять expected_cash у действующих касс (ТЗ Н-13, см. `shift` в ответе).
     Деньги гасят взносы сделки продажи по порядку; в кассу пишется один приход на всю сумму,
     наличные попадают в смену один раз (debt_payments_cash / expected_cash).
     """
@@ -3033,7 +3044,9 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
         from apps.construction.auto_cashflow import create_auto_cashflow, serialize_auto_cashflows
         from apps.construction.models import CashFlow
         from apps.main.models import ClientDeal, DealInstallment, DealPayment
-        from apps.main.services_debt import VALID_DEBT_PAYMENT_METHODS, normalize_debt_payment_method
+        from apps.main.services_debt import (
+            VALID_DEBT_PAYMENT_METHODS, normalize_debt_payment_method, pick_debt_method,
+        )
 
         qs = self._filter_qs_company_branch(Sale.objects.select_for_update(of=("self",)))
         sale = get_object_or_404(qs, id=pk)
@@ -3041,21 +3054,33 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
         data = request.data if isinstance(request.data, dict) else {}
         errors = {}
         allowed_pm = set(VALID_DEBT_PAYMENT_METHODS)
-        raw_pm = (str(data.get("payment_method") or "")).strip().lower()
+        # ТЗ Н-13: имя поля method или payment_method; card — синоним transfer
+        raw_pm = pick_debt_method(data) or ""
+        if raw_pm == "card":
+            raw_pm = "transfer"
+        error_code = None
         if not raw_pm:
             errors["payment_method"] = ["Укажите способ оплаты."]
+            error_code = "method_required"
         elif raw_pm not in allowed_pm:
             errors["payment_method"] = [f"Неизвестный способ оплаты. Допустимо: {', '.join(sorted(allowed_pm))}."]
+            error_code = "method_not_allowed"
         amount = None
         if data.get("amount") not in (None, ""):
             try:
                 amount = Decimal(str(data.get("amount"))).quantize(Decimal("0.01"))
                 if amount <= 0:
                     errors["amount"] = ["Сумма должна быть больше 0."]
+                    error_code = error_code or "amount_invalid"
             except Exception:
                 errors["amount"] = ["Некорректная сумма."]
+                error_code = error_code or "amount_invalid"
         if errors:
-            raise ValidationError(errors)
+            body = dict(errors)
+            body["code"] = error_code
+            if error_code == "method_not_allowed":
+                body["data"] = {"allowed": sorted(allowed_pm)}
+            return Response(body, status=status.HTTP_400_BAD_REQUEST)
 
         is_debt_sale = sale.status == Sale.Status.DEBT or sale.payment_method == Sale.PaymentMethod.DEBT
         if not is_debt_sale or sale.status not in (Sale.Status.DEBT, Sale.Status.PAID):
@@ -3101,7 +3126,15 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
             replay = DealPayment.objects.filter(deal=deal, idempotency_key__in=list(inst_keys.values()))
             if replay.exists():
                 paid = replay.aggregate(s=Sum("amount"))["s"] or Decimal("0.00")
-                return self._response(request, sale, deal, paid, [], replayed=True)
+                from apps.construction.models import CashFlow as _CF
+                prior_cf = list(_CF.objects.filter(
+                    company=sale.company, idempotency_key=f"sale-pay-debt:{base_key}"
+                ))
+                return self._response(
+                    request, sale, deal, paid, prior_cf, replayed=True,
+                    payments=list(replay.select_related("created_by").order_by("created_at")),
+                    pm=normalize_debt_payment_method(raw_pm),
+                )
 
         remaining = deal.remaining_debt
         if remaining <= 0:
@@ -3109,7 +3142,11 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
         pay_total = remaining if amount is None else amount
         if pay_total > remaining:
             return Response(
-                {"amount": [f"Сумма больше остатка долга. Максимум: {remaining}."], "code": "amount_exceeds_debt"},
+                {
+                    "amount": [f"Сумма больше остатка долга. Максимум: {remaining}."],
+                    "code": "amount_exceeds_debt",
+                    "data": {"max": str(money(remaining))},
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -3118,7 +3155,23 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
         shift = None
         shift_id = data.get("shift") or data.get("shift_id")
         cashbox_id = data.get("cashbox_id")
+        if cashbox_id and not (_is_uuid(cashbox_id) and Cashbox.objects.filter(id=cashbox_id, company=sale.company).exists()):
+            return Response(
+                {"detail": "Касса не найдена или не принадлежит компании.", "code": "cashbox_not_found"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if shift_id:
+            _req = CashShift.objects.filter(id=str(shift_id), company=sale.company).first() if _is_uuid(shift_id) else None
+            if _req is not None:
+                if _req.status != CashShift.Status.OPEN:
+                    return Response(
+                        {"detail": "Смена закрыта.", "code": "shift_closed"}, status=status.HTTP_400_BAD_REQUEST
+                    )
+                if _req.cashier_id != request.user.id and not _is_owner_like(request.user):
+                    return Response(
+                        {"detail": "Эта смена открыта другим кассиром.", "code": "shift_not_owned"},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
             shift = _resolve_requested_open_shift(
                 company=sale.company, cashier=request.user, shift_id=shift_id, cashbox_id=cashbox_id
             )
@@ -3177,9 +3230,13 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
 
         from apps.main.models import sync_sale_status_from_deal
         sync_sale_status_from_deal(deal.id)  # статус и остаток продажи — сразу, не дожидаясь сигнала
-        return self._response(request, sale, deal, pay_total, [cf] if cf else [])
+        made = list(DealPayment.objects.filter(deal=deal, idempotency_key__in=list(inst_keys.values()))
+                    .select_related("created_by").order_by("created_at")) if raw_key else []
+        return self._response(request, sale, deal, pay_total, [cf] if cf else [], payments=made, pm=pm)
 
-    def _response(self, request, sale, deal, paid, cashflows, replayed=False):
+    def _response(self, request, sale, deal, paid, cashflows, replayed=False, payments=None, pm=None):
+        from apps.main.services_debt import debt_receipt_info
+
         from apps.construction.auto_cashflow import serialize_auto_cashflows
 
         deal.refresh_from_db()
@@ -3192,6 +3249,10 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
                 "replayed": replayed,
                 "sale": SaleDetailSerializer(sale, context={"request": request}).data,
                 "cashflows": serialize_auto_cashflows(cashflows),
+                # ТЗ Н-13: оба имени поля способа оплаты, кто принял, смена, касса
+                "method": pm,
+                "payment_method": pm,
+                **debt_receipt_info(request.user, cashflows, payments),
             },
             status=status.HTTP_200_OK,
         )
@@ -4488,7 +4549,7 @@ class SaleListAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, gene
     serializer_class = SaleListSerializer
     queryset = (
         Sale.objects.select_related("user", "consultant", "client", "cashbox", "cashbox__branch")
-        .prefetch_related("items__product", "payments", "deals")
+        .prefetch_related("items__product", "payments", "deals", "deals__installments", "returns")
         .all()
     )
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, SaleListOrderingFilter]
@@ -4635,7 +4696,7 @@ class SaleRetrieveAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, 
 
     queryset = (
         Sale.objects.select_related("user")
-        .prefetch_related("items__product")
+        .prefetch_related("items__product", "returns")
         .all()
     )
 
