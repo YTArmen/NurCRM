@@ -4484,7 +4484,7 @@ class SaleListAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, gene
     serializer_class = SaleListSerializer
     queryset = (
         Sale.objects.select_related("user", "consultant", "client", "cashbox", "cashbox__branch")
-        .prefetch_related("items__product", "payments", "deals")
+        .prefetch_related("items__product", "payments", "deals", "returns")
         .all()
     )
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, SaleListOrderingFilter]
@@ -4631,7 +4631,7 @@ class SaleRetrieveAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, 
 
     queryset = (
         Sale.objects.select_related("user")
-        .prefetch_related("items__product")
+        .prefetch_related("items__product", "returns")
         .all()
     )
 

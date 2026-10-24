@@ -1029,7 +1029,39 @@ class SaleReturnListAPIView(CompanyBranchRestrictedMixin, APIView):
                     qs = qs.filter(**{field: uuid.UUID(qp[param])})
                 except ValueError:
                     raise ValidationError({param: "Некорректный UUID."})
-        qs = qs.order_by("-created_at")[:1000]
+        # id — стабильный порядок при равном created_at (страницы не пересекаются)
+        qs = qs.order_by("-created_at", "-id")
+        # ТЗ Н-07: страницы только если клиент передал page/page_size; иначе — голый массив
+        # (кассы в поле разбирают массив, их ломать нельзя).
+        paged = "page" in qp or "page_size" in qp
+        page_meta = None
+        if paged:
+            from rest_framework.utils.urls import replace_query_param
+
+            def _pos_int(name, default, cap=None):
+                raw = qp.get(name)
+                if raw in (None, ""):
+                    return default
+                try:
+                    v = int(raw)
+                except (TypeError, ValueError):
+                    raise ValidationError({name: "Целое число."})
+                if v < 1:
+                    raise ValidationError({name: "Должно быть больше нуля."})
+                return min(v, cap) if cap else v
+
+            page_size = _pos_int("page_size", 100, 1000)
+            page = _pos_int("page", 1)
+            count = qs.count()
+            qs = qs[(page - 1) * page_size: page * page_size]
+            url = request.build_absolute_uri()
+            page_meta = {
+                "count": count,
+                "next": replace_query_param(url, "page", page + 1) if page * page_size < count else None,
+                "previous": replace_query_param(url, "page", page - 1) if page > 1 else None,
+            }
+        else:
+            qs = qs[:1000]
 
         out = []
         for r in qs:
@@ -1070,6 +1102,8 @@ class SaleReturnListAPIView(CompanyBranchRestrictedMixin, APIView):
                 "shift": str(r.shift_id) if r.shift_id else None,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             })
+        if page_meta is not None:
+            return Response({**page_meta, "results": out})
         return Response(out)
 
 
