@@ -24,7 +24,7 @@ from django.db.models import (
     OuterRef,
     Subquery,
 )
-from django.db.models.functions import TruncDate, ExtractHour, ExtractWeekDay, Coalesce
+from django.db.models.functions import TruncDate, ExtractHour, ExtractWeekDay, Coalesce, Least
 from django.utils import timezone
 from django.core.cache import cache
 from django.conf import settings
@@ -1301,6 +1301,87 @@ class AnalyticsView(APIView):
                 # возврата; в актуальной схеме этот блок всегда отрабатывает.
                 partial_returns_amount = Z_MONEY
 
+        # ТЗ Н-01: чеки в долг (paid_at у них пустой, поэтому выше они не попадают
+        # никогда) — в выручку входят деньги, принятые при продаже (предоплата),
+        # по дате продажи. Долговая часть — отдельно (credit_sales_total), её
+        # погашения — тоже отдельно (debt_repaid_total), в выручку не входят.
+        # Себестоимость и прибыль выше считаются только по оплаченным чекам.
+        prepayment_total = Z_MONEY
+        credit_sales_total = Z_MONEY
+        debt_repaid_total = Z_MONEY
+        if Sale is not None and _model_has_field(Sale, "debt_initial"):
+            debt_qs = Sale.objects.filter(
+                company=company,
+                debt_initial__gt=0,
+                status__in=(paid_value, partial_returned_value, _choice_value(Sale, "Status", "DEBT", "debt")),
+                created_at__gte=period.start,
+                created_at__lt=period.end,
+            )
+            if branch is not None and _model_has_field(Sale, "branch"):
+                if self._include_global(request):
+                    debt_qs = debt_qs.filter(Q(branch=branch) | Q(branch__isnull=True))
+                else:
+                    debt_qs = debt_qs.filter(branch=branch)
+            debt_qs = self._apply_sale_filters(request, debt_qs, Sale)
+            prepay_expr = Least(F("paid_now"), F("total"))
+            dagg = debt_qs.aggregate(
+                prepay=Coalesce(Sum(prepay_expr), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
+                credit=Coalesce(Sum("debt_initial"), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
+                n=Count("id", filter=Q(paid_now__gt=0)),
+            )
+            prepayment_total = _money(dagg["prepay"] or Z_MONEY)
+            credit_sales_total = _money(dagg["credit"] or Z_MONEY)
+            revenue = _money(revenue) + prepayment_total
+            tx += dagg["n"] or 0
+
+            # По дням — те же предоплаты в график.
+            by_day = {row["date"]: row for row in daily}
+            for r in (
+                debt_qs.filter(paid_now__gt=0).annotate(d=TruncDate("created_at")).values("d")
+                .annotate(v=Sum(prepay_expr), n=Count("id")).order_by("d")
+            ):
+                if not r["d"]:
+                    continue
+                key = r["d"].isoformat()
+                row = by_day.setdefault(key, {"date": key, "value": "0.00", "transactions": 0})
+                row["value"] = str(_money(Decimal(row["value"]) + (r["v"] or Z_MONEY)))
+                row["transactions"] += r["n"] or 0
+            daily = sorted(by_day.values(), key=lambda x: x["date"])
+
+            # Способы оплаты: предоплата раскладывается по своим строкам (без долга).
+            if _model_has_field(Sale, "payment_method"):
+                from apps.main.models import SalePayment
+
+                rows = (
+                    SalePayment.objects.filter(sale__in=debt_qs.values("id"), amount__gt=0)
+                    .exclude(method__in=(Sale.PaymentMethod.DEBT, Sale.PaymentMethod.MIXED, Sale.PaymentMethod.OFFSET))
+                    .values("method").annotate(total=Sum("amount"), cnt=Count("sale_id", distinct=True))
+                )
+                by_method = {p["method"]: p for p in payment_breakdown}
+                for r in rows:
+                    key = r["method"] or "unknown"
+                    item = by_method.get(key)
+                    if item is None:
+                        item = {"method": key, "label": PAYMENT_METHOD_LABELS.get(key, key), "count": 0, "total": "0.00"}
+                        payment_breakdown.append(item)
+                        by_method[key] = item
+                    item["count"] += r["cnt"] or 0
+                    item["total"] = str(_money(Decimal(item["total"]) + (r["total"] or Z_MONEY)))
+                # Σ строк == выручке: копейки (предоплата больше итога после возврата) — на крупную строку.
+                diff = _money(revenue) - sum((Decimal(p["total"]) for p in payment_breakdown), Z_MONEY)
+                if payment_breakdown and diff:
+                    top = max(payment_breakdown, key=lambda p: Decimal(p["total"]))
+                    top["total"] = str(_money(Decimal(top["total"]) + diff))
+                payment_breakdown.sort(key=lambda p: Decimal(p["total"]), reverse=True)
+
+            try:
+                from apps.construction.models import CashFlow
+
+                cf_in = _money_cashflows(company, branch, period, request).filter(type=CashFlow.Type.INCOME)
+                debt_repaid_total = _money(_sum_by_category(cf_in, _cf_income_category()).get("debt_repayments", Z_MONEY))
+            except Exception:
+                debt_repaid_total = Z_MONEY
+
         avg_check = _safe_div(_money(revenue), tx)
 
         documents = [
@@ -1327,6 +1408,12 @@ class AnalyticsView(APIView):
                 "mixed_total": str(_money(mixed_total)),
                 "mixed_count": mixed_count,
                 "net_revenue": str(_money(revenue)),
+                # ТЗ Н-01: предоплаты по чекам в долг (входят в revenue), долговая часть
+                # чеков (не входит), погашено долгов за период (не входит).
+                "prepayment_total": str(_money(prepayment_total)),
+                "credit_sales_total": str(_money(credit_sales_total)),
+                "debt_repaid_total": str(_money(debt_repaid_total)),
+                "revenue_includes_returns": False,
                 "transactions": tx,
                 "avg_check": str(_money(avg_check)),
                 "clients": clients,
