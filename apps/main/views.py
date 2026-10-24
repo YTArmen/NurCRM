@@ -3950,13 +3950,16 @@ class ClientDealPayAPIView(APIView, CompanyBranchRestrictedMixin):
         from apps.construction.models import CashFlow
 
         if is_supplier:
+            # ТЗ Н-03/Н-11: «из ящика смены» — расход из кассы этой смены, один.
+            drawer_shift = _receipt_drawer_shift(request, deal.company) if (pm or "cash") == "cash" else None
             create_auto_cashflow(
                 company=deal.company,
                 branch=deal.branch,
+                cashbox=drawer_shift.cashbox if drawer_shift else None,
                 cashbox_id=data.get("cashbox_id"),
                 cashbox_role=data.get("cashbox_role") or "expense_variable",
                 user=request.user,
-                shift=None,
+                shift=drawer_shift,
                 type=CashFlow.Type.EXPENSE,
                 amount=pay_amt,
                 source_kind=CashFlow.SourceKind.SUPPLIER_DEBT_PAYMENT,
@@ -3967,7 +3970,7 @@ class ClientDealPayAPIView(APIView, CompanyBranchRestrictedMixin):
                 name=f"Оплата долга поставщику: {deal.title or (deal.client.full_name if deal.client else 'Сделка')}",
                 source_business_operation_id="Оплата долга",
                 payment_method=pm,
-                affects_shift_drawer=False,
+                affects_shift_drawer=drawer_shift is not None,
             )
         else:
             create_auto_cashflow(
@@ -4114,13 +4117,15 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
 
             if is_supplier:
                 # Долг поставщику - это РАСХОД (как в clients/{id}/deals/{deal}/pay/).
+                drawer_shift = _receipt_drawer_shift(request, deal.company) if (pm or "cash") == "cash" else None
                 create_auto_cashflow(
                     company=deal.company,
                     branch=deal.branch,
+                    cashbox=drawer_shift.cashbox if drawer_shift else None,
                     cashbox_id=data.get("cashbox_id"),
                     cashbox_role=data.get("cashbox_role") or "expense_variable",
                     user=request.user,
-                    shift=None,
+                    shift=drawer_shift,
                     type=CashFlow.Type.EXPENSE,
                     amount=pay_amount,
                     source_kind=CashFlow.SourceKind.SUPPLIER_DEBT_PAYMENT,
@@ -4128,7 +4133,7 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
                     name=f"Оплата долга поставщику: {deal.title or client.full_name}",
                     source_business_operation_id="Оплата долга",
                     payment_method=pm,
-                    affects_shift_drawer=False,
+                    affects_shift_drawer=drawer_shift is not None,
                 )
             else:
                 create_auto_cashflow(
