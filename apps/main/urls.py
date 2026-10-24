@@ -2,6 +2,7 @@ from django.urls import path, include
 
 from apps.main.mass_incoming_views import ProductMassIncomingAPIView
 from .views import *
+from .purchase_orders import PurchaseOrderListCreateAPIView, PurchaseOrderDetailAPIView
 from .price_check import ProductCatalogVersionView, ProductPriceCheckView
 from .pos_views import *
 from apps.construction.views_buhgalter import AuditLogView
@@ -459,6 +460,8 @@ urlpatterns = [
     path("suppliers/payables/", SupplierPayablesAPIView.as_view(), name="supplier-payables"),
     # ТЗ Н-08: исход операции по ключу повтора
     path("idempotency/<str:key>/", IdempotencyLookupAPIView.as_view(), name="idempotency-lookup"),
+    path("purchase-orders/", PurchaseOrderListCreateAPIView.as_view(), name="purchase-orders"),  # ТЗ Н-29
+    path("purchase-orders/<uuid:pk>/", PurchaseOrderDetailAPIView.as_view(), name="purchase-order-detail"),
     path("suppliers/", SupplierListAPIView.as_view(), name="supplier-list"),
     path("suppliers/receipts/", SupplierReceiptListAPIView.as_view(), name="supplier-receipts"),
     path("suppliers/receipts/<uuid:pk>/", SupplierReceiptRetrieveAPIView.as_view(), name="supplier-receipt-detail"),

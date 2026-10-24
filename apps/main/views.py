@@ -5854,6 +5854,10 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
     cashflow_id, supplier_debt_total, replayed. Ошибки: items_empty, payment_type_invalid,
     paid_amount_exceeds_total, paid_amount_invalid, first_due_date_invalid.
     БЕЗ "create_deal" запрос работает как раньше (сайт сам создаёт сделку).
+
+    ТЗ Н-29: "order_id" (uuid заказа поставщику) — принятое количество прибавляется к received_qty
+    строк заказа, статус → partial/received; приход хранит order_id. Ошибки: order_not_found,
+    order_supplier_mismatch, order_closed (заказ cancelled/received).
     """
     permission_classes = [permissions.IsAuthenticated]
 
@@ -5934,6 +5938,23 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
                 if first_due is None:
                     raise ValidationError({"code": "first_due_date_invalid", "detail": "first_due_date: YYYY-MM-DD."})
 
+        # ТЗ Н-29: заказ поставщику, по которому идёт приход
+        po_order = None
+        raw_order_id = request.data.get("order_id")
+        if raw_order_id not in (None, ""):
+            from apps.main.models import PurchaseOrder
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            try:
+                po_order = self._filter_qs_company_branch(PurchaseOrder.objects.all()).select_for_update().filter(pk=raw_order_id).first()
+            except (ValueError, DjangoValidationError):
+                po_order = None
+            if po_order is None:
+                raise ValidationError({"code": "order_not_found", "detail": "Заказ поставщику не найден."})
+            if po_order.supplier_id != supplier.id:
+                raise ValidationError({"code": "order_supplier_mismatch", "detail": "Заказ оформлен на другого поставщика."})
+            if po_order.status in (PurchaseOrder.Status.CANCELLED, PurchaseOrder.Status.RECEIVED):
+                raise ValidationError({"code": "order_closed", "detail": "Заказ уже закрыт (отменён или принят полностью)."})
+
         ser = SupplierReceiptCreateSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
 
@@ -5965,6 +5986,7 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
             branch=branch,
             supplier=supplier,
             created_by=getattr(request, "user", None),
+            order=po_order,
         )
         payment_type = _parse_payment_type(request.data.get("payment_type"))
 
@@ -6050,6 +6072,9 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
 
         if receipt_items:
             SupplierReceiptItem.objects.bulk_create(receipt_items)
+        if po_order is not None:
+            from apps.main.purchase_orders import apply_receipt_to_order
+            apply_receipt_to_order(po_order, [(ri.product_id, ri.qty) for ri in receipt_items])
 
         # auto-cashflow для закупок за наличные
         receipt_cashflows = []
@@ -6105,6 +6130,8 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
         resp_data = {
             "id": str(receipt.id),
             "receipt_id": str(receipt.id),
+            "order_id": str(po_order.id) if po_order else None,
+            "order_status": po_order.status if po_order else None,
             "supplier": str(supplier.id),
             "products": ProductListSerializer(refreshed, many=True, context={"request": request}).data,
             "cashflows": serialize_auto_cashflows(receipt_cashflows),
