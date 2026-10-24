@@ -2498,10 +2498,10 @@ class ProductRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestri
             )
             .get()
         )
-        return Response(
-            self.get_serializer(instance).data,
-            status=status.HTTP_200_OK,
-        )
+        data = self.get_serializer(instance).data
+        if hasattr(serializer, "_price_changed"):
+            data["price_changed"] = serializer._price_changed
+        return Response(data, status=status.HTTP_200_OK)
 
 
 
@@ -5476,10 +5476,17 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
                 # Наценку пересчитываем от новой закупочной к текущей цене продажи,
                 # чтобы тройка purchase_price / markup_percent / price осталась согласованной.
                 current_price = Decimal(str(getattr(prod, "price", None) or 0))
-                if new_purchase_price > Decimal("0") and current_price > Decimal("0"):
+                old_markup = Decimal(str(getattr(prod, "markup_percent", None) or 0))
+                if it.get("recalc_price") and new_purchase_price > Decimal("0") and old_markup != Decimal("0"):
+                    # ТЗ Н-04: пересчёт цены продажи только по явному флагу строки.
+                    upd["price"] = (new_purchase_price * (Decimal("1") + old_markup / Decimal("100"))).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                elif new_purchase_price > Decimal("0") and current_price > Decimal("0"):
+                    # 4 знака, как в поле: иначе следующий save() сдвигает цену на копейки.
                     upd["markup_percent"] = (
                         (current_price - new_purchase_price) / new_purchase_price * Decimal("100")
-                    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    ).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
             type(prod).objects.filter(id=pid).update(**upd)
             # The batch retains the shelf-life configuration at the receipt moment.

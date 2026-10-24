@@ -1652,6 +1652,8 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             data = super().to_representation(instance)
         if "stock" in data:
             data["is_promo"] = data["stock"]
+        if hasattr(self, "_price_changed"):
+            data["price_changed"] = self._price_changed
         try:
             data["alternate_barcodes"] = [
                 {"barcode": item.barcode, "name": item.name, "quantity": item.quantity}
@@ -1876,16 +1878,25 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             markup_percent = self._to_dec(validated_data["markup_percent"])
             price = self._calc_price(purchase_price, markup_percent)
 
-        # 3) иначе пришёл только purchase_price -> пересчитываем разумно
+        # 3) иначе пришёл только purchase_price -> цена продажи не меняется,
+        #    наценка пересчитывается к текущей цене. Пересчёт цены от наценки —
+        #    только по явному "recalc_price": true (ТЗ Н-04: иначе 11 → 1 → 11
+        #    давало цену 165 вместо 15).
         elif has_purchase:
-            if Decimal(instance.markup_percent or 0) != Decimal("0"):
+            raw_recalc = getattr(self, "initial_data", {}).get("recalc_price")
+            if str(raw_recalc).lower() in ("true", "1") and Decimal(instance.markup_percent or 0) != Decimal("0"):
                 price = self._calc_price(purchase_price, markup_percent)
             else:
                 markup_percent = self._calc_markup(purchase_price, price)
 
+        old_price = instance.price
         instance.purchase_price = purchase_price
         instance.markup_percent = markup_percent
         instance.price = price
+        # save() пересчитывает цену от наценки; цена здесь уже согласована —
+        # не даём округлению наценки сдвинуть её на копейки.
+        instance._manual_price = True
+        self._price_changed = Decimal(str(old_price or 0)) != Decimal(str(price or 0))
 
         # ===== PATCH-friendly обновление остальных полей =====
         updatable_fields = (
@@ -3390,6 +3401,8 @@ class SupplierReceiptItemSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
+    # ТЗ Н-04: пересчитать цену продажи от новой закупки по текущей наценке.
+    recalc_price = serializers.BooleanField(required=False, default=False)
 
 
 class SupplierReceiptCreateSerializer(serializers.Serializer):
