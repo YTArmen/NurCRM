@@ -119,7 +119,11 @@ def idempotent(handler=None, *, body_key=False):
                         "in_progress", status.HTTP_409_CONFLICT, **{"Retry-After": "1"},
                     )
             if record.state == IdempotencyRecord.State.DONE:
-                resp = Response(record.response_body, status=record.status_code)
+                body = record.response_body
+                # ТЗ Н-08: в теле повтора — replayed: true (если ответ его вообще содержит).
+                if isinstance(body, dict) and "replayed" in body:
+                    body = {**body, "replayed": True}
+                resp = Response(body, status=record.status_code)
                 resp["Idempotent-Replayed"] = "true"
                 return resp
 

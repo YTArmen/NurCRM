@@ -1794,6 +1794,7 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
             return v
         raise ValueError(f"Недопустимый статус. Допустимые: {', '.join(sorted(codes))}.")
 
+    @idempotent(body_key=True)  # ТЗ Н-08: повтор ключом — прежний ответ, до проверок
     def create(self, request, *args, **kwargs):
         # ТЗ 12.13: любой ответ-ошибка (>=400) после product.save() откатывает всю транзакцию,
         # чтобы не оставалось наполовину сохранённого товара (повтор плодил дубли).
@@ -7092,6 +7093,7 @@ class InventoryListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCrea
 
         return qs
 
+    @idempotent(body_key=True)  # ТЗ Н-08: повтор ключом — прежний ответ, до проверок
     @transaction.atomic
     def create(self, request, *args, **kwargs):
         company = self._company()
@@ -7156,6 +7158,7 @@ class InventoryConfirmAPIView(CompanyBranchRestrictedMixin, APIView):
     """POST /api/main/inventories/<uuid:pk>/confirm/ — провести корректировку остатков."""
     permission_classes = [permissions.IsAuthenticated]
 
+    @idempotent(body_key=True)  # ТЗ Н-08: повтор ключом — прежний ответ, до проверок
     @transaction.atomic
     def post(self, request, pk, *args, **kwargs):
         company = self._company()
