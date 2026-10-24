@@ -3,6 +3,8 @@
 """
 import logging
 
+from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
@@ -14,6 +16,8 @@ from apps.users.models import Branch, Company
 from .models import AppCustomer, AppPushToken, AppShopSettings, ClientAppConfig, Referral
 
 logger = logging.getLogger("clientapp.signals")
+# Пауза перед уведомлением о продаже: даёт кассе прислать и начисление, и списание (ТЗ 14.10, п. 2.4).
+SALE_PUSH_DELAY_SECONDS = int(getattr(settings, "CLIENT_APP_SALE_PUSH_DELAY_SECONDS", 8) or 0)
 
 
 def _client_phone(client_id):
@@ -27,7 +31,7 @@ def bonus_tx_push(sender, instance, created, **kwargs):
         return
     if instance.reason not in (ClientBonusTransaction.Reason.EARN, ClientBonusTransaction.Reason.REDEEM):
         return
-    tx_id, client_id = instance.pk, instance.client_id
+    sale_id, client_id = instance.sale_id, instance.client_id
 
     def _after_commit():
         try:
@@ -36,9 +40,20 @@ def bonus_tx_push(sender, instance, created, **kwargs):
                 return
             if not AppPushToken.objects.filter(customer__phone=phone, customer__deleted_at__isnull=True).exists():
                 return
-            from .tasks import enqueue, send_bonus_push
+            from .tasks import enqueue, enqueue_later, send_sale_push
 
-            enqueue(send_bonus_push, str(tx_id))
+            # Одна продажа = одно уведомление: касса шлёт начисление и списание отдельными запросами,
+            # поэтому задача ставится один раз на продажу и с задержкой, чтобы собрать оба движения.
+            try:
+                first = cache.add(f"capp:sale_push_queued:{sale_id}", 1, 24 * 3600)
+            except Exception:
+                first = True
+            if not first:
+                return
+            if SALE_PUSH_DELAY_SECONDS > 0:
+                enqueue_later(send_sale_push, SALE_PUSH_DELAY_SECONDS, str(sale_id))
+            else:
+                enqueue(send_sale_push, str(sale_id))
         except Exception:
             logger.exception("bonus push hook failed")
 

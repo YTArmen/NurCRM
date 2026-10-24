@@ -1266,11 +1266,28 @@ class ProductListView(CompanyBranchRestrictedMixin, generics.ListAPIView):
         # сортировку (query.order_by пуст), порядок «новые первыми» не должен теряться.
         current = [o for o in (list(qs.query.order_by) or []) if "is_favorite" not in o]
         if not current:
-            current = ["-seq"]
-        if any(o.lstrip("-") == "quantity" for o in current):
+            current = [F("seq").desc(nulls_last=True), "-created_at", "-id"]
+        else:
+            normalized_current = []
+            for o in current:
+                if o == "-seq":
+                    normalized_current.extend([F("seq").desc(nulls_last=True), "-created_at", "-id"])
+                elif o == "seq":
+                    normalized_current.extend([F("seq").asc(nulls_last=True), "created_at", "id"])
+                else:
+                    normalized_current.append(o)
+            current = normalized_current
+        if any(
+            isinstance(o, str) and o.lstrip("-") == "quantity"
+            for o in current
+        ):
             # Сортировка по остатку (блок «Заканчивается»): избранные сверху не нужны —
             # они сломали бы «N товаров с самым малым остатком»; seq — стабильные страницы.
-            if not any(o.lstrip("-") == "seq" for o in current):
+            if not any(
+                (isinstance(o, str) and o.lstrip("-") == "seq")
+                or (hasattr(o, "expression") and getattr(o.expression, "name", None) == "seq")
+                for o in current
+            ):
                 current.append("seq")
             return qs.order_by(*current)
         qs = qs.order_by("-is_favorite", *current)
@@ -5453,10 +5470,16 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
                     except Exception:
                         pass
             elif raw_pp is not None:
-                # Цена продажи становится равной цене из прихода (без наценки),
-                # раньше она пересчитывалась по старой наценке (50 → 83.33).
-                upd["price"] = new_purchase_price.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                upd["markup_percent"] = Decimal("0")
+                # Оприходование меняет только закупочную цену и остаток.
+                # Цена продажи (price) не трогается: раньше она перезаписывалась
+                # закупочной и товар уходил с кассы по себестоимости.
+                # Наценку пересчитываем от новой закупочной к текущей цене продажи,
+                # чтобы тройка purchase_price / markup_percent / price осталась согласованной.
+                current_price = Decimal(str(getattr(prod, "price", None) or 0))
+                if new_purchase_price > Decimal("0") and current_price > Decimal("0"):
+                    upd["markup_percent"] = (
+                        (current_price - new_purchase_price) / new_purchase_price * Decimal("100")
+                    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
             type(prod).objects.filter(id=pid).update(**upd)
             # The batch retains the shelf-life configuration at the receipt moment.
@@ -5555,6 +5578,9 @@ class SupplierReceiptQuerysetMixin:
             SupplierReceipt.objects.select_related("supplier", "company", "branch", "created_by")
             .prefetch_related("items", "items__product")
             .annotate(total_amount=Sum(line_total))
+            # Meta.ordering is dropped by Django in GROUP BY queries (annotate+Sum),
+            # so order explicitly: newest receipts first.
+            .order_by("-created_at", "-id")
         )
         return self._filter_qs_company_branch(qs)
 

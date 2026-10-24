@@ -106,6 +106,35 @@ def pick_client_for_kassa(company, branch, phone_e164):
     return candidates[0] if branch is None else None
 
 
+def confirmed_customer_for_phone(phone_e164):
+    """Профиль приложения с подтверждённым (через Telegram) номером, или None."""
+    if not phone_e164:
+        return None
+    return AppCustomer.objects.filter(phone=phone_e164, deleted_at__isnull=True).first()
+
+
+def client_for_kassa_or_from_app(company, branch, phone_e164):
+    """
+    (client, created). Клиент компании по номеру; если его нет, но есть подтверждённый профиль приложения —
+    заводим клиента из профиля (ФИО, телефон, дата рождения), как resolve-qr делает для NURCRMT (ТЗ 14.10, п. 2.3).
+    Без профиля — (None, False). Повторный вызов клиента не дублирует: создание под блокировкой профиля.
+    """
+    client = pick_client_for_kassa(company, branch, phone_e164)
+    if client is not None:
+        return client, False
+    customer = confirmed_customer_for_phone(phone_e164)
+    if customer is None:
+        return None, False
+    with transaction.atomic():
+        locked = AppCustomer.objects.select_for_update().filter(pk=customer.pk, deleted_at__isnull=True).first()
+        if locked is None or not locked.phone:
+            return None, False
+        client = pick_client_for_kassa(company, branch, phone_e164)
+        if client is not None:
+            return client, False
+        return create_client_from_customer(company, branch, locked), True
+
+
 def create_client_from_customer(company, branch, customer: AppCustomer, user=None):
     client = Client(
         company=company,
@@ -131,15 +160,13 @@ def _decimal_or_none(v):
 
 
 def _company_has_showcase(company) -> bool:
-    # Открытая витрина работает по slug; can_view_showcase — лишь доступ к меню в CRM,
-    # поэтому опубликованная в редакторе витрина тоже считается.
-    if not company.slug:
-        return False
-    if getattr(company, "can_view_showcase", False):
-        return True
-    from apps.main.models import ShowcaseDesign
-
-    return ShowcaseDesign.objects.filter(company=company, published_at__isnull=False).exists()
+    """
+    catalogSlug — slug публичной витрины (ТЗ 14.10, п. 2.1). Публичный адрес
+    /api/main/public/companies/<slug>/showcase/ открывается для любой компании со slug
+    (resolve_public_company ищет только по slug; без макета отдаётся документ по умолчанию),
+    поэтому can_view_showcase и факт публикации макета на ссылку «Цены» не влияют.
+    """
+    return bool(company.slug) and bool(getattr(company, "is_active", True))
 
 
 # ----------------------------------------------------------------------
@@ -178,10 +205,24 @@ def _has_coords(row):
     return row is not None and row.latitude is not None and row.longitude is not None
 
 
+def _listable(row):
+    """
+    Магазин попадает в список, если координаты найдены, либо адрес только что задан/изменён и геокодер
+    ещё не прошёл (status пустой, попыток 0) — тогда он отдаётся без координат, приложение найдёт их само
+    (ТЗ 14.10, п. 2.2). После неудачи геокодера (not_found/error) магазин скрыт — защита карты от мусора.
+    """
+    if row is None:
+        return False
+    if _has_coords(row):
+        return True
+    return row.geocode_status == "" and (row.geocode_attempts or 0) == 0
+
+
 def build_shops():
     """
     Список магазинов для GET /api/v1/shops (без кэша).
-    На карту попадает только магазин с адресом и координатами, не скрытый администратором,
+    Поля name/address/phone/hours: значение из app-shop-settings, иначе из филиала, иначе из компании.
+    На карту попадает магазин с адресом и координатами (или ожидающий геокодер), не скрытый администратором,
     у компании, которой приложение доступно (бесплатный период или оплата).
     """
     free, _until = app_free_until()
@@ -215,7 +256,7 @@ def build_shops():
             if brow is not None and (not brow.show_in_app or brow.hidden_by_admin):
                 continue
             address = (brow.address if brow and brow.address else (b.address or "")).strip()
-            if not address or not _has_coords(brow):
+            if not address or not _listable(brow):
                 continue
             p_enabled = brow.points_enabled if brow and brow.points_enabled is not None else c_points_enabled
             p_percent = brow.points_percent if brow and brow.points_percent is not None else c_points_percent
@@ -240,7 +281,7 @@ def build_shops():
             shops.extend(branch_shops)
             continue
         address = (crow.address or company.address or "").strip()
-        if not address or not _has_coords(crow):
+        if not address or not _listable(crow):
             continue
         shops.append({
             "id": str(company.id),
@@ -260,15 +301,59 @@ def build_shops():
     return shops
 
 
+def shops_version() -> str:
+    """
+    Отпечаток источников /shops (ТЗ 14.10, п. 2.2): настройки магазинов, филиалы, компании (у Company нет
+    updated_at — берём сами поля), конфиг «Бесплатно до». Любое изменение, даже через queryset.update()
+    без сигналов, даёт новый отпечаток → кэш перестраивается и ETag меняется не позже чем за минуту.
+    Четыре лёгких запроса; /shops и так отдаётся с Cache-Control max-age=60.
+    """
+    from django.db.models import Count
+
+    from apps.users.models import Company
+
+    enabled_companies = AppShopSettings.objects.filter(branch__isnull=True).values("company_id")
+    # geocode_row пишет через update(): updated_at не меняется, поэтому учитываем и результат геокодера
+    s = AppShopSettings.objects.aggregate(
+        m=Max("updated_at"), n=Count("id"), g=Max("geocoded_at"), a=Sum("geocode_attempts")
+    )
+    companies = list(
+        Company.objects.filter(id__in=enabled_companies)
+        .order_by("id")
+        .values_list("id", "name", "address", "phone", "slug", "is_active")
+    )
+    # у филиала updated_at есть, но queryset.update() его не трогает — берём и сами поля
+    branches = list(
+        Branch.objects.filter(company_id__in=enabled_companies)
+        .order_by("id")
+        .values_list("id", "name", "address", "phone", "is_active", "updated_at")
+    )
+    cfg = ClientAppConfig.objects.filter(pk=1).values_list("free_until", "paid_feature_code").first()
+    raw = json.dumps(
+        [str(s["m"]), s["n"], str(s["g"]), s["a"], [list(map(str, c)) for c in companies],
+         [list(map(str, b)) for b in branches], str(cfg)]
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
 def get_shops_cached():
-    """(shops, etag). Кэш сбрасывается сигналами при изменении настроек/компаний/филиалов."""
+    """
+    (shops, etag). Кэш в Redis на SHOPS_CACHE_SECONDS, но живёт только пока совпадает отпечаток источников
+    (shops_version); плюс сигналы сбрасывают его сразу при save() настроек/компаний/филиалов.
+    """
+    try:
+        version = shops_version()
+    except Exception:  # база недоступна — пусть упадёт ниже обычным путём, без кэша
+        logger.debug("shops_version failed", exc_info=True)
+        version = None
     cached = cache.get(SHOPS_CACHE_KEY)
-    if cached:
+    if cached and version is not None and cached.get("version") == version:
         return cached["shops"], cached["etag"]
     shops = build_shops()
     body = json.dumps(shops, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     etag = '"' + hashlib.sha1(body.encode("utf-8")).hexdigest() + '"'
-    cache.set(SHOPS_CACHE_KEY, {"shops": shops, "etag": etag}, SHOPS_CACHE_SECONDS)
+    if version is not None:
+        cache.set(SHOPS_CACHE_KEY, {"shops": shops, "etag": etag, "version": version}, SHOPS_CACHE_SECONDS)
     return shops, etag
 
 
@@ -545,29 +630,29 @@ class ReferralError(Exception):
 def apply_referral_code(customer: AppCustomer, code: str):
     code = (code or "").strip().upper()
     if not code:
-        raise ReferralError("invalid_code", "Укажите код приглашения.")
+        raise ReferralError("referral_not_found", "Укажите код приглашения.")
     if customer.referred_by_id or Referral.objects.filter(invitee=customer).exists():
-        raise ReferralError("already_applied", "Код приглашения уже указан.")
+        raise ReferralError("referral_already_applied", "Код приглашения уже указан.")
     inviter = AppCustomer.objects.filter(referral_code=code, deleted_at__isnull=True).first()
     if inviter is None:
-        raise ReferralError("invalid_code", "Код приглашения не найден.")
+        raise ReferralError("referral_not_found", "Код приглашения не найден.")
     if inviter.pk == customer.pk or (inviter.phone and inviter.phone == customer.phone):
-        raise ReferralError("self_referral", "Нельзя пригласить самого себя.")
+        raise ReferralError("referral_self", "Нельзя пригласить самого себя.")
     p_hash = customer.phone_hash or phone_hash(customer.phone)
     if p_hash and Referral.objects.filter(invitee_phone_hash=p_hash).exclude(invitee=customer).exists():
-        raise ReferralError("already_applied", "Для этого номера код приглашения уже использовался.")
+        raise ReferralError("referral_already_applied", "Для этого номера код приглашения уже использовался.")
     if customer_has_purchases(customer):
-        raise ReferralError("not_new_customer", "Код можно указать только до первой покупки.")
+        raise ReferralError("referral_too_late", "Код можно указать только до первой покупки.")
     window_days = int(getattr(settings, "CLIENT_APP_REFERRAL_WINDOW_DAYS", 7) or 7)
     if customer.created_at and (timezone.now() - customer.created_at).days > window_days:
-        raise ReferralError("too_late", "Код приглашения указывается при первом входе.")
+        raise ReferralError("referral_too_late", "Код приглашения указывается при первом входе.")
     try:
         with transaction.atomic():
             ref = Referral.objects.create(inviter=inviter, invitee=customer, invitee_phone_hash=p_hash)
             AppCustomer.objects.filter(pk=customer.pk).update(referred_by=inviter)
             customer.referred_by = inviter
     except IntegrityError:
-        raise ReferralError("already_applied", "Код приглашения уже указан.")
+        raise ReferralError("referral_already_applied", "Код приглашения уже указан.")
     return ref
 
 
@@ -645,7 +730,18 @@ def process_referral_for_sale(sale_id):
             rewarded_at=timezone.now(),
         )
         ref.refresh_from_db()
-        return ref
+        notify = (inviter.pk, rule.inviter_points, sale.company_id) if (
+            rule.inviter_points > 0 and inviter.deleted_at is None
+        ) else None
+    # пуш пригласившему — уже после фиксации начислений; ошибки Expo начисление не отменяют
+    if notify:
+        try:
+            from .push import push_referral_reward
+
+            push_referral_reward(*notify)
+        except Exception:
+            logger.warning("referral push failed", exc_info=True)
+    return ref
 
 
 def has_pending_referral_for_client(client) -> bool:

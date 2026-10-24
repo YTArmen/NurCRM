@@ -321,6 +321,17 @@ class DocumentItemSerializer(serializers.ModelSerializer):
 
 
 class DocumentSerializer(serializers.ModelSerializer):
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if "items" in data and isinstance(data["items"], list):
+            data["items"] = sorted(
+                data["items"],
+                key=lambda x: (
+                    (x.get("product_name") or x.get("target_product_name") or "").lower()
+                )
+            )
+        return data
+
     items = DocumentItemSerializer(many=True)
     moves = StockMoveSerializer(many=True, read_only=True)
     receipts = serializers.SerializerMethodField()

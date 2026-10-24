@@ -249,15 +249,14 @@ class PublicProductSerializer(serializers.ModelSerializer):
         return self._variants_data(obj)
 
     def get_price_range(self, obj: Product):
+        # min/max — имена из ТЗ приложения покупателей (14.10, п. 2.5); min_price/max_price оставлены для сайта.
         variants = self._variants_data(obj)
         if not variants:
             fp = self.get_final_price(obj)
-            return {"min_price": str(fp), "max_price": str(fp)}
+            return {"min_price": str(fp), "max_price": str(fp), "min": str(fp), "max": str(fp)}
         prices = [Decimal(v["final_price"]) for v in variants]
-        return {
-            "min_price": str(min(prices)),
-            "max_price": str(max(prices)),
-        }
+        lo, hi = str(min(prices)), str(max(prices))
+        return {"min_price": lo, "max_price": hi, "min": lo, "max": hi}
 
 
 class PublicProductListSerializer(PublicProductSerializer):

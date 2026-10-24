@@ -23,6 +23,7 @@ from .views_media_proxy import media_proxy
 from .views_version import ClientVersionView
 from .views_health import health_check
 from apps.main.telegram_bot.views_public import TelegramWebhookPublicView
+from apps.clientapp.landing import ReferralLandingView
 
 if settings.ENABLE_API_DOCS:
     from rest_framework import permissions
@@ -81,6 +82,8 @@ api_urlpatterns = [
     path("telegram/webhook/<uuid:bot_uuid>/", TelegramWebhookPublicView.as_view(), name="telegram-bot-webhook-alt"),
     path("telegram/webhook/", TelegramWebhookPublicView.as_view(), name="telegram-bot-webhook-alt-info"),
     path('api/v1/', include('apps.clientapp.urls')),  # приложение клиентов (покупателей)
+    path('r/<str:code>/', ReferralLandingView.as_view(), name='capp-referral-landing'),  # ссылка-приглашение
+    path('r/<str:code>', ReferralLandingView.as_view()),
     path('api/', include(apps_includes)),
     path('', include(apps_includes)),
 ]

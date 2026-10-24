@@ -15,8 +15,29 @@ def enqueue(task, *args):
         logger.warning("clientapp: cannot enqueue %s: %s", getattr(task, "name", task), exc)
 
 
+def enqueue_later(task, countdown, *args):
+    """То же, что enqueue, но с задержкой (секунды)."""
+    try:
+        task.apply_async(args=args, countdown=countdown)
+    except Exception as exc:
+        logger.warning("clientapp: cannot enqueue %s: %s", getattr(task, "name", task), exc)
+
+
+@shared_task(name="apps.clientapp.tasks.send_sale_push", ignore_result=True)
+def send_sale_push(sale_id):
+    """Одно уведомление по продаже (начисление + списание одним текстом)."""
+    from .push import push_for_sale
+
+    try:
+        return push_for_sale(sale_id)
+    except Exception:
+        logger.exception("send_sale_push failed for %s", sale_id)
+        return 0
+
+
 @shared_task(name="apps.clientapp.tasks.send_bonus_push", ignore_result=True)
 def send_bonus_push(tx_id):
+    """Совместимость (задачи, поставленные старым кодом до обновления воркера)."""
     from .push import push_for_bonus_tx
 
     try:
