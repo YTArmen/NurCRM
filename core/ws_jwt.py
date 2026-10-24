@@ -22,7 +22,7 @@ User = get_user_model()
 logger = logging.getLogger("nurcrm.websocket.auth")
 
 # Paths that skip JWT (legacy agent socket).
-JWT_SKIP_PATH_PREFIXES = ("ws/agents/",)
+JWT_SKIP_PATH_PREFIXES = ("ws/agents/", "ws/company/")  # ws/company/ — токен первым сообщением (ТЗ Н-31)
 
 # Rate-limit repeated failed auth handshakes per client+path (reconnect storm).
 WS_AUTH_FAIL_CACHE_PREFIX = "ws:auth_fail:"

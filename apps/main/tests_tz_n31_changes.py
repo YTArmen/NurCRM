@@ -148,3 +148,45 @@ class WebhookEventsListTests(FeedBase):
         self.assertEqual(r.status_code, 200, r.data)
         for t in ("debt_paid", "product_changed", "features_changed", "supplier_debt_changed", "sale.paid"):
             self.assertIn(t, r.data["events"])
+
+
+from channels.db import database_sync_to_async
+from channels.testing import WebsocketCommunicator
+from django.test import TransactionTestCase
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from apps.main.change_feed import record_change
+from apps.main.consumers import CompanyChangesConsumer
+
+
+class CompanyWebSocketTests(TransactionTestCase):
+    def _setup(self):
+        user = User.objects.create_user(email=f"w-{uuid.uuid4().hex}@test.com", password="x", role="owner")
+        company = Company.objects.create(name="WS", owner=user)
+        user.company = company
+        user.save()
+        return user, company
+
+    async def test_token_first_message_and_push(self):
+        user, company = await database_sync_to_async(self._setup)()
+        token = str(RefreshToken.for_user(user).access_token)
+        comm = WebsocketCommunicator(CompanyChangesConsumer.as_asgi(), "/ws/company/")
+        ok, _ = await comm.connect()
+        self.assertTrue(ok)
+        await comm.send_json_to({"token": token})
+        hello = await comm.receive_json_from()
+        self.assertEqual(hello["type"], "connection_established")
+        await database_sync_to_async(record_change)(company.id, "debt_paid", entity="deal", entity_id="1",
+                                                    data={"amount": "5"})
+        msg = await comm.receive_json_from()
+        self.assertEqual(msg["type"], "change")
+        self.assertEqual(msg["event"]["type"], "debt_paid")
+        await comm.disconnect()
+
+    async def test_bad_token_closes(self):
+        comm = WebsocketCommunicator(CompanyChangesConsumer.as_asgi(), "/ws/company/")
+        await comm.connect()
+        await comm.send_json_to({"token": "bad"})
+        out = await comm.receive_output()
+        self.assertEqual(out["type"], "websocket.close")
+        self.assertEqual(out["code"], 4401)
