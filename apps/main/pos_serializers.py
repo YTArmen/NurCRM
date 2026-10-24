@@ -892,6 +892,9 @@ class SaleListSerializer(serializers.ModelSerializer):
     debt_remaining = serializers.SerializerMethodField(read_only=True)
     refunded_total = serializers.SerializerMethodField(read_only=True)  # ТЗ Н-07
     refundable_total = serializers.SerializerMethodField(read_only=True)  # ТЗ Н-07
+    debt_paid = serializers.SerializerMethodField(read_only=True)  # ТЗ Н-14
+    prepayment = serializers.SerializerMethodField(read_only=True)  # ТЗ Н-14
+    due_date = serializers.SerializerMethodField(read_only=True)  # ТЗ Н-14
 
     class Meta:
         model = Sale
@@ -933,7 +936,30 @@ class SaleListSerializer(serializers.ModelSerializer):
             "debt_remaining",
             "refunded_total",
             "refundable_total",
+            "debt_paid",
+            "prepayment",
+            "due_date",
         )
+
+    def get_debt_paid(self, obj):
+        """ТЗ Н-14: сколько долга уже погашено = debt_initial − debt_remaining."""
+        paid = Decimal(str(obj.debt_initial or 0)) - Decimal(str(obj.debt_remaining or 0))
+        return str(money(max(paid, Decimal("0.00"))))
+
+    def get_prepayment(self, obj):
+        """ТЗ Н-14: предоплата при оформлении (= paid_now)."""
+        return str(money(obj.paid_now or Decimal("0.00")))
+
+    def get_due_date(self, obj):
+        """ТЗ Н-14: срок ближайшего непогашенного взноса связанной долговой сделки."""
+        deal = _linked_debt_deal(obj)
+        if deal is None:
+            return None
+        dues = [
+            i.due_date for i in deal.installments.all()
+            if i.due_date and (i.paid_amount or 0) < (i.amount or 0)
+        ]
+        return min(dues).isoformat() if dues else None
 
     def get_refunded_total(self, obj):
         return _sale_refunded_total(obj)

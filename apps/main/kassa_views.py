@@ -31,6 +31,7 @@ from apps.main.models import (
     ClientBonusTransaction,
     ClientDeal,
     DealInstallment,
+    DealPayment,
     Product,
     ProductPackage,
     ProductVariant,
@@ -810,7 +811,15 @@ def _open_debts(company_ids, clients_qs):
 class ClientDebtorsAPIView(_ClientScopedMixin, APIView):
     """
     GET /api/main/clients/debtors/?min_amount=0&ordering=-debt_total
-    → [{client, full_name, phone, debt_total, sales_count, oldest_debt_at}]
+    → [{client, full_name, phone, debt_total, sales_count, oldest_debt_at,
+        manual_debts_total, overdue_amount, last_payment_at}]
+
+    ТЗ Н-14:
+    - ?include=sales — в каждую строку `sales:[{sale, number, created_at, total, debt_remaining,
+      due_date, deal_id}]` (долговые чеки, старые первыми); ручные долги без чека (clients/{id}/debts/)
+      в `sales` не входят, их сумма — `manual_debts_total`, а в `debt_total` они уже учтены;
+    - ?page= / ?page_size= — ответ `{count, next, previous, results}`; без них голый массив;
+    - поставщики по умолчанию не выводятся (?include_suppliers=1 вернёт их).
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -829,15 +838,21 @@ class ClientDebtorsAPIView(_ClientScopedMixin, APIView):
             self._filter_qs_company_branch(Client.objects.all()), request.user
         )
         company = _company(request)
-        agg = defaultdict(lambda: {"debt_total": ZERO, "sales_count": 0, "oldest": None})
+        # ТЗ Н-14: долг поставщику — это наш долг, а не должник магазина
+        if request.query_params.get("include_suppliers") not in ("1", "true", "True"):
+            clients_qs = clients_qs.exclude(type=Client.StatusClient.SUPPLIERS)
+        agg = defaultdict(lambda: {"debt_total": ZERO, "sales_count": 0, "oldest": None, "manual": ZERO})
         for client_id, _sale_id, remaining, created_at in _open_debts([company.id], clients_qs.values("id")):
             a = agg[client_id]
             a["debt_total"] += remaining
             a["sales_count"] += 1
+            if _sale_id is None:
+                a["manual"] += remaining
             if a["oldest"] is None or created_at < a["oldest"]:
                 a["oldest"] = created_at
 
         clients = {c.id: c for c in Client.objects.filter(id__in=list(agg)).only("id", "full_name", "phone", "telegram_chat_id")}
+        extra = _debtor_extras(list(agg))
         out = []
         for cid, a in agg.items():
             if a["debt_total"] < min_amount or cid not in clients:
@@ -851,6 +866,9 @@ class ClientDebtorsAPIView(_ClientScopedMixin, APIView):
                 "debt_total": str(money(a["debt_total"])),
                 "sales_count": a["sales_count"],
                 "oldest_debt_at": a["oldest"].date().isoformat() if a["oldest"] else None,
+                "manual_debts_total": str(money(a["manual"])),
+                "overdue_amount": str(money(extra["overdue"].get(cid, ZERO))),
+                "last_payment_at": extra["last_payment"].get(cid),
             })
         field = ordering.lstrip("-")
         keyfn = {
@@ -858,8 +876,142 @@ class ClientDebtorsAPIView(_ClientScopedMixin, APIView):
             "oldest_debt_at": lambda r: r["oldest_debt_at"] or "",
             "full_name": lambda r: (r["full_name"] or "").lower(),
         }[field]
-        out.sort(key=keyfn, reverse=ordering.startswith("-"))
+        out.sort(key=lambda r: (keyfn(r), r["client"]), reverse=ordering.startswith("-"))
+
+        qp = request.query_params
+        include_sales = "sales" in [x.strip() for x in (qp.get("include") or "").split(",")]
+        paged = "page" in qp or "page_size" in qp
+        page_meta = None
+        if paged:
+            out, page_meta = _paginate_list(request, out)
+        if include_sales:
+            by_client = _debtor_sales([uuid.UUID(r["client"]) for r in out], company.id)
+            for r in out:
+                r["sales"] = by_client.get(uuid.UUID(r["client"]), [])
+        if page_meta is not None:
+            return Response({**page_meta, "results": out})
         return Response(out)
+
+
+def _paginate_list(request, rows, default_size=100, max_size=1000):
+    """ТЗ Н-14: страница из готового списка → (строки, {count, next, previous})."""
+    from rest_framework.utils.urls import replace_query_param
+
+    qp = request.query_params
+
+    def _pos_int(name, default, cap=None):
+        raw = qp.get(name)
+        if raw in (None, ""):
+            return default
+        try:
+            v = int(raw)
+        except (TypeError, ValueError):
+            raise ValidationError({name: "Целое число."})
+        if v < 1:
+            raise ValidationError({name: "Должно быть больше нуля."})
+        return min(v, cap) if cap else v
+
+    size = _pos_int("page_size", default_size, max_size)
+    page = _pos_int("page", 1)
+    count = len(rows)
+    url = request.build_absolute_uri()
+    meta = {
+        "count": count,
+        "next": replace_query_param(url, "page", page + 1) if page * size < count else None,
+        "previous": replace_query_param(url, "page", page - 1) if page > 1 else None,
+    }
+    return rows[(page - 1) * size: page * size], meta
+
+
+def _debtor_extras(client_ids):
+    """ТЗ Н-14: {overdue: {client: сумма просрочки}, last_payment: {client: ISO-время последней оплаты}}."""
+    from django.db.models import F, Max
+
+    today = timezone.localdate()
+    overdue = {}
+    rows = (
+        DealInstallment.objects.filter(
+            deal__client_id__in=client_ids, deal__kind=ClientDeal.Kind.DEBT,
+            due_date__lt=today, paid_amount__lt=F("amount"),
+        )
+        .exclude(deal__sale__status=Sale.Status.PAID)
+        .values("deal__client_id")
+        .annotate(s=Sum(F("amount") - F("paid_amount")))
+    )
+    for r in rows:
+        overdue[r["deal__client_id"]] = money(r["s"] or ZERO)
+    last_payment = {}
+    for r in (
+        DealPayment.objects.filter(
+            deal__client_id__in=client_ids, deal__kind=ClientDeal.Kind.DEBT, kind=DealPayment.Kind.PAY
+        )
+        .values("deal__client_id")
+        .annotate(m=Max("created_at"))
+    ):
+        last_payment[r["deal__client_id"]] = r["m"].isoformat() if r["m"] else None
+    return {"overdue": overdue, "last_payment": last_payment}
+
+
+def _debtor_sales(client_ids, company_id):
+    """
+    ТЗ Н-14: открытые долговые чеки по клиентам, старые первыми:
+    {client: [{sale, number, created_at, total, debt_remaining, due_date, deal_id}]}.
+    Правила остатка те же, что в _open_debts; ручные долги (без чека) не включаются.
+    """
+    from django.db.models import F, Min
+
+    money_field = DecimalField(max_digits=14, decimal_places=2)
+    paid_sq = (
+        DealInstallment.objects.filter(deal=OuterRef("pk"))
+        .values("deal").annotate(s=Sum("paid_amount")).values("s")
+    )
+    due_sq = (
+        DealInstallment.objects.filter(deal=OuterRef("pk"), paid_amount__lt=F("amount"))
+        .values("deal").annotate(m=Min("due_date")).values("m")
+    )
+    deals = (
+        ClientDeal.objects.filter(
+            company_id=company_id, kind=ClientDeal.Kind.DEBT, client_id__in=client_ids, sale__isnull=False
+        )
+        .exclude(sale__status=Sale.Status.PAID)
+        .select_related("sale")
+        .annotate(
+            paid=Coalesce(Subquery(paid_sq, output_field=money_field), Value(ZERO), output_field=money_field),
+            next_due=Subquery(due_sq),
+        )
+    )
+    out = defaultdict(list)
+    for d in deals:
+        remaining = money((d.amount or ZERO) - (d.prepayment or ZERO) - (d.paid or ZERO))
+        if remaining <= 0:
+            continue
+        sale = d.sale
+        out[d.client_id].append((sale.created_at, {
+            "sale": str(sale.id),
+            "number": sale.doc_number,
+            "created_at": sale.created_at.isoformat() if sale.created_at else None,
+            "total": str(money(sale.total or ZERO)),
+            "debt_remaining": str(remaining),
+            "due_date": d.next_due.isoformat() if d.next_due else None,
+            "deal_id": str(d.id),
+        }))
+    orphans = Sale.objects.filter(
+        company_id=company_id, status=Sale.Status.DEBT, client_id__in=client_ids, deals__isnull=True
+    )
+    for sale in orphans:
+        remaining = money((sale.total or ZERO) - (sale.cash_received or ZERO))
+        if remaining <= 0:
+            continue
+        out[sale.client_id].append((sale.created_at, {
+            "sale": str(sale.id),
+            "number": sale.doc_number,
+            "created_at": sale.created_at.isoformat() if sale.created_at else None,
+            "total": str(money(sale.total or ZERO)),
+            "debt_remaining": str(remaining),
+            "due_date": None,
+            "deal_id": None,
+        }))
+    return {cid: [row for _, row in sorted(rows, key=lambda x: (x[0], x[1]["sale"]))] for cid, rows in out.items()}
 
 
 class ClientPayDebtSerializer(serializers.Serializer):
