@@ -861,6 +861,63 @@ class AnalyticsView(APIView):
 
         return qs
 
+    def _category_filter_ids(self, request, company):
+        """ТЗ Н-20: ?category=<id> (+ include_children=1) и ?categories=id1,id2.
+        None — фильтра нет; [] — ничего подходящего (результат пустой)."""
+        qp = request.query_params
+        raw = []
+        one = (qp.get("category") or "").strip()
+        if one:
+            raw.append(one)
+        raw += [x.strip() for x in (qp.get("categories") or "").split(",") if x.strip()]
+        if not raw:
+            return None
+        ids = [v for v in (_valid_uuid(x) for x in raw) if v]
+        if not ids:
+            return []
+        if (qp.get("include_children") or "").strip().lower() in ("1", "true", "yes", "on"):
+            try:
+                PC = apps.get_model("main.ProductCategory")
+                if _model_has_field(PC, "parent"):
+                    out = set(ids)
+                    for c in PC.objects.filter(company=company, id__in=ids):
+                        out.update(str(x) for x in c.get_descendants().values_list("id", flat=True))
+                    ids = list(out)
+            except Exception:
+                pass
+        return ids
+
+    def _returns_by_product(self, request, company, branch, period, product_ids=None):
+        """ТЗ Н-20: возвраты периода (по дате возврата) по товарам: {product_id: (qty, sum)}.
+        Берутся из SaleReturn.returned_items; старые возвраты без состава пропускаются."""
+        out = {}
+        try:
+            SaleReturn = apps.get_model("main.SaleReturn")
+            Sale = apps.get_model("main.Sale")
+        except Exception:
+            return out
+        rq = SaleReturn.objects.filter(company=company, created_at__gte=period.start, created_at__lt=period.end)
+        if branch is not None and _model_has_field(Sale, "branch"):
+            bf = Q(sale__branch=branch)
+            if self._include_global(request):
+                bf |= Q(sale__branch__isnull=True)
+            rq = rq.filter(bf)
+        for items in rq.values_list("returned_items", flat=True):
+            for e in items or []:
+                if not isinstance(e, dict) or not e.get("product"):
+                    continue
+                pid = str(e["product"])
+                if product_ids is not None and pid not in product_ids:
+                    continue
+                try:
+                    q = Decimal(str(e.get("qty") or e.get("quantity") or 0))
+                    a = Decimal(str(e.get("amount") or e.get("total") or 0))
+                except Exception:
+                    continue
+                oq, oa = out.get(pid, (Decimal("0"), Decimal("0")))
+                out[pid] = (oq + q, oa + a)
+        return out
+
     def _market_products_queryset(self, request, company, branch):
         """Товары маркета в области компании/филиала (как на вкладке stock)."""
         try:
@@ -1102,6 +1159,9 @@ class AnalyticsView(APIView):
         gross_profit = None
         margin_percent = None
         cogs_warning = None
+        # ТЗ Н-20: фильтр по категориям; выручка тогда считается по строкам чеков категории.
+        cat_ids = self._category_filter_ids(request, company)
+        item_cat_filter = {"product__category_id__in": cat_ids} if cat_ids is not None else {}
 
         products_stock = []
         catalog_products_count = 0
@@ -1175,6 +1235,8 @@ class AnalyticsView(APIView):
             dt_field = "paid_at" if _model_has_field(Sale, "paid_at") else "created_at"
             qs = qs.filter(**{f"{dt_field}__gte": period.start, f"{dt_field}__lt": period.end})
             qs = self._apply_sale_filters(request, qs, Sale)
+            if cat_ids is not None and SaleItem is not None:
+                qs = qs.filter(id__in=SaleItem.objects.filter(sale__in=qs, **item_cat_filter).values("sale_id"))
 
             agg = qs.aggregate(
                 revenue=Coalesce(
@@ -1186,6 +1248,12 @@ class AnalyticsView(APIView):
             )
             revenue = agg["revenue"] or Z_MONEY
             tx = agg["tx"] or 0
+            if cat_ids is not None and SaleItem is not None:
+                _re = _sale_item_net_line_revenue_expr(SaleItem)
+                if _re is not None:
+                    revenue = SaleItem.objects.filter(sale__in=qs, **item_cat_filter).aggregate(
+                        v=Coalesce(Sum(_re), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD)
+                    )["v"] or Z_MONEY
 
             # ── margin (COGS / Profit / Margin%) ──
             if SaleItem is not None and _model_has_field(SaleItem, "sale"):
@@ -1197,7 +1265,7 @@ class AnalyticsView(APIView):
 
                 cogs_expr, ok = _get_cogs_expr(SaleItem, ProductModel)
                 if ok:
-                    item_qs_cost = SaleItem.objects.filter(sale__in=qs)
+                    item_qs_cost = SaleItem.objects.filter(sale__in=qs, **item_cat_filter)
                     cogs_val = item_qs_cost.aggregate(
                         v=Coalesce(
                             Sum(cogs_expr),
@@ -1216,19 +1284,33 @@ class AnalyticsView(APIView):
             else:
                 clients = qs.values("user_id").exclude(user_id__isnull=True).distinct().count()
 
-            daily_rows = (
-                qs.annotate(d=TruncDate(dt_field))
-                .values("d")
-                .annotate(
-                    v=Coalesce(
-                        Sum("total"),
-                        Value(Z_MONEY, output_field=MONEY_FIELD),
-                        output_field=MONEY_FIELD,
-                    ),
-                    tx=Count("id"),
+            _day_re = _sale_item_net_line_revenue_expr(SaleItem) if (cat_ids is not None and SaleItem is not None) else None
+            if _day_re is not None:
+                # ТЗ Н-20: график по дням — по строкам чеков выбранных категорий.
+                daily_rows = (
+                    SaleItem.objects.filter(sale__in=qs, **item_cat_filter)
+                    .annotate(d=TruncDate(f"sale__{dt_field}"))
+                    .values("d")
+                    .annotate(
+                        v=Coalesce(Sum(_day_re), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
+                        tx=Count("sale_id", distinct=True),
+                    )
+                    .order_by("d")
                 )
-                .order_by("d")
-            )
+            else:
+                daily_rows = (
+                    qs.annotate(d=TruncDate(dt_field))
+                    .values("d")
+                    .annotate(
+                        v=Coalesce(
+                            Sum("total"),
+                            Value(Z_MONEY, output_field=MONEY_FIELD),
+                            output_field=MONEY_FIELD,
+                        ),
+                        tx=Count("id"),
+                    )
+                    .order_by("d")
+                )
             daily = [
                 {"date": r["d"].isoformat(), "value": str(_money(r["v"])), "transactions": r["tx"]}
                 for r in daily_rows if r["d"]
@@ -1246,7 +1328,7 @@ class AnalyticsView(APIView):
                 mixed_total = mixed_agg["v"] or Z_MONEY
 
             if SaleItem is not None and _model_has_field(SaleItem, "sale"):
-                item_qs = SaleItem.objects.filter(sale__in=qs)
+                item_qs = SaleItem.objects.filter(sale__in=qs, **item_cat_filter)
 
                 revenue_expr = _sale_item_net_line_revenue_expr(SaleItem)
                 if revenue_expr is not None:
@@ -1337,7 +1419,8 @@ class AnalyticsView(APIView):
         prepayment_total = Z_MONEY
         credit_sales_total = Z_MONEY
         debt_repaid_total = Z_MONEY
-        if Sale is not None and _model_has_field(Sale, "debt_initial"):
+        # ТЗ Н-20: при фильтре по категории предоплату чека целиком не добавляем (она не делится по строкам).
+        if Sale is not None and _model_has_field(Sale, "debt_initial") and cat_ids is None:
             debt_qs = Sale.objects.filter(
                 company=company,
                 debt_initial__gt=0,
@@ -1425,6 +1508,9 @@ class AnalyticsView(APIView):
             "filters": {
                 "branch": str(getattr(branch, "id", "")) if branch else None,
                 "include_global": self._include_global(request),
+                "category": (request.query_params.get("category") or "").strip() or None,
+                "categories": (request.query_params.get("categories") or "").strip() or None,
+                "include_children": (request.query_params.get("include_children") or "").strip().lower() in ("1", "true", "yes", "on"),
             },
             "cards": {
                 "revenue": str(_money(revenue)),
@@ -2532,6 +2618,10 @@ class AnalyticsView(APIView):
         if Product and _model_has_field(Product, "client"):
             supplier_ids = self._products_tab_supplier_client_ids(request, company, branch)
 
+        # ТЗ Н-20: фильтр по категориям (category / categories / include_children)
+        cat_ids = self._category_filter_ids(request, company)
+        top_products_by_profit = []
+
         Sale, SaleItem = get_sale_models()
         if Sale and SaleItem and Product:
             paid_value = _choice_value(Sale, "Status", "PAID", "paid")
@@ -2552,7 +2642,24 @@ class AnalyticsView(APIView):
                 qi = SaleItem.objects.filter(sale__in=sale_qs)
                 if supplier_ids is not None:
                     qi = qi.filter(product__client_id__in=supplier_ids)
+                if cat_ids is not None:
+                    qi = qi.filter(product__category_id__in=cat_ids)
                 return qi
+
+            # ТЗ Н-20: себестоимость строки на день продажи (снимок), без снимка — текущая закупка.
+            cogs_line_expr = ExpressionWrapper(
+                F("quantity") * Coalesce(
+                    F("purchase_price_snapshot"),
+                    F("product__purchase_price"),
+                    Value(Z_MONEY, output_field=MONEY_FIELD),
+                    output_field=MONEY_FIELD,
+                ),
+                output_field=MONEY_FIELD,
+            )
+            no_snap_count = Count(
+                "id", filter=Q(purchase_price_snapshot__isnull=True), distinct=True
+            )
+            returns_map = self._returns_by_product(request, company, branch, period)
 
             # Top Products by Revenue - ДЕТАЛЬНО со всеми полями
             revenue_expr = _sale_item_net_line_revenue_expr(SaleItem)
@@ -2570,11 +2677,13 @@ class AnalyticsView(APIView):
                         "product__quantity",
                         "product__price",
                         "product__purchase_price",
+                        "product__category_id",
                     )
                     .annotate(
                         revenue=Coalesce(Sum(revenue_expr), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
                         qty_sold=Coalesce(Sum("quantity"), Value(Z_QTY, output_field=QTY_FIELD), output_field=QTY_FIELD),
                         tx_count=Count("sale_id", distinct=True),
+                        cogs=Coalesce(Sum(cogs_line_expr), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
                     )
                     .order_by("-revenue")
                 )
@@ -2596,8 +2705,55 @@ class AnalyticsView(APIView):
                         "revenue": str(_money(r["revenue"])),
                         "qty_sold": str(r["qty_sold"].quantize(Decimal("0.001"))),
                         "transactions": r["tx_count"],
+                        # ТЗ Н-20
+                        "category_id": str(r["product__category_id"]) if r["product__category_id"] else None,
+                        "cogs": str(_money(r["cogs"])),
+                        "returned_qty": str(returns_map.get(str(r["product_id"]), (Decimal("0"), Decimal("0")))[0].quantize(Decimal("0.001"))),
+                        "returned_sum": str(_money(returns_map.get(str(r["product_id"]), (Decimal("0"), Decimal("0")))[1])),
                     }
                     for r in top_by_rev_query
+                ]
+
+                # ТЗ Н-20: ABC по прибыли (прибыль = выручка − себестоимость на день продажи).
+                profit_rows = list(
+                    _sale_items_products_tab(sqs)
+                    .values("product_id", "name_snapshot", "product__code", "product__category__name", "product__category_id")
+                    .annotate(
+                        revenue=Coalesce(Sum(revenue_expr), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
+                        qty_sold=Coalesce(Sum("quantity"), Value(Z_QTY, output_field=QTY_FIELD), output_field=QTY_FIELD),
+                        cogs=Coalesce(Sum(cogs_line_expr), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
+                    )
+                )
+                for r in profit_rows:
+                    r["profit"] = _money((r["revenue"] or Z_MONEY) - (r["cogs"] or Z_MONEY))
+                profit_rows.sort(key=lambda r: r["profit"], reverse=True)
+                pos_total = sum((r["profit"] for r in profit_rows if r["profit"] > 0), Z_MONEY)
+                cum = Z_MONEY
+                for r in profit_rows:
+                    if r["profit"] > 0 and pos_total > 0:
+                        # класс по доле накопленной прибыли ДО этого товара: товар, пересекающий 80%, остаётся в A
+                        share = float(cum / pos_total * 100)
+                        cum += r["profit"]
+                        r["abc"] = "A" if share < 80 else ("B" if share < 95 else "C")
+                        r["share"] = round(float(r["profit"] / pos_total * 100), 2)
+                    else:
+                        r["abc"], r["share"] = "C", 0.0
+                top_products_by_profit = [
+                    {
+                        "product_id": str(r["product_id"]) if r["product_id"] else None,
+                        "name": r["name_snapshot"] or "Товар",
+                        "code": r["product__code"],
+                        "category": r["product__category__name"],
+                        "category_id": str(r["product__category_id"]) if r["product__category_id"] else None,
+                        "qty_sold": str(r["qty_sold"].quantize(Decimal("0.001"))),
+                        "revenue": str(_money(r["revenue"])),
+                        "cogs": str(_money(r["cogs"])),
+                        "gross_profit": str(r["profit"]),
+                        "margin_percent": _pct(r["profit"], _money(r["revenue"])) if r["revenue"] else 0.0,
+                        "profit_share_percent": r["share"],
+                        "abc": r["abc"],
+                    }
+                    for r in (profit_rows[:limit] if limit else profit_rows)
                 ]
 
             # Top Products by Quantity - ДЕТАЛЬНО
@@ -2611,6 +2767,7 @@ class AnalyticsView(APIView):
                     "product__brand__name",
                     "product__quantity",
                     "product__price",
+                    "product__category_id",
                 )
                 .annotate(
                     qty_sold=Coalesce(Sum("quantity"), Value(Z_QTY, output_field=QTY_FIELD), output_field=QTY_FIELD),
@@ -2632,6 +2789,7 @@ class AnalyticsView(APIView):
                     "price": str(_money(r["product__price"] or 0)),
                     "qty_sold": str(r["qty_sold"].quantize(Decimal("0.001"))),
                     "transactions": r["tx_count"],
+                    "category_id": str(r["product__category_id"]) if r["product__category_id"] else None,  # ТЗ Н-20
                 }
                 for r in top_by_qty_query
             ]
@@ -2647,23 +2805,57 @@ class AnalyticsView(APIView):
                             qty_sold=Coalesce(Sum("quantity"), Value(Z_QTY, output_field=QTY_FIELD), output_field=QTY_FIELD),
                             products_count=Count("product_id", distinct=True),
                             tx_count=Count("sale_id", distinct=True),
+                            cost=Coalesce(Sum(cogs_line_expr), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
+                            no_snapshot_lines=no_snap_count,
                         )
                         .order_by("-revenue")
                     )
                     if limit:
                         cat_query = cat_query[:limit]
-                        
-                    categories_performance = [
-                        {
-                            "category_id": str(r["product__category__id"]) if r["product__category__id"] else None,
+                    cat_rows = list(cat_query)
+
+                    # ТЗ Н-20: parent_id и возвраты по категориям.
+                    cat_row_ids = [r["product__category__id"] for r in cat_rows if r["product__category__id"]]
+                    parent_map = {}
+                    cat_of_product = {}
+                    returns_by_cat = {}
+                    if cat_row_ids and ProductCategory is not None:
+                        if _model_has_field(ProductCategory, "parent"):
+                            parent_map = dict(ProductCategory.objects.filter(id__in=cat_row_ids).values_list("id", "parent_id"))
+                        if returns_map:
+                            cat_of_product = {
+                                str(pid): cid
+                                for pid, cid in Product.objects.filter(
+                                    id__in=list(returns_map.keys()), category_id__in=cat_row_ids
+                                ).values_list("id", "category_id")
+                            }
+                            for pid, (_rq, ra) in returns_map.items():
+                                cid = cat_of_product.get(pid)
+                                if cid:
+                                    returns_by_cat[cid] = returns_by_cat.get(cid, Z_MONEY) + ra
+
+                    categories_performance = []
+                    for r in cat_rows:
+                        cid = r["product__category__id"]
+                        cost = _money(r["cost"] or Z_MONEY)
+                        rev = _money(r["revenue"] or Z_MONEY)
+                        profit = _money(rev - cost)
+                        pid_parent = parent_map.get(cid)
+                        categories_performance.append({
+                            "category_id": str(cid) if cid else None,
                             "category": r["product__category__name"] or "Без категории",
-                            "revenue": str(_money(r["revenue"])),
+                            "revenue": str(rev),
                             "qty_sold": str(r["qty_sold"].quantize(Decimal("0.001"))),
                             "products_count": r["products_count"],
                             "transactions": r["tx_count"],
-                        }
-                        for r in cat_query
-                    ]
+                            "cost": str(cost),
+                            # снимок закупки на день продажи; если у части строк его нет — для них текущая закупка
+                            "cost_basis": "snapshot" if not r["no_snapshot_lines"] else "mixed",
+                            "gross_profit": str(profit),
+                            "margin_percent": _pct(profit, rev) if rev else 0.0,
+                            "returns_sum": str(_money(returns_by_cat.get(cid, Z_MONEY))),
+                            "parent_id": str(pid_parent) if pid_parent else None,
+                        })
 
             # Brands Performance - ДЕТАЛЬНО
             if _model_has_field(SaleItem, "product") and _model_has_field(Product, "brand"):
@@ -2773,6 +2965,8 @@ class AnalyticsView(APIView):
                     pqs = pqs.filter(branch=branch)
             if supplier_ids is not None and _model_has_field(Product, "client"):
                 pqs = pqs.filter(client_id__in=supplier_ids)
+            if cat_ids is not None:
+                pqs = pqs.filter(category_id__in=cat_ids)  # ТЗ Н-20
             
             qty_field = "quantity" if _model_has_field(Product, "quantity") else None
             pp_field = "purchase_price" if _model_has_field(Product, "purchase_price") else None
@@ -2864,6 +3058,8 @@ class AnalyticsView(APIView):
         pqs_scope = self._market_products_queryset(request, company, branch)
         if pqs_scope is not None and supplier_ids is not None and _model_has_field(pqs_scope.model, "client"):
             pqs_scope = pqs_scope.filter(client_id__in=supplier_ids)
+        if pqs_scope is not None and cat_ids is not None:
+            pqs_scope = pqs_scope.filter(category_id__in=cat_ids)  # ТЗ Н-20
         if pqs_scope is not None:
             catalog_products_count = pqs_scope.count()
 
@@ -2878,6 +3074,8 @@ class AnalyticsView(APIView):
                     rj = rj.filter(branch=branch)
             if supplier_ids is not None and _model_has_field(Product, "client"):
                 rj = rj.filter(client_id__in=supplier_ids)
+            if cat_ids is not None:
+                rj = rj.filter(category_id__in=cat_ids)  # ТЗ Н-20
             rejected_products_count = rj.count()
             rlim = limit if limit is not None else 200
             for p in rj.select_related("category", "brand").order_by("-updated_at")[:rlim]:
@@ -2906,6 +3104,9 @@ class AnalyticsView(APIView):
                 "limit": limit,
                 "supplier": (request.query_params.get("supplier") or "").strip() or None,
                 "suppliers": (request.query_params.get("suppliers") or "").strip() or None,
+                "category": (request.query_params.get("category") or "").strip() or None,
+                "categories": (request.query_params.get("categories") or "").strip() or None,
+                "include_children": (request.query_params.get("include_children") or "").strip().lower() in ("1", "true", "yes", "on"),
             },
             "cards": {
                 "stock_value": str(_money(stock_value)),
@@ -2920,6 +3121,7 @@ class AnalyticsView(APIView):
             "tables": {
                 "top_by_revenue": top_products_by_revenue,
                 "top_by_quantity": top_products_by_qty,
+                "top_by_profit": top_products_by_profit,
                 "categories": categories_performance,
                 "brands": brands_performance,
                 "low_stock_products": low_stock_products,  # НОВОЕ: полный список с деталями
