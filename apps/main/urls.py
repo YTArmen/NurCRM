@@ -115,6 +115,7 @@ from apps.main.part12_views import (
 
 
 from apps.main.views_payables import SupplierPayablesAPIView
+from apps.main.views_idempotency import IdempotencyLookupAPIView
 
 urlpatterns = [
     # ТЗ «Админка»: журнал действий (тот же, что construction/audit-log/) и корзина удалённого
@@ -437,6 +438,8 @@ urlpatterns = [
     # Поставщики -> товары -> оприходование
     # -------------------------
     path("suppliers/payables/", SupplierPayablesAPIView.as_view(), name="supplier-payables"),
+    # ТЗ Н-08: исход операции по ключу повтора
+    path("idempotency/<str:key>/", IdempotencyLookupAPIView.as_view(), name="idempotency-lookup"),
     path("suppliers/", SupplierListAPIView.as_view(), name="supplier-list"),
     path("suppliers/receipts/", SupplierReceiptListAPIView.as_view(), name="supplier-receipts"),
     path("suppliers/receipts/<uuid:pk>/", SupplierReceiptRetrieveAPIView.as_view(), name="supplier-receipt-detail"),

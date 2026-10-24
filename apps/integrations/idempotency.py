@@ -121,8 +121,9 @@ def idempotent(handler=None, *, body_key=False, replay_flag=False):
                     )
             if record.state == IdempotencyRecord.State.DONE:
                 body = record.response_body
-                if replay_flag and isinstance(body, dict):
-                    body = {**body, "replayed": True}  # ТЗ Н-10: признак повтора в теле
+                # ТЗ Н-08/Н-10: признак повтора в теле — по флагу или если ответ его уже содержит.
+                if isinstance(body, dict) and (replay_flag or "replayed" in body):
+                    body = {**body, "replayed": True}
                 resp = Response(body, status=record.status_code)
                 resp["Idempotent-Replayed"] = "true"
                 return resp
