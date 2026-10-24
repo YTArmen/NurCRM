@@ -61,13 +61,14 @@ def _normalize_scope(request) -> str:
     return f"{method} {path}"[:255]
 
 
-def idempotent(handler=None, *, body_key=False):
+def idempotent(handler=None, *, body_key=False, replay_flag=False):
     """
     Декоратор метода APIView (post/patch/put/delete).
     body_key=True — ключ можно передать и полем idempotency_key в теле (если нет заголовка).
+    replay_flag=True — при повторе в теле ответа (dict) ставится replayed=true.
     """
     if handler is None:
-        return functools.partial(idempotent, body_key=body_key)
+        return functools.partial(idempotent, body_key=body_key, replay_flag=replay_flag)
 
     @functools.wraps(handler)
     def wrapper(view, request, *args, **kwargs):
@@ -119,7 +120,10 @@ def idempotent(handler=None, *, body_key=False):
                         "in_progress", status.HTTP_409_CONFLICT, **{"Retry-After": "1"},
                     )
             if record.state == IdempotencyRecord.State.DONE:
-                resp = Response(record.response_body, status=record.status_code)
+                body = record.response_body
+                if replay_flag and isinstance(body, dict):
+                    body = {**body, "replayed": True}  # ТЗ Н-10: признак повтора в теле
+                resp = Response(body, status=record.status_code)
                 resp["Idempotent-Replayed"] = "true"
                 return resp
 

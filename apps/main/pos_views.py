@@ -1449,6 +1449,87 @@ def _ensure_open_shift(*, company, branch, cashier, cashbox, opening_cash=None):
     return shift
 
 
+def _supplier_recon_rows(company, client, start_dt, end_dt, source="both"):
+    """
+    ТЗ Н-12: акт сверки с поставщиком — направление «мы должны».
+    Знак как в акте клиента (плюс = контрагент должен нам), поэтому наш долг поставщику —
+    отрицательное сальдо: debt.debtor = наша компания, amount = |closing| = kpis.debt поставщика.
+    Строки: сделки-долги (кредит поставщика), предоплата/зачёт возврата по сделке и оплаты (дебет);
+    приходы и возвраты поставщику — справочные строки (сумма в `doc_amount`, на сальдо не влияют:
+    долг приходов уже в сделках, возврат деньгами — движение денег, зачёт долга — в предоплате сделки).
+    Сделки kind=sale/amount у поставщика (оплаченные закупки сайта) в долг не входят.
+    Возвращает (opening, rows); rows: dict(date, title, a_debit, a_credit, b_debit, b_credit, ref_type, ref_id, extra).
+    """
+    from apps.main.models import DealPayment, SupplierReceipt, SupplierReceiptItem, SupplierReturn, SupplierReturnItem
+
+    Z = Decimal("0.00")
+    owed_before = Z
+    rows = []
+
+    def _row(dt, title, a_debit, a_credit, ref_type, ref_id, extra=None):
+        rows.append(dict(
+            date=dt, title=title, a_debit=a_debit, a_credit=a_credit,
+            b_debit=a_credit, b_credit=a_debit, ref_type=ref_type, ref_id=ref_id, extra=extra or {},
+        ))
+
+    if source in ("both", "deals"):
+        debt_deals = ClientDeal.objects.filter(company=company, client=client, kind=ClientDeal.Kind.DEBT)
+        agg = debt_deals.filter(created_at__lt=start_dt).aggregate(a=Sum("amount"), p=Sum("prepayment"))
+        owed_before += (agg["a"] or Z) - (agg["p"] or Z)
+        pay_before = DealPayment.objects.filter(
+            company=company, deal__client=client, deal__kind=ClientDeal.Kind.DEBT, paid_date__lt=start_dt.date()
+        )
+        for kind, sign in ((DealPayment.Kind.PAY, 1), (DealPayment.Kind.REFUND, -1)):
+            owed_before -= sign * (pay_before.filter(kind=kind).aggregate(s=Sum("amount"))["s"] or Z)
+
+        for d in debt_deals.filter(created_at__gte=start_dt, created_at__lte=end_dt).order_by("created_at"):
+            amt = q2(d.amount)
+            if amt > 0:
+                _row(d.created_at, f"Долг поставщику: {d.title}", Z, amt, "deal", d.id)
+            pp = q2(d.prepayment or Z)
+            if pp > 0:
+                _row(d.created_at, f"Предоплата / зачёт по сделке: {d.title}", pp, Z, "deal_prepayment", d.id)
+        pays = (
+            DealPayment.objects.filter(
+                company=company, deal__client=client, deal__kind=ClientDeal.Kind.DEBT,
+                paid_date__gte=start_dt.date(), paid_date__lte=end_dt.date(),
+            ).select_related("deal", "installment").order_by("paid_date", "created_at")
+        )
+        for pay in pays:
+            amt = q2(pay.amount)
+            sign_debit = amt if pay.kind == DealPayment.Kind.PAY else Z
+            sign_credit = amt if pay.kind == DealPayment.Kind.REFUND else Z
+            label = "Оплата" if pay.kind == DealPayment.Kind.PAY else "Возврат оплаты"
+            _row(_aware(pay.paid_date, end=False), f"{label} по сделке: {pay.deal.title} (взнос №{pay.installment.number})",
+                 sign_debit, sign_credit, "installment_payment", pay.id)
+        # сальдо «до начала» уже включает оплаты; знак: наш долг = отрицательное сальдо
+    opening = q2(-owed_before)
+
+    if source == "both":
+        rcpts = SupplierReceipt.objects.filter(
+            company=company, supplier=client, created_at__gte=start_dt, created_at__lte=end_dt
+        ).order_by("created_at")
+        for r in rcpts:
+            tot = sum(
+                (Decimal(str(i.qty)) * Decimal(str(i.purchase_price or 0)) for i in SupplierReceiptItem.objects.filter(receipt=r)),
+                Z,
+            )
+            _row(r.created_at, f"Приход поставщика {r.id}", Z, Z, "receipt", r.id, {"doc_amount": fmt(q2(tot))})
+        rets = SupplierReturn.objects.filter(
+            company=company, supplier=client, status=SupplierReturn.Status.POSTED,
+            created_at__gte=start_dt, created_at__lte=end_dt,
+        ).order_by("created_at")
+        for rt in rets:
+            tot = sum(
+                (Decimal(str(i.qty)) * Decimal(str(i.purchase_price or 0)) for i in SupplierReturnItem.objects.filter(supplier_return=rt)),
+                Z,
+            )
+            _row(rt.created_at, f"Возврат поставщику {rt.id} ({rt.get_compensation_display()})", Z, Z,
+                 "supplier_return", rt.id, {"doc_amount": fmt(q2(tot)), "compensation": rt.compensation})
+    rows.sort(key=lambda x: x["date"])
+    return opening, rows
+
+
 class ClientReconciliationJSONAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1484,11 +1565,14 @@ class ClientReconciliationJSONAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # ТЗ Н-12: поставщик — свой расчёт (направление «мы должны»)
+        is_supplier = client.type == Client.StatusClient.SUPPLIERS
+
         # ---------- opening ----------
         debit_before = Decimal("0.00")
         credit_before = Decimal("0.00")
 
-        if source in ("both", "sales"):
+        if not is_supplier and source in ("both", "sales"):
             # Отменённые продажи (полный возврат) не создают задолженности —
             # исключаем их, чтобы возврат корректно уменьшал долг в акте сверки.
             sales_before = (
@@ -1500,7 +1584,7 @@ class ClientReconciliationJSONAPIView(APIView):
             )
             debit_before += sales_before
 
-        if ClientDeal and source in ("both", "deals"):
+        if not is_supplier and ClientDeal and source in ("both", "deals"):
             deals_before = (
                 ClientDeal.objects.filter(
                     company=company,
@@ -1522,7 +1606,7 @@ class ClientReconciliationJSONAPIView(APIView):
             )
             credit_before += pre_before
 
-        if DealInstallment and source in ("both", "deals"):
+        if not is_supplier and DealInstallment and source in ("both", "deals"):
             inst_before = (
                 DealInstallment.objects.filter(
                     deal__company=company,
@@ -1537,11 +1621,14 @@ class ClientReconciliationJSONAPIView(APIView):
             credit_before += inst_before
 
         opening = q2(debit_before - credit_before)
+        sup_rows = []
+        if is_supplier:
+            opening, sup_rows = _supplier_recon_rows(company, client, start_dt, end_dt, source)
 
         # ---------- entries ----------
         entries = []
 
-        def _push(dt, title, a_debit, a_credit, b_debit, b_credit, ref_type=None, ref_id=None):
+        def _push(dt, title, a_debit, a_credit, b_debit, b_credit, ref_type=None, ref_id=None, extra=None):
             # отдаём ISO в локальном времени, чтобы фронту было проще
             dt_local = timezone.localtime(dt) if hasattr(timezone, "localtime") else dt
             entries.append(
@@ -1554,10 +1641,15 @@ class ClientReconciliationJSONAPIView(APIView):
                     "b_credit": fmt(b_credit),
                     "ref_type": ref_type,
                     "ref_id": str(ref_id) if ref_id else None,
+                    **(extra or {}),
                 }
             )
 
-        if source in ("both", "sales"):
+        for r in sup_rows:
+            _push(r["date"], r["title"], r["a_debit"], r["a_credit"], r["b_debit"], r["b_credit"],
+                  ref_type=r["ref_type"], ref_id=r["ref_id"], extra=r["extra"])
+
+        if not is_supplier and source in ("both", "sales"):
             qs = (
                 Sale.objects.filter(
                     company=company,
@@ -1582,7 +1674,7 @@ class ClientReconciliationJSONAPIView(APIView):
                         ref_id=srow.id,
                     )
 
-        if ClientDeal and source in ("both", "deals"):
+        if not is_supplier and ClientDeal and source in ("both", "deals"):
             deals_qs = (
                 ClientDeal.objects.filter(
                     company=company,
@@ -1630,7 +1722,7 @@ class ClientReconciliationJSONAPIView(APIView):
                     ref_id=d.id,
                 )
 
-        if DealInstallment and source in ("both", "deals"):
+        if not is_supplier and DealInstallment and source in ("both", "deals"):
             inst_qs = (
                 DealInstallment.objects.filter(
                     deal__company=company,
@@ -1739,6 +1831,7 @@ class ClientReconciliationJSONAPIView(APIView):
             "totals": totals,
             "closing_balance": fmt(closing),
             "as_of_date": as_of_date.isoformat(),
+            "direction": ("we_owe" if closing < 0 else "they_owe") if closing != 0 else None,
             "debt": {
                 "debtor": debtor,
                 "creditor": creditor,
@@ -1771,10 +1864,11 @@ class ClientReconciliationClassicAPIView(APIView):
         start_dt = _aware(start_dt, end=False)
         end_dt = _aware(end_dt, end=True)
 
+        is_supplier = client.type == Client.StatusClient.SUPPLIERS  # ТЗ Н-12
         debit_before = Decimal("0.00")
         credit_before = Decimal("0.00")
 
-        if source in ("both", "sales"):
+        if not is_supplier and source in ("both", "sales"):
             # Отменённые продажи (полный возврат) не создают задолженности —
             # исключаем их, чтобы возврат корректно уменьшал долг в акте сверки.
             sales_before = (
@@ -1785,7 +1879,7 @@ class ClientReconciliationClassicAPIView(APIView):
             )
             debit_before += sales_before
 
-        if ClientDeal and source in ("both", "deals"):
+        if not is_supplier and ClientDeal and source in ("both", "deals"):
             deals_before = (
                 ClientDeal.objects.filter(
                     company=company,
@@ -1805,7 +1899,7 @@ class ClientReconciliationClassicAPIView(APIView):
             )
             credit_before += pre_before
 
-        if DealInstallment and source in ("both", "deals"):
+        if not is_supplier and DealInstallment and source in ("both", "deals"):
             inst_before = (
                 DealInstallment.objects.filter(
                     deal__company=company,
@@ -1818,10 +1912,15 @@ class ClientReconciliationClassicAPIView(APIView):
             credit_before += inst_before
 
         opening = q2(debit_before - credit_before)
+        if is_supplier:
+            opening, _sup_rows = _supplier_recon_rows(company, client, start_dt, end_dt, source)
 
         entries: List[Dict] = []
+        if is_supplier:
+            for r in _sup_rows:
+                entries.append({k: r[k] for k in ("date", "title", "a_debit", "a_credit", "b_debit", "b_credit")})
 
-        if source in ("both", "sales"):
+        if not is_supplier and source in ("both", "sales"):
             for s in (
                 Sale.objects.filter(
                     company=company,
@@ -1844,7 +1943,7 @@ class ClientReconciliationClassicAPIView(APIView):
                         )
                     )
 
-        if ClientDeal and source in ("both", "deals"):
+        if not is_supplier and ClientDeal and source in ("both", "deals"):
             for d in (
                 ClientDeal.objects.filter(
                     company=company,
@@ -1888,7 +1987,7 @@ class ClientReconciliationClassicAPIView(APIView):
                     )
                 )
 
-        if DealInstallment and source in ("both", "deals"):
+        if not is_supplier and DealInstallment and source in ("both", "deals"):
             for inst in (
                 DealInstallment.objects.filter(
                     deal__company=company,
