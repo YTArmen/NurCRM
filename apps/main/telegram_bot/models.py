@@ -386,3 +386,34 @@ class TelegramOwnerCode(models.Model):
     class Meta:
         db_table = "telegram_owner_codes"
         indexes = [models.Index(fields=["company", "-created_at"], name="main_tgown_code_idx")]
+
+
+# ТЗ Н-24 (5): журнал звонков голосового агента
+class VoiceCall(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="voice_calls")
+    client = models.ForeignKey(
+        "main.Client", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    phone = models.CharField("Номер звонящего", max_length=32, blank=True, default="")
+    duration_seconds = models.PositiveIntegerField(default=0)
+    language = models.CharField(max_length=8, blank=True, default="")
+    outcome = models.CharField("Итог", max_length=32, blank=True, default="", db_index=True)
+    transcript = models.TextField(blank=True, default="")
+    recording_url = models.URLField(max_length=500, blank=True, default="")
+    cost = models.DecimalField(max_digits=10, decimal_places=4, default=Decimal("0"))
+    callback_needed = models.BooleanField("Нужно перезвонить", default=False, db_index=True)
+    callback_done = models.BooleanField(default=False)
+    idempotency_key = models.CharField(max_length=128, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "voice_calls"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["company", "-created_at"], name="main_voicecall_co_idx")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["company", "idempotency_key"], name="main_voicecall_idem_uniq",
+                condition=models.Q(idempotency_key__isnull=False),
+            ),
+        ]
