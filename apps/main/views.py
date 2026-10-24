@@ -3680,12 +3680,36 @@ class ClientDealListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCre
         return qs
 
 
+    @idempotent(body_key=True)  # ТЗ Н-12: повтор с тем же ключом возвращает ту же сделку
     def create(self, request, *args, **kwargs):
+        # ТЗ Н-12: если в запросе указан приход (receipt / receipt_id) — на приход одна сделка;
+        # повтор → 409 deal_exists с id. Без прихода в теле поведение прежнее.
+        receipt_ref = request.data.get("receipt") or request.data.get("receipt_id")
+        if receipt_ref:
+            company = self._company()
+            try:
+                receipt = SupplierReceipt.objects.filter(company=company, id=receipt_ref).first()
+            except Exception:  # не uuid
+                receipt = None
+            if receipt is None:
+                raise ValidationError({"code": "receipt_not_found", "detail": "Приход не найден."})
+            existing = _find_receipt_deal(company, receipt.supplier_id, receipt.id)
+            if existing is not None:
+                return Response(
+                    {"code": "deal_exists", "detail": "По этому приходу сделка уже создана.", "deal_id": str(existing.id)},
+                    status=status.HTTP_409_CONFLICT,
+                )
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
 
         fresh_instance = serializer.instance
+        if receipt_ref and fresh_instance:
+            # метка прихода в note (без update_fields через save(): не пересобирать график)
+            marker = _receipt_marker(receipt.id)
+            ClientDeal.objects.filter(pk=fresh_instance.pk).update(
+                note=f"{fresh_instance.note or ''} {marker}".strip()
+            )
         if fresh_instance:
             fresh_instance.refresh_from_db()
             output_serializer = self.get_serializer(fresh_instance)
@@ -4525,7 +4549,32 @@ class ClientWithDebtsListAPIView(CompanyBranchRestrictedMixin, generics.ListAPIV
             deals__kind=ClientDeal.Kind.DEBT,
             deals__installments__paid_on__isnull=True,
         ).distinct()
+        # ТЗ Н-12: ?type=clients (по умолчанию, все кроме поставщиков) | suppliers
+        kind = (self.request.query_params.get("type") or "clients").strip().lower()
+        if kind == "suppliers":
+            qs = qs.filter(type=Client.StatusClient.SUPPLIERS)
+        elif kind == "clients":
+            qs = qs.exclude(type=Client.StatusClient.SUPPLIERS)
         return qs
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        data = response.data
+        rows = data.get("results") if isinstance(data, dict) and "results" in data else data
+        if not isinstance(rows, list):
+            return response
+        ids = [r.get("id") for r in rows if isinstance(r, dict) and r.get("id")]
+        totals = {}
+        if ids:
+            for d in ClientDeal.objects.filter(client_id__in=ids, kind=ClientDeal.Kind.DEBT).prefetch_related("installments"):
+                rem = d.remaining_debt
+                if rem > 0:
+                    totals[str(d.client_id)] = totals.get(str(d.client_id), Decimal("0.00")) + rem
+        for r in rows:
+            if isinstance(r, dict):
+                r["debt_total"] = f"{totals.get(str(r.get('id')), Decimal('0.00')):.2f}"
+                r["direction"] = "we_owe" if r.get("type") == Client.StatusClient.SUPPLIERS else "they_owe"
+        return response
 # ===========================
 #  Bids & Social Applications
 # ===========================
