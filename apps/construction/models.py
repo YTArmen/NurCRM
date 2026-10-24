@@ -39,6 +39,9 @@ class CashFlowCategory(models.Model):
     type = models.CharField(max_length=10, choices=Kind.choices, default=Kind.BOTH, db_default=Kind.BOTH, verbose_name="Тип статьи")
     archived = models.BooleanField(default=False, db_default=False, verbose_name="В архиве")
     code = models.CharField(max_length=32, blank=True, default="", db_default="", verbose_name="Код статьи по умолчанию")
+    # ТЗ Н-19: системный slug (salaries/rent/taxes/utilities/purchases) и признак «системная — не удаляется».
+    slug = models.CharField(max_length=32, blank=True, default="", db_default="", db_index=True, verbose_name="Системный slug")
+    is_system = models.BooleanField(default=False, db_default=False, verbose_name="Системная статья")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
 
     class Meta:
@@ -1044,6 +1047,11 @@ class CashFlow(models.Model):
         CASHFLOW_CANCEL = "cashflow_cancel", "Отмена движения"
         SALARY_PAYOUT = "salary_payout", "Выплата зарплаты"  # ТЗ Н-18 (max_length 50, БД не меняется)
         MANUAL = "manual", "Ручная операция"
+        # ТЗ Н-19: типы расходов, которые ставит касса вместе со статьёй и сменой.
+        SHIFT_DRAWER_COLLECTION = "shift_drawer_collection", "Инкассация из ящика смены"
+        SALARY_PAYOUT = "salary_payout", "Выплата зарплаты"
+        RENT_PAYMENT = "rent_payment", "Оплата аренды"
+        SUPPLIER_PAYMENT = "supplier_payment", "Оплата поставщику"
 
     class RequestKind(models.TextChoices):
         EDIT = "edit", "Редактирование"
@@ -1140,7 +1148,7 @@ class CashFlow(models.Model):
         verbose_name="Тип источника",
     )
     source_id = models.CharField(
-        max_length=100,
+        max_length=128,
         null=True,
         blank=True,
         db_index=True,
@@ -1241,7 +1249,11 @@ class CashFlow(models.Model):
                 raise ValidationError({"category": "Категория другого филиала (или укажите общую категорию без филиала)."})
 
     def save(self, *args, **kwargs):
-        if self.source_kind in (self.SourceKind.SHIFT_DRAWER_OUTFLOW, self.SourceKind.SHIFT_DRAWER_INFLOW):
+        if self.source_kind in (
+            self.SourceKind.SHIFT_DRAWER_OUTFLOW,
+            self.SourceKind.SHIFT_DRAWER_INFLOW,
+            self.SourceKind.SHIFT_DRAWER_COLLECTION,  # ТЗ Н-19: инкассация уменьшает ящик
+        ):
             self.affects_shift_drawer = True
 
         if self.cashbox_id:
