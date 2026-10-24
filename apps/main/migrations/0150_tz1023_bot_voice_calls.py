@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     # ТЗ Н-24 (5): журнал звонков голосового агента
     dependencies = [
-        ("main", "0145_tz1023_bot_owner_code"),
+        ("main", "0149_tz1023_bot_owner_code"),
         ("users", "0064_adminpin_companypinsetting"),
     ]
 

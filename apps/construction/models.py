@@ -1045,7 +1045,6 @@ class CashFlow(models.Model):
         RENTAL_DEPOSIT = "rental_deposit", "Залог за прокат"
         POS_SALE_RETURN = "pos_sale_return", "Возврат продажи"
         CASHFLOW_CANCEL = "cashflow_cancel", "Отмена движения"
-        SALARY_PAYOUT = "salary_payout", "Выплата зарплаты"  # ТЗ Н-18 (max_length 50, БД не меняется)
         MANUAL = "manual", "Ручная операция"
         # ТЗ Н-19: типы расходов, которые ставит касса вместе со статьёй и сменой.
         SHIFT_DRAWER_COLLECTION = "shift_drawer_collection", "Инкассация из ящика смены"

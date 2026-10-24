@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     # ТЗ Н-27: заявки «сообщить о поступлении».
     dependencies = [
-        ("main", "0145_tz1023_showcase_variant_color"),
+        ("main", "0147_tz1023_showcase_variant_color"),
         ("users", "0058_company_market_spheres"),
     ]
 

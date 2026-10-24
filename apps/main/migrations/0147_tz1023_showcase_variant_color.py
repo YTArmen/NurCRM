@@ -4,7 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     # ТЗ Н-26: цвет (#RRGGBB) и порядок варианта, цвет фото товара.
     dependencies = [
-        ("main", "0144_telegram_bot_part15_voice_actions"),
+        ("main", "0146_tz1023_rentals_docs"),
     ]
 
     operations = [

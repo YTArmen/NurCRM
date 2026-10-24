@@ -11,7 +11,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('construction', '0035_trashentry_auditlog_branch'),
-        ('main', '0144_telegram_bot_part15_voice_actions'),
+        ('main', '0145_marketsalarypayout'),
         ('users', '0064_adminpin_companypinsetting'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]

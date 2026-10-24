@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     # ТЗ Н-23: код владельца, журнал notify-owner, owner_user_id
     dependencies = [
-        ("main", "0144_telegram_bot_part15_voice_actions"),
+        ("main", "0148_tz1023_showcase_stock_requests"),
         ("users", "0064_adminpin_companypinsetting"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
