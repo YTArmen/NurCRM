@@ -6672,6 +6672,62 @@ class ProductionSalaryPayout(models.Model):
         return f"Зарплата {_user_display_name(self.employee)}: {self.amount}"
 
 
+class MarketSalaryPayout(models.Model):
+    """ТЗ Н-18: выплата зарплаты магазина (оклад/аванс/премия/удержание). Один расход кассы на выплату."""
+
+    class Kind(models.TextChoices):
+        SALARY = "salary", "Зарплата"
+        ADVANCE = "advance", "Аванс"
+        BONUS = "bonus", "Премия"
+        DEDUCTION = "deduction", "Удержание"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(
+        Company, on_delete=models.CASCADE, related_name="market_salary_payouts", verbose_name="Компания",
+    )
+    employee = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="market_salary_payouts", verbose_name="Сотрудник",
+    )
+    kind = models.CharField("Вид", max_length=16, choices=Kind.choices, default=Kind.SALARY, db_default="salary")
+    amount = models.DecimalField("Сумма", max_digits=12, decimal_places=2)
+    period_from = models.DateField("Период с", null=True, blank=True)
+    period_to = models.DateField("Период по", null=True, blank=True)
+    method = models.CharField("Способ", max_length=32, blank=True, default="", db_default="")
+    cashbox = models.ForeignKey(
+        "construction.Cashbox", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="market_salary_payouts", verbose_name="Касса",
+    )
+    shift = models.ForeignKey(
+        "construction.CashShift", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="market_salary_payouts", verbose_name="Смена",
+    )
+    comment = models.CharField("Комментарий", max_length=255, blank=True, default="", db_default="")
+    cashflow = models.ForeignKey(
+        "construction.CashFlow", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+", verbose_name="Расход",
+    )
+    reversal_cashflow = models.ForeignKey(
+        "construction.CashFlow", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+", verbose_name="Обратное движение",
+    )
+    reversed_at = models.DateTimeField("Отменена", null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="market_salary_payouts_created", verbose_name="Кто выплатил",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Выплата зарплаты (магазин)"
+        verbose_name_plural = "Выплаты зарплаты (магазин)"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["company", "employee", "created_at"], name="main_market_company_6b1f0e_idx")]
+
+    def __str__(self):
+        return f"{self.get_kind_display()} {_user_display_name(self.employee)}: {self.amount}"
+
+
 class PosPrinterSetting(models.Model):
     """
     POS: синхронизация ESC/POS-конфига принтера чеков per-device (или per-branch workstation).
