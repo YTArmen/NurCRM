@@ -864,7 +864,9 @@ class ClientDebtorsAPIView(_ClientScopedMixin, APIView):
 
 class ClientPayDebtSerializer(serializers.Serializer):
     amount = MoneyField()
-    method = serializers.CharField(required=False, allow_blank=True, default="cash")
+    method = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    # ТЗ Н-13: то же поле под именем из pos/sales/{id}/pay-debt/
+    payment_method = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     shift = serializers.UUIDField(required=False, allow_null=True)
     cashbox = serializers.UUIDField(required=False, allow_null=True)
     note = serializers.CharField(required=False, allow_blank=True)
@@ -875,7 +877,13 @@ class ClientPayDebtAPIView(APIView):
     POST /api/main/clients/{id}/pay-debt/
     Idempotency-Key: …
     {"amount": "5000.00", "method": "cash", "shift": "…"}
-    → {"paid", "left", "applied": [{"sale", "deal", "amount"}]}
+    → {"paid", "left", "applied": [{"sale", "deal", "amount"}], "method", "payment_method",
+       "received_by": {"id", "name"}, "received_at", "shift", "cashbox"}
+
+    ТЗ Н-13: способ оплаты — `method` или `payment_method` (разные значения → 400 field_conflict).
+    Без `shift` платёж привязывается к открытой смене пользователя на выбранной кассе
+    (так было и раньше, create_auto_cashflow ищет её сам) — отвязка «вне смены» не делается,
+    чтобы не менять expected_cash у действующих касс; в ответе `shift` показывает, что вышло.
 
     Гасит от старых долгов к новым (по сроку взноса), как clients/{id}/deals/pay-any/.
     """
@@ -894,10 +902,13 @@ class ClientPayDebtAPIView(APIView):
         except ValueError:
             idem = uuid.uuid5(uuid.NAMESPACE_URL, f"nurcrm-pay-debt:{pk}:{key}")
 
+        from apps.main.services_debt import normalize_debt_payment_method, pick_debt_method
+
+        pm = normalize_debt_payment_method(pick_debt_method(data))
         payload = {
             "amount": str(data["amount"]),
             "idempotency_key": str(idem),
-            "payment_method": data.get("method") or "cash",
+            "payment_method": pm,
             "note": data.get("note") or "",
         }
         if data.get("shift"):
@@ -927,12 +938,22 @@ class ClientPayDebtAPIView(APIView):
             (r[2] for r in _open_debts([client.company_id], Client.objects.filter(pk=pk).values("id"))),
             ZERO,
         )
+        # ТЗ Н-13: кто принял, когда, в какой смене и кассе
+        from apps.main.services_debt import debt_receipt_info
+
+        info = debt_receipt_info(
+            request.user, getattr(view, "cashflows", []),
+            getattr(view, "payments_made", None) or getattr(view, "replay_payments", []),
+        )
         return Response(
             {
                 "paid": resp.data.get("paid_total"),
                 "left": str(money(left)),
                 "applied": applied,
                 "replayed": not applied,
+                "method": pm,
+                "payment_method": pm,
+                **info,
             },
             status=status.HTTP_200_OK,
         )

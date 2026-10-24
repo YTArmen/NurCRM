@@ -3913,7 +3913,14 @@ class ClientDealPayAPIView(APIView, CompanyBranchRestrictedMixin):
         if pay_amt <= 0:
             return Response({"amount": "Сумма оплаты должна быть больше нуля."}, status=status.HTTP_400_BAD_REQUEST)
         if pay_amt > remaining:
-            return Response({"amount": f"Сумма оплаты превышает остаток. Максимум: {remaining}."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {
+                    "amount": f"Сумма оплаты превышает остаток. Максимум: {remaining}.",
+                    "code": "amount_exceeds_installment",  # ТЗ Н-13
+                    "data": {"max": str(remaining)},
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         raw_pm = data.get("payment_method")
         from apps.main.services_debt import normalize_debt_payment_method
@@ -4021,6 +4028,39 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
     def _serialize_deals(request, deals):
         return ClientDealSerializer(deals, many=True, context={"request": request}).data
 
+    @staticmethod
+    def _validate_cashbox_and_shift(request, data):
+        """ТЗ Н-13: понятные коды для кассы/смены (cashbox_not_found, shift_closed, shift_not_owned)."""
+        from apps.construction.models import CashShift as _Shift
+
+        user = request.user
+        company = getattr(user, "owned_company", None) or getattr(user, "company", None)
+        cashbox_id = data.get("cashbox_id")
+        if cashbox_id and company is not None and not Cashbox.objects.filter(id=cashbox_id, company=company).exists():
+            return Response(
+                {"detail": "Касса не найдена или не принадлежит компании.", "code": "cashbox_not_found"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        shift_id = data.get("shift_id")
+        if shift_id and company is not None:
+            shift = _Shift.objects.filter(id=shift_id, company=company).first()
+            if shift is None:
+                return Response(
+                    {"detail": "Смена не найдена.", "code": "shift_not_found"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if shift.status != _Shift.Status.OPEN:
+                return Response(
+                    {"detail": "Смена закрыта.", "code": "shift_closed"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if shift.cashier_id != user.id and not _is_owner_like(user):
+                return Response(
+                    {"detail": "Эта смена открыта другим кассиром.", "code": "shift_not_owned"},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        return None
+
     @transaction.atomic
     def post(self, request, client_id, *args, **kwargs):
         return self.pay(request, client_id, request.data)
@@ -4028,12 +4068,21 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
     def pay(self, request, client_id, raw_data):
         """Распределяет оплату; распределение по сделкам кладёт в self.applied [(deal, amount)]."""
         self.applied = []
+        self.payments_made = []
+        self.cashflows = []  # ТЗ Н-13: созданные движения — для shift/cashbox в ответе
+        self.replay_payments = []  # ТЗ Н-13: при повторе — прежние DealPayment (кто и когда принял)
         inp = DealPayAnyInputSerializer(data=raw_data)
         inp.is_valid(raise_exception=True)
         data = inp.validated_data
         amount = Decimal(str(data["amount"])).quantize(Decimal("0.01"))
         if amount <= 0:
-            return Response({"amount": "Сумма оплаты должна быть больше нуля."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"amount": "Сумма оплаты должна быть больше нуля.", "code": "amount_invalid"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        bad = self._validate_cashbox_and_shift(request, data)
+        if bad is not None:
+            return bad
 
         client_qs = self._filter_qs_company_branch(Client.objects.all())
         if not _is_owner_like(request.user):
@@ -4055,6 +4104,19 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
             )
             by_id = {deal.id: deal for deal in prior_deals}
             ordered = [by_id[deal_id] for deal_id in prior_deal_ids if deal_id in by_id]
+            # ТЗ Н-13: прежние платежи и движения этой операции (по ключам взносов)
+            prior_keys = [
+                uuid5(idem, f"{d.id}:{i.id}") for d in prior_deals for i in d.installments.all()
+            ]
+            self.replay_payments = list(
+                DealPayment.objects.filter(deal_id__in=prior_deal_ids, idempotency_key__in=prior_keys)
+                .select_related("created_by").order_by("created_at")
+            )
+            from apps.construction.models import CashFlow as _CF
+            self.cashflows = list(_CF.objects.filter(
+                company=client.company, source_kind=_CF.SourceKind.DEBT_REPAYMENT,
+                source_id__in=[str(p.id) for p in self.replay_payments],
+            ).order_by("created_at"))
             return Response({"paid_total": str(prior_operation.amount), "deals": self._serialize_deals(request, ordered)})
 
         installments = list(
@@ -4064,12 +4126,19 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
             .order_by("due_date", "deal__created_at", "number")
         )
         if not installments:
-            return Response({"detail": "У клиента нет непогашенных долгов."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": "У клиента нет непогашенных долгов.", "code": "no_debt"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         total_remaining = sum((inst.remaining_for_period for inst in installments), Decimal("0.00")).quantize(Decimal("0.01"))
         if amount > total_remaining:
             return Response(
-                {"amount": f"Сумма оплаты превышает суммарный остаток. Максимум: {total_remaining}."},
+                {
+                    "amount": f"Сумма оплаты превышает суммарный остаток. Максимум: {total_remaining}.",
+                    "code": "amount_exceeds_debt",
+                    "data": {"max": str(total_remaining)},
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -4118,7 +4187,7 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
             if is_supplier:
                 # Долг поставщику - это РАСХОД (как в clients/{id}/deals/{deal}/pay/).
                 drawer_shift = _receipt_drawer_shift(request, deal.company) if (pm or "cash") == "cash" else None
-                create_auto_cashflow(
+                _cf = create_auto_cashflow(
                     company=deal.company,
                     branch=deal.branch,
                     cashbox=drawer_shift.cashbox if drawer_shift else None,
@@ -4135,8 +4204,10 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
                     payment_method=pm,
                     affects_shift_drawer=drawer_shift is not None,
                 )
+                if _cf:
+                    self.cashflows.append(_cf)
             else:
-                create_auto_cashflow(
+                _cf = create_auto_cashflow(
                     company=deal.company,
                     branch=deal.branch,
                     cashbox_id=data.get("cashbox_id"),
@@ -4152,9 +4223,12 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
                     payment_method=pm,
                     affects_shift_drawer=(pm == "cash"),
                 )
+                if _cf:
+                    self.cashflows.append(_cf)
             if deal.id not in affected_ids:
                 affected_ids.append(deal.id)
             self.applied.append((deal, pay_amount))
+            self.payments_made.append(payment)
             left = (left - pay_amount).quantize(Decimal("0.01"))
 
         fresh_deals = list(
