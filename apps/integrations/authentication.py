@@ -1,3 +1,5 @@
+import re
+
 from django.utils import timezone
 from rest_framework import exceptions
 from rest_framework.authentication import BaseAuthentication, get_authorization_header
@@ -6,6 +8,21 @@ from rest_framework.permissions import SAFE_METHODS
 from .models import ApiKey, hash_api_key
 
 KEYWORD = "api-key"
+
+# ТЗ Н-24 (1): какой области нужен путь. Ключ без общих "read"/"write" ходит только сюда.
+SCOPED_PATHS = (
+    (re.compile(r"/products/search/?$"), ApiKey.Scope.CATALOG_READ),
+    (re.compile(r"/clients/by-phone/?$"), ApiKey.Scope.CLIENT_READ_SELF),
+    (re.compile(r"/orders/draft/?(?:status/?)?$"), ApiKey.Scope.ORDER_DRAFT),
+    (re.compile(r"/voice/calls/?$"), ApiKey.Scope.ORDER_DRAFT),
+)
+
+
+def scope_for_path(path: str):
+    for rx, scope in SCOPED_PATHS:
+        if rx.search(path or ""):
+            return scope.value
+    return None
 
 
 class ApiKeyAuthentication(BaseAuthentication):
@@ -40,7 +57,13 @@ class ApiKeyAuthentication(BaseAuthentication):
         if owner is None or not owner.is_active or not getattr(company, "is_active", True):
             raise exceptions.AuthenticationFailed("Компания ключа недоступна.")
 
-        if request.method not in SAFE_METHODS and not key.has_scope(ApiKey.Scope.WRITE):
+        path_scope = scope_for_path(request.path)
+        has_general = key.has_scope(ApiKey.Scope.READ) or key.has_scope(ApiKey.Scope.WRITE)
+        if path_scope and key.has_scope(path_scope):
+            pass  # узкая область открывает свой путь (в т.ч. POST черновика заказа)
+        elif not has_general:
+            raise exceptions.PermissionDenied("Для этого пути у API-ключа нет нужной области.")
+        elif request.method not in SAFE_METHODS and not key.has_scope(ApiKey.Scope.WRITE):
             raise exceptions.PermissionDenied("Этот API-ключ только для чтения.")
 
         now = timezone.now()
