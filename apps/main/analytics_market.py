@@ -75,7 +75,11 @@ def _qty_str(x) -> str:
 # ─────────────────────────────────────────────────────────────
 _CF_SALE_KINDS = ("pos_sale", "pos_prepayment", "sale")
 _CF_DEBT_KINDS = ("debt_repayment", "debt_payment")
-_CF_SUPPLIER_KINDS = ("warehouse_purchase", "procurement_receipt", "supplier_debt_payment")
+_CF_SUPPLIER_KINDS = ("warehouse_purchase", "procurement_receipt", "supplier_debt_payment", "supplier_payment")
+# ТЗ Н-19: инкассация — движение денег, не расход и не прибыль.
+_CF_COLLECTION_KIND = "shift_drawer_collection"
+# ТЗ Н-19: системный slug статьи -> категория аналитики (классификация по slug идёт первой).
+_CF_SLUG_TO_CAT = {"salaries": "salaries", "rent": "rent", "taxes": "taxes", "utilities": "utilities", "purchases": "suppliers"}
 _CF_RETURN_KIND = "pos_sale_return"
 # Не деньги: зачёт (обмен, залог, предоплата заказ-наряда) и долговая часть чека.
 _CF_NON_MONEY_METHODS = ("offset", "debt")
@@ -156,11 +160,14 @@ def _cf_expense_category():
     """Категория расхода — первое совпадение, категории не пересекаются."""
     return Case(
         When(source_kind=_CF_RETURN_KIND, then=Value("returns")),
-        When(
-            Q(source_kind__in=_CF_SUPPLIER_KINDS) | Q(name__icontains="закуп") | Q(name__icontains="поставщик"),
-            then=Value("suppliers"),
-        ),
+        When(source_kind=_CF_COLLECTION_KIND, then=Value("collections")),
+        When(source_kind__in=_CF_SUPPLIER_KINDS, then=Value("suppliers")),
         When(source_kind="rental_deposit", then=Value("deposits")),
+        # ТЗ Н-19: сначала по slug статьи и назначению, потом прежняя логика по названиям.
+        *[When(category__slug=slug, then=Value(cat)) for slug, cat in _CF_SLUG_TO_CAT.items()],
+        When(source_kind="salary_payout", then=Value("salaries")),
+        When(source_kind="rent_payment", then=Value("rent")),
+        When(Q(name__icontains="закуп") | Q(name__icontains="поставщик"), then=Value("suppliers")),
         When(
             Q(name__icontains="зарплат") | Q(name__icontains="аванс") | Q(category__title__icontains="зарплат"),
             then=Value("salaries"),
@@ -175,6 +182,27 @@ def _cf_expense_category():
         default=Value("other"),
         output_field=CharField(),
     )
+
+
+def _expense_by_statya(qs, only_cats=None) -> list:
+    """ТЗ Н-19: расходы по статьям [{id,title,slug,amount}], по убыванию суммы.
+    only_cats — ограничить категориями аналитики (_cf_expense_category)."""
+    rows = qs.annotate(_cat=_cf_expense_category())
+    if only_cats is not None:
+        rows = rows.filter(_cat__in=only_cats)
+    rows = rows.values("category_id", "category__title", "category__slug").annotate(
+        s=Coalesce(Sum("amount"), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD)
+    )
+    out = []
+    for r in rows:
+        out.append({
+            "id": str(r["category_id"]) if r["category_id"] else None,
+            "title": r["category__title"] or "Без статьи",
+            "slug": r["category__slug"] or "",
+            "amount": str(_money(r["s"] or Z_MONEY)),
+        })
+    out.sort(key=lambda x: Decimal(x["amount"]), reverse=True)
+    return out
 
 
 def _sum_by_category(qs, category_expr) -> dict:
@@ -4229,12 +4257,13 @@ class AnalyticsView(APIView):
         rent = exp.get("rent", Z_MONEY)
         taxes = exp.get("taxes", Z_MONEY)
         returns = exp.get("returns", Z_MONEY)
+        collections = exp.get("collections", Z_MONEY)  # ТЗ Н-19: инкассация
         other_exp = sum(
-            (v for k, v in exp.items() if k not in ("suppliers", "salaries", "rent", "taxes", "returns")),
+            (v for k, v in exp.items() if k not in ("suppliers", "salaries", "rent", "taxes", "returns", "collections")),
             Z_MONEY,
         )
 
-        total_outflow = _money(suppliers + salaries + rent + taxes + other_exp + returns)
+        total_outflow = _money(suppliers + salaries + rent + taxes + other_exp + returns + collections)
         net = _money(total_inflow - total_outflow)
 
         return {
@@ -4259,7 +4288,9 @@ class AnalyticsView(APIView):
                 "taxes": str(_money(taxes)),
                 "other_expenses": str(_money(other_exp)),
                 "returns": str(_money(returns)),
+                "collections": str(_money(collections)),
                 "total": str(total_outflow),
+                "by_category": _expense_by_statya(cf.filter(type=CashFlow.Type.EXPENSE)),
             },
             "net": str(net),
         }
@@ -4385,6 +4416,7 @@ class AnalyticsView(APIView):
                 "utilities": str(_money(utilities)),
                 "other": str(_money(other)),
                 "total": str(total_opex),
+                "by_category": _expense_by_statya(cf_out, only_cats=("salaries", "rent", "taxes", "utilities", "other")),
             },
             "operating_profit": str(operating_profit),
             "net_profit": str(net_profit),

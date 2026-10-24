@@ -681,8 +681,8 @@ class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIVie
         if source_id:
             qs = qs.filter(source_id=source_id)
 
-        # ✅ по кассиру: ?cashier=<uuid>
-        cashier_id = qp.get("cashier")
+        # ✅ по кассиру: ?cashier=<uuid> (ТЗ Н-19: ?employee= — тот же сотрудник; отдельного поля нет)
+        cashier_id = qp.get("cashier") or qp.get("employee")
         if cashier_id:
             qs = qs.filter(cashier_id=cashier_id)
 
@@ -1071,6 +1071,9 @@ class CashFlowCategoryListCreateView(CompanyBranchScopedMixin, generics.ListCrea
             from apps.construction.categories import ensure_default_categories
 
             ensure_default_categories(self._company())
+            from apps.construction.categories import ensure_system_categories
+
+            ensure_system_categories(self._company())  # ТЗ Н-19
         qs = self._scoped_queryset(super().get_queryset()).order_by("title")
         qp = self.request.query_params
         if qp.get("type") in ("income", "expense"):
@@ -1096,6 +1099,16 @@ class CashFlowCategoryDetailView(CompanyBranchScopedMixin, generics.RetrieveUpda
 
     def get_queryset(self):
         return self._scoped_queryset(super().get_queryset())
+
+    def destroy(self, request, *args, **kwargs):
+        # ТЗ Н-19: системные статьи не удаляются.
+        obj = self.get_object()
+        if obj.is_system or obj.slug:
+            return Response(
+                {"detail": "Системную статью нельзя удалить.", "code": "category_is_system"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().destroy(request, *args, **kwargs)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1276,6 +1289,7 @@ def build_shift_report(shift: CashShift) -> dict:
     )
     deposits = drawer.get(CashFlow.SourceKind.SHIFT_DRAWER_INFLOW) or z
     withdrawals = drawer.get(CashFlow.SourceKind.SHIFT_DRAWER_OUTFLOW) or z
+    collections = drawer.get(CashFlow.SourceKind.SHIFT_DRAWER_COLLECTION) or z  # ТЗ Н-19: инкассация
     cash_sales_gross = (totals.get("drawer_cash_sales_net") or z) + own_returns_cash
     rows = [
         ("opening", shift.opening_cash or z),
@@ -1286,10 +1300,12 @@ def build_shift_report(shift: CashShift) -> dict:
         ("deposits", deposits),
         ("withdrawals", -withdrawals),
     ]
+    if collections != z:
+        rows.append(("collections", -collections))
     # Прочие приходы/расходы ящика (не внесение/изъятие/долг) — чтобы сумма сходилась с expected_cash.
     other = (
         (totals.get("non_sale_income") or z) - (totals.get("expense_total") or z)
-        - debt_paid_cash - deposits + withdrawals
+        - debt_paid_cash - deposits + withdrawals + collections
     )
     if other != z:
         rows.append(("other", other))
@@ -1321,6 +1337,7 @@ def build_shift_report(shift: CashShift) -> dict:
         **returns,
         "deposits": q2(drawer.get(CashFlow.SourceKind.SHIFT_DRAWER_INFLOW)),
         "withdrawals": q2(drawer.get(CashFlow.SourceKind.SHIFT_DRAWER_OUTFLOW)),
+        "collections": q2(collections),
         "income_total": q2(totals.get("income_total")),
         "expense_total": q2(totals.get("expense_total")),
         "expected_cash": q2(expected),

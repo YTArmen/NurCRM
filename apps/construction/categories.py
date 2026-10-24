@@ -62,3 +62,50 @@ def category_for_source(company, source_kind):
         return get_default_category(company, code)
     except Exception:  # статья не должна ломать продажу
         return None
+
+
+# ── ТЗ Н-19: системные статьи со slug ─────────────────────────────────────
+SYSTEM_SLUGS = ("salaries", "rent", "taxes", "utilities", "purchases")
+
+# (slug, название при создании, тип)
+SYSTEM_CATEGORIES = [
+    ("salaries", "Зарплата", K.EXPENSE),
+    ("rent", "Аренда", K.EXPENSE),
+    ("taxes", "Налоги", K.EXPENSE),
+    ("utilities", "Коммунальные", K.EXPENSE),
+    ("purchases", "Закупка товара", K.EXPENSE),
+]
+
+# название (нижний регистр) -> slug
+TITLE_TO_SLUG = {
+    "зарплата": "salaries", "зарплаты": "salaries",
+    "аренда": "rent",
+    "налог": "taxes", "налоги": "taxes", "налог/налоги": "taxes",
+    "коммунальные": "utilities", "коммунальные услуги": "utilities",
+    "закупка товара": "purchases", "закупки": "purchases", "закупка": "purchases",
+}
+CODE_TO_SLUG = {"salary": "salaries", "rent": "rent", "taxes": "taxes", "utilities": "utilities", "purchase": "purchases"}
+
+
+def system_slug_for(title, code=""):
+    """Системный slug по названию (без регистра) или коду статьи; "" если не системная."""
+    return CODE_TO_SLUG.get(code or "") or TITLE_TO_SLUG.get((title or "").strip().lower(), "")
+
+
+def ensure_system_categories(company):
+    """Идемпотентно: ставит slug/is_system существующим статьям по названию и
+    создаёт недостающие системные (на всю компанию). ТЗ Н-19."""
+    if company is None:
+        return
+    have = set()
+    for c in CashFlowCategory.objects.filter(company=company, slug=""):
+        slug = system_slug_for(c.title, c.code)
+        if slug:
+            CashFlowCategory.objects.filter(pk=c.pk).update(slug=slug, is_system=True)
+    have = set(CashFlowCategory.objects.filter(company=company).exclude(slug="").values_list("slug", flat=True))
+    for slug, title, kind in SYSTEM_CATEGORIES:
+        if slug in have:
+            continue
+        if CashFlowCategory.objects.filter(company=company, branch__isnull=True, title__iexact=title).exists():
+            continue
+        CashFlowCategory.objects.create(company=company, title=title, type=kind, slug=slug, is_system=True)

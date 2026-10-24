@@ -558,8 +558,8 @@ class CashFlowCategorySerializer(CompanyBranchReadOnlyMixin):
 
     class Meta:
         model = CashFlowCategory
-        fields = ["id", "company", "branch", "title", "type", "archived", "is_default", "created_at"]
-        read_only_fields = ["id", "company", "created_at"]
+        fields = ["id", "company", "branch", "title", "type", "archived", "is_default", "slug", "is_system", "created_at"]
+        read_only_fields = ["id", "company", "created_at", "slug", "is_system"]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -593,6 +593,13 @@ class CashFlowCategorySerializer(CompanyBranchReadOnlyMixin):
                 validated_data["company"] = company
         if "branch" not in validated_data:
             validated_data["branch"] = self._auto_branch()
+        # ТЗ Н-19: «Зарплата/Аренда/Налоги/Коммунальные» (без регистра) получают системный slug.
+        from apps.construction.categories import system_slug_for
+
+        slug = system_slug_for(validated_data.get("title"))
+        if slug:
+            validated_data["slug"] = slug
+            validated_data["is_system"] = True
         return serializers.ModelSerializer.create(self, validated_data)
 
     def update(self, instance, validated_data):
@@ -616,6 +623,17 @@ class TargetFlowBriefSerializer(serializers.ModelSerializer):
 DRAWER_SOURCE_KINDS = (
     CashFlow.SourceKind.SHIFT_DRAWER_OUTFLOW,
     CashFlow.SourceKind.SHIFT_DRAWER_INFLOW,
+    CashFlow.SourceKind.SHIFT_DRAWER_COLLECTION,  # ТЗ Н-19
+)
+# ТЗ Н-19: расходы «по назначению» — всегда расход, ящик не трогают.
+EXPENSE_ONLY_KINDS = (
+    CashFlow.SourceKind.SHIFT_DRAWER_OUTFLOW,
+    CashFlow.SourceKind.SHIFT_DRAWER_COLLECTION,
+)
+PURPOSE_SOURCE_KINDS = (
+    CashFlow.SourceKind.SALARY_PAYOUT,
+    CashFlow.SourceKind.RENT_PAYMENT,
+    CashFlow.SourceKind.SUPPLIER_PAYMENT,
 )
 
 
@@ -856,7 +874,7 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
         source_kind = attrs.get("source_kind") or getattr(self.instance, "source_kind", None)
         if source_kind in DRAWER_SOURCE_KINDS:
             flow_type = attrs.get("type") or getattr(self.instance, "type", None)
-            if source_kind == CashFlow.SourceKind.SHIFT_DRAWER_OUTFLOW and flow_type != CashFlow.Type.EXPENSE:
+            if source_kind in EXPENSE_ONLY_KINDS and flow_type != CashFlow.Type.EXPENSE:
                 raise serializers.ValidationError(
                     {"type": "Списание из кассы смены возможно только расходом."}
                 )
@@ -890,7 +908,7 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
         # ✅ если shift не передали или shift=None — это “общий режим”, разрешаем
         return attrs
 
-    EMPLOYEE_SOURCE_KINDS = (None, "", CashFlow.SourceKind.MANUAL) + DRAWER_SOURCE_KINDS
+    EMPLOYEE_SOURCE_KINDS = (None, "", CashFlow.SourceKind.MANUAL) + DRAWER_SOURCE_KINDS + PURPOSE_SOURCE_KINDS
 
     def _validate_employee_rights(self, attrs, user):
         """Ограничения для не-владельца (кассира): одобрение, авто-движения, закрытые смены."""
