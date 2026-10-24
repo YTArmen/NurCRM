@@ -5752,6 +5752,24 @@ class SupplierReceiptLimitPagination(PageNumberPagination):
         self.request = request
         return list(self.page)
 
+    def _beyond_last(self):
+        return self.page.number > self.page.paginator.num_pages
+
+    def get_next_link(self):
+        # ТЗ Н-28: за последней страницей следующей нет (раньше Page([]) ронял ссылку в 500).
+        if self._beyond_last():
+            return None
+        return super().get_next_link()
+
+    def get_previous_link(self):
+        # ТЗ Н-28: «предыдущая» для страницы за концом — последняя существующая.
+        if self._beyond_last():
+            from rest_framework.utils.urls import replace_query_param
+
+            last = self.page.paginator.num_pages
+            return replace_query_param(self.request.build_absolute_uri(), self.page_query_param, last)
+        return super().get_previous_link()
+
     def get_paginated_response(self, data, *, total_amount):
         return Response(
             {
