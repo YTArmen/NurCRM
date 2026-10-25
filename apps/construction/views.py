@@ -655,7 +655,15 @@ class CashFlowWriteAccess(permissions.BasePermission):
         if request.method in permissions.SAFE_METHODS or is_privileged(user) or has_any_flag(user, ["can_view_cashbox"]):
             return True
         if request.method == "POST":
-            raw = request.data.get("shift") if hasattr(request.data, "get") else None
+            data = request.data if hasattr(request.data, "get") else {}
+            # операции ящика смены: привязку к своей открытой смене проверяет сериализатор (400 shift)
+            if str(data.get("source_kind") or "").startswith("shift_drawer_"):
+                return True
+            # включён режим «заявки»: расход сотрудника уходит владельцу на подтверждение (pending)
+            company = getattr(user, "company", None)
+            if company is not None and getattr(company, "cashflow_requests_enabled", False):
+                return True
+            raw = data.get("shift")
             try:
                 ok = self._own_open_shift(user, raw or None)
             except Exception:  # битый uuid в shift
@@ -672,6 +680,9 @@ class CashFlowWriteAccess(permissions.BasePermission):
             return True
         shift = getattr(obj, "shift", None)
         if shift is not None and shift.cashier_id == user.id:
+            return True
+        # режим «заявки»: сотрудник может править/отменять СВОЮ заявку (проверки статуса — в сериализаторе)
+        if obj.cashier_id == user.id and getattr(obj.company, "cashflow_requests_enabled", False):
             return True
         raise denied("can_view_cashbox", "Операции с кассой компании недоступны; доступны только операции вашей смены.")
 

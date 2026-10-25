@@ -275,6 +275,16 @@ class RestrictionsTests(N16Base):
         self.assertDenied(self.api_cashier.patch(f"/api/construction/cashflows/{fid}/", {"name": "Х"}, format="json"))
         self.assertDenied(self.api_cashier.delete(f"/api/construction/cashflows/{fid}/"))
 
+    def test_cashflow_request_mode_keeps_employee_requests(self):
+        """Режим «заявки»: расход сотрудника уходит на подтверждение — не блокируем."""
+        self.company.cashflow_requests_enabled = True
+        self.company.save()
+        r = self.api_cashier.post("/api/construction/cashflows/", {
+            "cashbox": str(self.cashbox.id), "type": "expense", "name": "Заявка", "amount": "7.00",
+        }, format="json")
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertEqual(r.json()["status"], "pending")
+
     # --- аналитика ---
     def test_analytics_requires_flag(self):
         for url in (

@@ -20,11 +20,14 @@ def is_privileged(user) -> bool:
     """owner/admin/superuser/владелец компании — без ограничений флагами."""
     if user is None or not getattr(user, "is_authenticated", False):
         return False
-    if getattr(user, "is_superuser", False):
+    if getattr(user, "is_superuser", False) or getattr(user, "is_staff", False):  # как apps.utils.is_owner_like
         return True
     if getattr(user, "role", None) in ("owner", "admin"):
         return True
-    return bool(getattr(user, "owned_company_id", None))
+    try:
+        return getattr(user, "owned_company", None) is not None
+    except Exception:
+        return False
 
 
 def has_any_flag(user, flags) -> bool:
