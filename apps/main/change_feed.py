@@ -29,6 +29,7 @@ NEW_EVENT_TYPES = (
     "rental_extended",
     "supplier_debt_changed",
     "features_changed",
+    "pos_request_changed",
 )
 
 RETENTION_DAYS = 7

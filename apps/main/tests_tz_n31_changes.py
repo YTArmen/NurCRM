@@ -190,3 +190,115 @@ class CompanyWebSocketTests(TransactionTestCase):
         out = await comm.receive_output()
         self.assertEqual(out["type"], "websocket.close")
         self.assertEqual(out["code"], 4401)
+
+
+from apps.construction.models import CashFlow
+from apps.main.models import PosRequest
+
+RQ = "/api/main/pos/requests/"
+
+
+class PosRequestTests(FeedBase):
+    def setUp(self):
+        super().setUp()
+        self.cashier = User.objects.create_user(email=f"c-{uuid.uuid4().hex}@test.com", password="x",
+                                                role="cashier", company=self.company)
+        self.cashbox = Cashbox.objects.create(name="Касса 1", company=self.company)
+        self.cap = APIClient()
+        self.cap.force_authenticate(self.cashier)
+        self.client_obj = Client.objects.create(company=self.company, full_name="Должник")
+        self.deal = ClientDeal.objects.create(company=self.company, client=self.client_obj, title="d",
+                                              kind="debt", amount=Decimal("1000.00"), debt_months=1,
+                                              first_due_date=date.today())
+
+    def open_shift(self):
+        return CashShift.objects.create(company=self.company, cashbox=self.cashbox, cashier=self.cashier,
+                                        status=CashShift.Status.OPEN)
+
+    def create(self, **kw):
+        body = {"kind": "debt_payment", "cashbox": str(self.cashbox.id), "amount": "500.00",
+                "payload": {"client": str(self.client_obj.id)}}
+        body.update(kw)
+        return self.api.post(RQ, body, format="json")
+
+    def test_create_only_owner(self):
+        r = self.cap.post(RQ, {"kind": "cash_out", "cashbox": str(self.cashbox.id), "amount": "1"}, format="json")
+        self.assertEqual(r.status_code, 403)
+        r = self.create()
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["status"], "pending")
+        self.assertEqual(self.create(payload={}).status_code, 400)
+
+    def test_accept_debt_payment_and_replay(self):
+        rid = self.create().data["id"]
+        # без смены — нельзя
+        self.assertEqual(self.cap.post(f"{RQ}{rid}/accept/").status_code, 409)
+        shift = self.open_shift()
+        before = shift.expected_cash
+        r = self.cap.post(f"{RQ}{rid}/accept/")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertFalse(r.data["replayed"])
+        self.assertEqual(r.data["status"], "accepted")
+        self.assertTrue(r.data["result"]["executed"])
+        shift = CashShift.objects.get(pk=shift.pk)
+        self.assertEqual(shift.expected_cash - before, Decimal("500.00"))
+        r2 = self.cap.post(f"{RQ}{rid}/accept/")
+        self.assertEqual(r2.status_code, 200)
+        self.assertTrue(r2.data["replayed"])
+        self.assertEqual(CashFlow.objects.filter(source_kind="debt_repayment").count(), 1)
+        self.assertEqual(CashShift.objects.get(pk=shift.pk).expected_cash - before, Decimal("500.00"))
+
+    def test_accept_cash_out(self):
+        shift = self.open_shift()
+        before = shift.expected_cash
+        rid = self.create(kind="cash_out", payload={}, amount="200.00").data["id"]
+        r = self.cap.post(f"{RQ}{rid}/accept/")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(before - CashShift.objects.get(pk=shift.pk).expected_cash, Decimal("200.00"))
+        self.assertEqual(CashFlow.objects.filter(source_kind="shift_drawer_outflow").count(), 1)
+        self.cap.post(f"{RQ}{rid}/accept/")
+        self.assertEqual(CashFlow.objects.filter(source_kind="shift_drawer_outflow").count(), 1)
+
+    def test_other_cashier_cannot_accept(self):
+        rid = self.create(kind="cash_out", payload={}).data["id"]
+        other = User.objects.create_user(email=f"d-{uuid.uuid4().hex}@test.com", password="x",
+                                         role="cashier", company=self.company)
+        CashShift.objects.create(company=self.company, cashbox=Cashbox.objects.create(name="К2", company=self.company),
+                                 cashier=other, status=CashShift.Status.OPEN)
+        a = APIClient()
+        a.force_authenticate(other)
+        self.assertEqual(a.post(f"{RQ}{rid}/accept/").status_code, 409)
+
+    def test_decline_cancel_flow(self):
+        rid = self.create(kind="salary_payout", payload={}).data["id"]
+        self.open_shift()
+        r = self.cap.post(f"{RQ}{rid}/decline/", {"reason": "нет денег"}, format="json")
+        self.assertEqual(r.data["status"], "declined")
+        self.assertEqual(self.api.post(f"{RQ}{rid}/cancel/").status_code, 409)
+        rid2 = self.create(kind="supplier_payment", payload={}).data["id"]
+        self.assertEqual(self.api.post(f"{RQ}{rid2}/cancel/").data["status"], "canceled")
+        self.assertEqual(self.cap.post(f"{RQ}{rid2}/accept/").status_code, 409)
+
+    def test_other_kind_accept_status_only(self):
+        self.open_shift()
+        rid = self.create(kind="rental_payment", payload={}).data["id"]
+        r = self.cap.post(f"{RQ}{rid}/accept/")
+        self.assertEqual(r.data["status"], "accepted")
+        self.assertFalse(r.data["result"]["executed"])
+
+    def test_expired(self):
+        rid = self.create(kind="cash_out", payload={}).data["id"]
+        PosRequest.objects.filter(pk=rid).update(expires_at=timezone.now() - timedelta(minutes=1))
+        self.open_shift()
+        r = self.cap.post(f"{RQ}{rid}/accept/")
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(PosRequest.objects.get(pk=rid).status, "expired")
+
+    def test_list_and_feed_event(self):
+        cursor = self.api.get(URL).data["cursor"]
+        with self.captureOnCommitCallbacks(execute=True):
+            self.create(kind="cash_out", payload={})
+        self.assertEqual(len(self.api.get(RQ).data["results"]), 1)
+        self.assertEqual(self.cap.get(RQ).data["results"], [])  # нет смены — не видит
+        types = [e["type"] for e in self.api.get(URL, {"since": cursor}).data["events"]]
+        self.assertIn("pos_request_changed", types)

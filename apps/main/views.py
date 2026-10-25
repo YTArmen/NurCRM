@@ -4267,7 +4267,8 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
             return bad
 
         client_qs = self._filter_qs_company_branch(Client.objects.all())
-        if not _is_owner_like(request.user):
+        # ТЗ Н-31: запрос «на кассу» принимает кассир — ограничение по salesperson не применяем
+        if not _is_owner_like(request.user) and not getattr(request, "_pos_request_accept", False):
             client_qs = client_qs.filter(salesperson=request.user)
         client = get_object_or_404(client_qs.select_for_update(), id=client_id)
         idem = data["idempotency_key"]
