@@ -834,6 +834,8 @@ class AccessDetailView(CtxMixin, APIView):
             acc.save()
             if branch_ids is not None:
                 acc.branches.set(branch_ids)
+            from .security import sync_user_state
+            sync_user_state(u, acc)  # закрыт доступ = завершить сеансы
         after = _access_payload(u, acc)
         audit.log(request, company, "access", "access", acc, before=before, after=after,
                   object_name=after["user"]["name"])

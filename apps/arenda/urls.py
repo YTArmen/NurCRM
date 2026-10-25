@@ -12,6 +12,7 @@ router.register(r"leases", views.LeaseViewSet, basename="arenda-lease")
 
 urlpatterns = [
     path("", include("apps.arenda.urls_money")),
+    path("", include("apps.arenda.urls_access")),  # этапы 5–6
     path("me/", views.MeView.as_view()),
     path("chess/", views.ChessView.as_view()),
     path("settings/", views.SettingsView.as_view()),
