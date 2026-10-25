@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 from apps.main.kassa_views import _company
 from apps.main.models import Product, ProductAlternateBarcode
 from core.exceptions import ApiError, api_exception_handler
+from apps.users.permissions_flags import PosAccess
 
 
 class BarcodeDuplicatesAPIView(APIView):
@@ -61,7 +62,7 @@ class PosCheckoutBatchAPIView(APIView):
     Повтор с тем же ключом — status 200 и уже созданная продажа.
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, PosAccess]  # ТЗ Н-16
     MAX_ITEMS = 50
 
     def post(self, request):

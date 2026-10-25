@@ -690,6 +690,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     can_view_request = models.BooleanField(default=False, verbose_name="Доступ к запросам")
     can_view_shifts = models.BooleanField(default=False, verbose_name="Доступ к смене")
     can_view_cashier = models.BooleanField(default=False, verbose_name="Доступ к интерфейсу кассы")
+    # ТЗ Н-16: «Работа на кассе» отдельно от «Финансы: кассы компании» (can_view_cashbox).
+    # По умолчанию True (db_default) — после миграции никто не теряет доступ к кассе.
+    can_use_pos = models.BooleanField(default=True, db_default=True, verbose_name="Работа на кассе (POS)")
     can_view_document = models.BooleanField(default=False, verbose_name="Доступ к документам")
     can_view_market_scales = models.BooleanField(default=False, verbose_name="Доступ к весам")
     can_view_market_label = models.BooleanField(default=False, verbose_name="Доступ к печати этикеток")
@@ -1167,3 +1170,24 @@ class CompanyPinSetting(models.Model):
     class Meta:
         verbose_name = "Настройка PIN компании"
         verbose_name_plural = "Настройки PIN компаний"
+
+
+class EmployeeAccessCode(models.Model):
+    """ТЗ Н-16: код доступа сотрудника к действию (например, скидка/удаление чека) — хранится хэшем."""
+
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="employee_access_codes")
+    employee = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="access_codes")
+    action = models.CharField(max_length=64)
+    code_hash = models.CharField(max_length=256)
+    updated_by = models.ForeignKey(
+        "users.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Код доступа сотрудника"
+        verbose_name_plural = "Коды доступа сотрудников"
+        constraints = [
+            models.UniqueConstraint(fields=["employee", "action"], name="uniq_employee_access_code_action"),
+        ]
+        indexes = [models.Index(fields=["company", "action"], name="ix_empcode_company_action")]

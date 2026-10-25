@@ -388,7 +388,7 @@ class UserSerializer(serializers.ModelSerializer):
             "can_view_sales", "can_view_services",
             "can_view_agent", "can_view_catalog",
             "can_view_branch", "can_view_logistics", "can_view_request", "can_view_shifts",
-            "can_view_cashier", "can_view_document", "can_view_market_scales", "can_view_market_label",
+            "can_view_cashier", "can_use_pos", "can_view_document", "can_view_market_scales", "can_view_market_label",
             "can_view_market_discount", "can_view_market_edit_price", "can_view_market_delete_cart_item",
             "can_view_market_procurement", "can_view_market_supplier", "can_view_market_employee_return",
 
@@ -587,9 +587,9 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            "email", "first_name", "last_name", "track_number", "phone_number", "avatar",
+            "id", "email", "first_name", "last_name", "track_number", "phone_number", "avatar",
             "role", "custom_role", "role_display",
-            "region_code", "consulting_region_codes",
+            "region_code", "consulting_region_codes", "can_use_pos",  # ТЗ Н-16: id всегда в ответе
 
             # все can_view_* которые ты раньше использовал
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
@@ -724,6 +724,8 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
                 if v is not None:
                     setattr(user, k, v)
 
+        if "can_use_pos" in validated_data:  # ТЗ Н-16
+            user.can_use_pos = bool(validated_data["can_use_pos"])
         user.save()
 
         # Funnel grant for region
@@ -819,7 +821,7 @@ class EmployeeUpdateSerializer(serializers.ModelSerializer):
         fields = [
             "id", "first_name", "last_name", "track_number", "phone_number", "avatar",
             "role", "custom_role", "role_display",
-            "consulting_region_codes",
+            "consulting_region_codes", "can_use_pos",
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
             "can_manage_funnel_leads",
             "can_manage_funnel_stages",
@@ -944,7 +946,7 @@ class UserListSerializer(serializers.ModelSerializer):
         fields = [
             "id", "email", "first_name", "last_name", "track_number", "phone_number",
             "role", "custom_role", "role_display", "avatar",
-            "consulting_region_codes", "consulting_regions",
+            "consulting_region_codes", "consulting_regions", "can_use_pos",
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
             "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend",
             *READ_ONLY_FIELDS,
@@ -974,7 +976,7 @@ class UserWithPermissionsSerializer(serializers.ModelSerializer):
         fields = [
             "id", "email", "first_name", "last_name", "track_number", "phone_number",
             "role", "custom_role", "role_display", "avatar",
-            "consulting_region_codes", "consulting_regions",
+            "consulting_region_codes", "consulting_regions", "can_use_pos",
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
             "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend",
             *READ_ONLY_FIELDS,

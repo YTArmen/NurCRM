@@ -10,6 +10,7 @@ import logging
 from rest_framework import generics, permissions, status
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from apps.users.permissions import read_only_guard
+from apps.users.permissions_flags import EmployeesListAccess  # ТЗ Н-16
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -342,7 +343,7 @@ class CustomTokenRefreshView(TokenRefreshView):
 
 class EmployeeListAPIView(generics.ListAPIView):
     serializer_class = UserListSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, EmployeesListAccess]  # ТЗ Н-16
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):

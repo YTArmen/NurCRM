@@ -29,6 +29,7 @@ from django.utils import timezone
 from django.core.cache import cache
 from django.conf import settings
 
+from apps.users.permissions_flags import flag_guard  # ТЗ Н-16
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import permissions
@@ -813,6 +814,9 @@ def _user_label(user_obj=None, *, first_name=None, last_name=None, email=None, p
 # ─────────────────────────────────────────────────────────────
 # Analytics API + caching
 # ─────────────────────────────────────────────────────────────
+# ТЗ Н-16: аналитика — только с правом «Аналитика»; вкладку «Продажи» касса показывает любому кассиру
+# (решение Умара 25.10), поэтому tab=sales остаётся открытой.
+@flag_guard("can_view_analytics", read=True, allow=lambda r: r.path.rstrip("/").endswith("analytics/market") and (r.query_params.get("tab") or "sales") == "sales")
 class AnalyticsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     # Зарплаты и деньги компании — только владельцу/админу или с доступом к аналитике.
@@ -4651,6 +4655,7 @@ class AnalyticsView(APIView):
 # ─────────────────────────────────────────────────────────────
 # Dedicated Endpoints (AN-11 & AN-12)
 # ─────────────────────────────────────────────────────────────
+@flag_guard("can_view_analytics", read=True)  # ТЗ Н-16: аналитика — только с правом «Аналитика»
 class AnalyticsReconcileAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -4664,6 +4669,7 @@ class AnalyticsReconcileAPIView(APIView):
         return Response(data)
 
 
+@flag_guard("can_view_analytics", read=True)  # ТЗ Н-16: аналитика — только с правом «Аналитика»
 class AnalyticsCashFlowAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -4678,6 +4684,7 @@ class AnalyticsCashFlowAPIView(APIView):
         return Response(data)
 
 
+@flag_guard("can_view_analytics", read=True)  # ТЗ Н-16: аналитика — только с правом «Аналитика»
 class AnalyticsPnLAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -4692,6 +4699,7 @@ class AnalyticsPnLAPIView(APIView):
         return Response(data)
 
 
+@flag_guard("can_view_analytics", read=True)  # ТЗ Н-16: аналитика — только с правом «Аналитика»
 class AnalyticsStockAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -4705,6 +4713,7 @@ class AnalyticsStockAPIView(APIView):
         return Response(data)
 
 
+@flag_guard("can_view_analytics", read=True)  # ТЗ Н-16: аналитика — только с правом «Аналитика»
 class AnalyticsLossSalesAPIView(APIView):
     """
     GET /api/main/analytics/loss-sales/?date_from=&date_to=&branch=

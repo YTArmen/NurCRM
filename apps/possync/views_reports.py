@@ -19,6 +19,7 @@ from django.db.models import Case, Count, DecimalField, Exists, ExpressionWrappe
 from django.db.models.functions import Coalesce, ExtractHour
 from django.utils import timezone
 from rest_framework import permissions
+from apps.users.permissions_flags import flag_guard  # ТЗ Н-16
 from rest_framework.exceptions import NotFound, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -363,6 +364,7 @@ SOURCE_LABELS = {
 }
 
 
+@flag_guard("can_view_analytics", read=True)  # ТЗ Н-16
 class AnalyticsHoursSourcesAPIView(APIView):
     """
     GET /api/main/analytics/market/hours-sources/?date_from&date_to&branch
