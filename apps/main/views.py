@@ -3031,9 +3031,8 @@ class ProductByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.RetrieveAPI
         from apps.main.kassa_stage3 import ProductVariantSerializer
 
         data["product"] = dict(data)
-        data["variant"] = (
-            ProductVariantSerializer(variant, context={"product": instance}).data if variant is not None else None
-        )
+        if variant is not None:  # без совпадения по варианту ключа variant нет (контракт possync)
+            data["variant"] = ProductVariantSerializer(variant, context={"product": instance}).data
         data["matched_by"] = getattr(self, "_matched_by", "barcode")
         return Response(data)
 

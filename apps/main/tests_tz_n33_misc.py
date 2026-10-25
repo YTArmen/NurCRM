@@ -163,4 +163,5 @@ class VariantsCatalogTests(N33Base):
         self.assertEqual(d["product"]["id"], str(self.p.id))
         self.assertEqual(d["id"], str(self.p.id))
         r = self.api.get("/api/main/products/barcode/2000000000011/")
-        self.assertEqual((r.json()["matched_by"], r.json()["variant"]), ("barcode", None))
+        self.assertEqual(r.json()["matched_by"], "barcode")
+        self.assertNotIn("variant", r.json())
