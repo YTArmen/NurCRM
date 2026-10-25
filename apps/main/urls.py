@@ -31,6 +31,8 @@ from .kassa_views import (
 from .analytics_market import *
 from .analytics_dashboard import *
 from .document import SaleReceiptAPIView, SaleInvoiceAPIView
+from apps.main.showcase.size_charts import SizeChartListCreateAPIView, SizeChartDetailAPIView
+from apps.main.supplier_receipt_pdf import SupplierReceiptPdfAPIView
 from apps.main.media_receipts import MainMediaListCreateAPIView, MainMediaDetailAPIView, SalePublicLinkAPIView
 from apps.main.showcase.views_public import PublicCompanyShowcaseFacetsAPIView, PublicCompanyProductDetailAPIView, PublicCompanyAPIView, PublicCompanyShowcaseAPIView
 from apps.main.recommendations import (
@@ -465,6 +467,7 @@ urlpatterns = [
     path("idempotency/<str:key>/", IdempotencyLookupAPIView.as_view(), name="idempotency-lookup"),
     path("suppliers/", SupplierListAPIView.as_view(), name="supplier-list"),
     path("suppliers/receipts/", SupplierReceiptListAPIView.as_view(), name="supplier-receipts"),
+    path("suppliers/receipts/<uuid:pk>/pdf/", SupplierReceiptPdfAPIView.as_view(), name="supplier-receipt-pdf"),  # ТЗ Н-33
     path("suppliers/receipts/<uuid:pk>/", SupplierReceiptRetrieveAPIView.as_view(), name="supplier-receipt-detail"),
     path("suppliers/returns/", SupplierReturnListAPIView.as_view(), name="supplier-returns-list"),
     path("suppliers/returns/<uuid:pk>/", SupplierReturnRetrieveAPIView.as_view(), name="supplier-returns-detail"),
@@ -592,6 +595,8 @@ urlpatterns = [
     path("showcase/design/versions/", ShowcaseVersionsListAPIView.as_view(), name="showcase-design-versions"),
     path("showcase/design/versions/<int:version>/restore/", ShowcaseVersionRestoreAPIView.as_view(), name="showcase-design-restore"),
 
+    path("showcase/size-charts/", SizeChartListCreateAPIView.as_view(), name="showcase-size-charts"),  # ТЗ Н-33
+    path("showcase/size-charts/<uuid:pk>/", SizeChartDetailAPIView.as_view(), name="showcase-size-chart-detail"),
     path("showcase/media/", ShowcaseMediaListCreateAPIView.as_view(), name="showcase-media-list-create"),
     path("showcase/media/<uuid:pk>/", ShowcaseMediaDetailAPIView.as_view(), name="showcase-media-detail"),
 

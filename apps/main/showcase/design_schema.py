@@ -43,6 +43,9 @@ SECTION_TYPES = (
     "featured", "new_arrivals", "on_sale", "text", "contacts",
 )
 
+# ТЗ Н-33: способы выбора варианта на странице товара
+VARIANT_PICKERS = ("buttons", "dropdown", "swatches")
+
 SORT_OPTIONS = (
     "default", "name_asc", "name_desc", "price_asc", "price_desc", "discount_desc", "discount_asc",
 )
@@ -143,6 +146,7 @@ def default_document(company_name: str = "", whatsapp_phone: Optional[str] = Non
             "show": {
                 "old_price": True, "discount_badge": True, "new_badge": True, "category": True,
                 "stock": "hidden", "unit": True, "description": False, "add_button": True, "quantity_stepper": False,
+                "swatches": False,  # ТЗ Н-33: кружки цветов на карточке (одежда)
             },
             "new_badge_days": 14, "new_badge_text": {"ru": "НОВИНКА"},
             "add_button_text": {"ru": "В корзину"},
@@ -151,6 +155,7 @@ def default_document(company_name: str = "", whatsapp_phone: Optional[str] = Non
         "product_page": {
             "enabled": False, "gallery": True, "show_description": True,
             "show_characteristics": True, "show_related": True,
+            "variant_picker": "buttons",  # ТЗ Н-33: как выбирать размер/цвет
         },
         "cart": {
             "style": "drawer",
@@ -702,7 +707,7 @@ DOCUMENT_SPEC = Obj({
         "show": Obj({
             "old_price": Bool(), "discount_badge": Bool(), "new_badge": Bool(), "category": Bool(),
             "stock": Enum(("hidden", "low_only", "always")), "unit": Bool(), "description": Bool(),
-            "add_button": Bool(), "quantity_stepper": Bool(),
+            "add_button": Bool(), "quantity_stepper": Bool(), "swatches": Bool(),
         }),
         "new_badge_days": Int(0, 365),
         "new_badge_text": I18n(24),
@@ -713,6 +718,7 @@ DOCUMENT_SPEC = Obj({
     "product_page": Obj({
         "enabled": Bool(), "gallery": Bool(), "show_description": Bool(),
         "show_characteristics": Bool(), "show_related": Bool(),
+        "variant_picker": Enum(VARIANT_PICKERS),
     }),
     "cart": Obj({
         "style": Enum(("drawer", "page")),

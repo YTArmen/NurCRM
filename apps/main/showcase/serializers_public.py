@@ -60,6 +60,7 @@ class PublicProductSerializer(serializers.ModelSerializer):
     # ТЗ Н-26: цвета (с фото по цвету) и размеры по порядку
     colors = serializers.SerializerMethodField()
     sizes = serializers.SerializerMethodField()
+    size_chart = serializers.SerializerMethodField()  # ТЗ Н-33
 
     # Витрина (ТЗ-BE-2026-05, п. 6.4/6.13): бейдж владельца, закрепление, акция кассы.
     badge = serializers.SerializerMethodField()
@@ -99,6 +100,7 @@ class PublicProductSerializer(serializers.ModelSerializer):
             "variants",
             "colors",
             "sizes",
+            "size_chart",
             "badge",
             "pinned",
             "on_sale",
@@ -117,6 +119,11 @@ class PublicProductSerializer(serializers.ModelSerializer):
             "characteristics",
             "packages",
         ]
+
+    def get_size_chart(self, obj):
+        from apps.main.showcase.size_charts import public_size_chart
+
+        return public_size_chart(obj)
 
     def _get_sorted_images(self, obj: Product):
         # Используем предзагруженные связанные объекты obj.images.all() без .filter(),
