@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import include, path
 from rest_framework.routers import SimpleRouter
 
 from . import views
@@ -17,4 +17,4 @@ urlpatterns = [
     path("access/", views.AccessListView.as_view()),
     path("access/presets/", views.AccessPresetsView.as_view()),
     path("access/<uuid:user_id>/", views.AccessDetailView.as_view()),
-] + router.urls
+] + router.urls + [path("", include("apps.arenda.urls_team"))]
