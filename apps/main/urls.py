@@ -130,6 +130,8 @@ from apps.main.client_documents import (
     ClientDocumentPayAPIView,
 )
 
+from apps.main.pos_bulk import CartClearAPIView, SaleItemsBulkAPIView  # ТЗ Н-15
+
 urlpatterns = [
     # ТЗ «Админка»: журнал действий (тот же, что construction/audit-log/) и корзина удалённого
     path("audit-log/", AuditLogView.as_view(), name="main-audit-log"),
@@ -399,6 +401,9 @@ urlpatterns = [
     path("pos/customer-display-settings/", MarketCustomerDisplaySettingsAPIView.as_view(), name="pos-customer-display-settings"),
     path("pos/sales/start/", SaleStartAPIView.as_view(), name="pos-sale-start"),
     path("pos/carts/<uuid:pk>/custom-item/", SaleAddCustomItemAPIView.as_view(), name="pos-cart-add-custom-item"),
+    # ТЗ Н-15: быстрые операции над корзиной
+    path("pos/sales/<uuid:pk>/items/bulk/", SaleItemsBulkAPIView.as_view(), name="pos-sale-items-bulk"),
+    path("pos/carts/<uuid:pk>/clear/", CartClearAPIView.as_view(), name="pos-cart-clear"),
     path("pos/carts/<uuid:pk>/", CartDetailAPIView.as_view(), name="pos-cart-detail"),
     path("sales/bulk-delete/", SaleBulkDeleteAPIView.as_view(), name="sale-bulk-delete"),
     path("pos/sales/<uuid:pk>/", SaleRetrieveAPIView.as_view(), name="pos-sale-detail"),
