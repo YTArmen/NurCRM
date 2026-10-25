@@ -152,6 +152,14 @@ def _generate_password(length=6):
 # ======================
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        from apps.arenda.security import stamp_token  # версия сеанса для «Аренды» (завершение сеансов)
+
+        stamp_token(token, user)
+        return token
+
     def validate(self, attrs):
         email_val = attrs.get("email") or attrs.get("username")
         if isinstance(email_val, str):
@@ -160,7 +168,18 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 attrs["email"] = clean_email
             if "username" in attrs:
                 attrs["username"] = clean_email
-        data = super().validate(attrs)
+        # Аренда помещений: блокировка после 5 неверных паролей на 15 минут (только для «арендных» пользователей)
+        from apps.arenda import security as _arenda_security
+        from rest_framework.exceptions import AuthenticationFailed as _AuthFailed
+
+        _ident = email_val if isinstance(email_val, str) else ""
+        _arenda_security.guard_before_login(_ident)
+        try:
+            data = super().validate(attrs)
+        except _AuthFailed:
+            _arenda_security.register_failure(_ident)
+            raise
+        _arenda_security.register_success(_ident)
 
         user = (
             User.objects.filter(pk=self.user.pk)

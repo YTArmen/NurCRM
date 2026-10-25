@@ -462,3 +462,4 @@ class AuditLog(models.Model):
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["company", "-created_at"], name="ix_arenda_audit_company"),
                    models.Index(fields=["company", "object_type", "object_id"], name="ix_arenda_audit_obj")]
+from .models_access import ArendaSecurity  # noqa: E402,F401  (этап 5: доступы)

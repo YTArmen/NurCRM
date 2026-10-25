@@ -47,6 +47,8 @@ def get_ctx(request) -> Ctx:
     if ctx is not None:
         return ctx
     user = request.user
+    from . import security
+    security.check_request_token(request)  # сеанс не завершён (смена пароля / закрытие доступа)
     company, owns = _company_of(user)
     if company is None:
         raise ApiError("permission_denied", "У пользователя нет компании.", status_code=403)

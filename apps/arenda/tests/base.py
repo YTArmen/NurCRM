@@ -43,3 +43,33 @@ class ArendaBase(APITestCase):
         body = {"tenant": tenant["id"], "units": [u["id"] for u in units], "start_date": start, "end_date": end,
                 "pay_day": 10, **kw}
         return self.client.post("/api/arenda/leases/", body, format="json")
+
+
+# ---- помощники этапов 5–6 (ORM напрямую, чтобы не зависеть от чужих эндпоинтов)
+def orm_lease(base, tenant, units, start, end=None, branch=None, **kw):
+    from apps.arenda.models import Lease, Unit
+
+    l = Lease.objects.create(company=base.company, branch=branch or base.branch, tenant_id=tenant["id"],
+                             start_date=start, end_date=end, status=kw.pop("status", "active"),
+                             label=kw.pop("label", "А-2026/001"), **kw)
+    l.units.set(Unit.objects.filter(id__in=[u["id"] for u in units]))
+    return l
+
+
+def orm_charge(base, tenant, lease, due, amount, kind="rent", branch=None):
+    from apps.arenda.models import Charge
+
+    return Charge.objects.create(company=base.company, branch=branch or lease.branch, tenant_id=tenant["id"],
+                                 lease=lease, kind=kind, period=due.replace(day=1), amount=amount, due_date=due)
+
+
+def orm_payment(base, tenant, amount, day, branch=None, method="cash"):
+    from datetime import datetime
+
+    from django.utils import timezone
+
+    from apps.arenda.models import Payment
+
+    return Payment.objects.create(
+        company=base.company, branch=branch or base.branch, tenant_id=tenant["id"] if tenant else None,
+        amount=amount, method=method, paid_at=timezone.make_aware(datetime(day.year, day.month, day.day, 12, 0)))
