@@ -2825,6 +2825,62 @@ class SaleAddItemAPIView(MarketCashierOnlyMixin, APIView):
         return resp
 
 
+def _checkout_value_error_body(e, cart, cash_received=None) -> dict:
+    """ТЗ Н-15: машинный код к ValueError из checkout_cart/mark_paid; `detail` остаётся как был."""
+    msg = str(e)
+    body = {"detail": msg}
+    code = None
+    if msg.startswith("Сумма оплат"):
+        code = "mixed_sum_mismatch"
+        body["total"] = fmt_money(cart.total)
+    elif msg.startswith("Сумма, полученная наличными"):
+        code = "cash_less_than_total"
+        body["total"] = fmt_money(cart.total)
+        body["cash_received"] = fmt_money(cash_received or Decimal("0.00"))
+    elif "имеет размеры/цвета" in msg:
+        code = "variant_required"
+    elif msg == "Вариант позиции не найден.":
+        code = "variant_not_found"
+    elif msg == "Товар позиции не найден.":
+        code = "product_not_found"
+    if code:
+        body["code"] = code
+        body["errors"] = [{"index": None, "code": code, "detail": msg}]
+    return body
+
+
+def _raise_checkout_serializer_error(errors, cart, data):
+    """ТЗ Н-15: ошибки оплаты получают коды mixed_sum_mismatch / cash_less_than_total, ключи полей — прежние."""
+    from core.exceptions import ApiError, _flatten_fields
+
+    def _texts(key):
+        v = errors.get(key)
+        if isinstance(v, (list, tuple)):
+            return " ".join(str(x) for x in v)
+        return str(v or "")
+
+    code = None
+    extra = {}
+    if "должна равняться сумме чека" in _texts("payments"):
+        code = "mixed_sum_mismatch"
+        extra = {"total": fmt_money(cart.total)}
+    elif "меньше наличной части" in _texts("cash_received"):
+        code = "cash_less_than_total"
+        raw = data.get("cash_received") if hasattr(data, "get") else None
+        try:
+            received = Decimal(str(raw))
+        except Exception:  # noqa: BLE001
+            received = Decimal("0.00")
+        extra = {"total": fmt_money(cart.total), "cash_received": fmt_money(received)}
+    if code is None:
+        raise ValidationError(errors)
+    detail = _texts("payments") or _texts("cash_received")
+    top = dict(errors)
+    top.update(extra)
+    top["errors"] = [{"index": None, "code": code, "detail": detail, **extra}]
+    raise ApiError(code, detail, fields=_flatten_fields(dict(errors)), top=top)
+
+
 class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -2832,7 +2888,8 @@ class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
     def post(self, request, pk, *args, **kwargs):
         return self.checkout(request, pk, request.data)
 
-    def checkout(self, request, pk, data, *, allow_offset=False):
+    def checkout(self, request, pk, data, *, allow_offset=False, force_negative_stock=False, lenient_variants=False):
+        # ТЗ Н-15: force_negative_stock/lenient_variants — только для офлайн-досылки (pos/checkout/ с offline=true).
         with transaction.atomic():
             cart = get_object_or_404(
                 Cart.objects.select_related("company", "branch", "user", "shift"),
@@ -2844,11 +2901,12 @@ class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
             ser = CheckoutSerializer(
                 data=data, context={"request": request, "cart": cart, "allow_offset": allow_offset}
             )
-            ser.is_valid(raise_exception=True)
+            if not ser.is_valid():
+                _raise_checkout_serializer_error(ser.errors, cart, data)
 
             print_receipt = ser.validated_data["print_receipt"]
             allow_minus = bool(ser.validated_data.get("allow_minus"))
-            can_minus = allow_minus and _is_owner_like(request.user)
+            can_minus = (allow_minus and _is_owner_like(request.user)) or bool(force_negative_stock)
             client_id = ser.validated_data.get("client_id")
             payment_method = ser.validated_data.get("payment_method") or Sale.PaymentMethod.CASH
             cash_received = ser.validated_data.get("cash_received") or Decimal("0.00")
@@ -2889,8 +2947,17 @@ class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
 
             cart.recalc()
             if not payments and payment_method == Sale.PaymentMethod.CASH and cash_received < cart.total:
+                # ТЗ Н-15: код и суммы; старый ключ detail сохранён
+                transaction.set_rollback(True)
                 return Response(
-                    {"detail": "Сумма, полученная наличными, меньше суммы продажи."},
+                    {
+                        "detail": "Сумма, полученная наличными, меньше суммы продажи.",
+                        "code": "cash_less_than_total",
+                        "total": fmt_money(cart.total),
+                        "cash_received": fmt_money(cash_received),
+                        "errors": [{"index": None, "code": "cash_less_than_total",
+                                    "total": fmt_money(cart.total), "cash_received": fmt_money(cash_received)}],
+                    },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -2921,11 +2988,24 @@ class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
                     consultant=consultant_obj,
                     consultant_commission_enabled=consultant_comm_enabled,
                     consultant_commission_percent=consultant_comm_pct,
+                    lenient_variants=lenient_variants,
                 )
             except NotEnoughStock as e:
-                return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+                transaction.set_rollback(True)
+                errs = [
+                    {"index": None, "code": "insufficient_stock", "detail": str(e),
+                     "product_id": str(sh["product_id"]),
+                     "variant_id": str(sh["variant_id"]) if sh.get("variant_id") else None,
+                     "available": str(sh["available"]), "requested": str(sh["requested"])}
+                    for sh in getattr(e, "shortages", [])
+                ] or [{"index": None, "code": "insufficient_stock", "detail": str(e)}]
+                return Response(
+                    {"detail": str(e), "code": "insufficient_stock", "errors": errs},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             except ValueError as e:
-                return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+                transaction.set_rollback(True)
+                return Response(_checkout_value_error_body(e, cart, cash_received), status=status.HTTP_400_BAD_REQUEST)
 
             cons_name = None
             if sale.consultant:
@@ -2937,6 +3017,7 @@ class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
 
             payload = {
                 "sale_id": str(sale.id),
+                "number": sale.doc_number,  # ТЗ Н-15: постоянный номер чека во всех ответах
                 "status": sale.status,
                 "subtotal": fmt_money(sale.subtotal),
                 "discount_total": fmt_money(sale.discount_total),

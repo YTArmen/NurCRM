@@ -42,6 +42,7 @@ from apps.main.models import (
 from apps.main.pos_serializers import MoneyField, QtyField, _is_owner_like
 from apps.main.pos_utils import money, qty3
 from apps.main.views import CompanyBranchRestrictedMixin, _filter_clients_visible_for_user
+from core.exceptions import ApiError
 
 Q2 = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -66,6 +67,23 @@ def _company(request):
 # ======================================================================
 # Продажа одним запросом
 # ======================================================================
+
+MAX_CHECKOUT_ITEMS = 1000  # ТЗ Н-15: больше позиций в одном чеке не принимаем
+TOTAL_TOLERANCE = Decimal("0.01")
+
+
+def _line_error(code, idx, detail, *, http=400, **extra):
+    """
+    ТЗ Н-15: отказ по строке чека. Ключи `items` ({индекс: текст}) и `fields` остаются как раньше,
+    добавлены `code` и `errors[]` с `index` (с 0).
+    """
+    entry = {"index": idx, "code": code, "detail": detail, **extra}
+    top = {"errors": [entry]}
+    fields = None
+    if idx is not None:
+        top["items"] = {idx: detail}
+        fields = {f"items[{idx}]": [detail]}
+    return ApiError(code, detail, status_code=http, top=top, fields=fields)
 
 class QuickCheckoutItemSerializer(serializers.Serializer):
     custom = serializers.BooleanField(required=False, default=False)
@@ -119,6 +137,8 @@ class QuickCheckoutPaymentSerializer(serializers.Serializer):
     card_method = serializers.CharField(required=False, allow_blank=True)
     prepayment_method = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     payments = serializers.ListField(child=serializers.DictField(), required=False)
+    # ТЗ Н-15: срок долга одной датой (без отдельного PATCH сделки)
+    debt_due_date = serializers.DateField(required=False, allow_null=True)
 
     def to_internal_value(self, data):
         # ТЗ 12.9: старое имя cash_received принимается как received.
@@ -136,6 +156,8 @@ class QuickCheckoutSerializer(serializers.Serializer):
         max_digits=5, decimal_places=2, required=False, allow_null=True, min_value=0, max_value=100
     )
     bonus_redeemed = MoneyField(required=False, allow_null=True)
+    # ТЗ Н-15: итог, который видит кассир; расхождение с серверным > 0.01 → 409 total_mismatch
+    expected_total = MoneyField(required=False, allow_null=True)
     payment = QuickCheckoutPaymentSerializer()
     prepayment_method = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     consultant_id = serializers.UUIDField(required=False, allow_null=True)
@@ -186,6 +208,11 @@ class QuickCheckoutSerializer(serializers.Serializer):
 
 
 def _quick_result(sale: Sale) -> dict:
+    if not sale.doc_number:
+        # ТЗ Н-15: номер есть в любом ответе продажи, в том числе у старых чеков без номера
+        from apps.main.utils_numbers import ensure_sale_doc_number
+
+        ensure_sale_doc_number(sale)
     return {
         "id": str(sale.id),
         "number": sale.doc_number,
@@ -388,10 +415,22 @@ class PosQuickCheckoutAPIView(APIView):
         if existing:
             return Response({**_quick_result(existing), "replayed": True}, status=status.HTTP_200_OK)
 
+        self._precheck_items(request.data)
         ser = QuickCheckoutSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
         user = request.user
+        # ТЗ Н-15: офлайн-досылка (offline + sold_at): цены кассы, остаток в минус, вариант не обязателен
+        self._offline = bool(data.get("offline") and data.get("offline_created_at"))
+        self._warnings = []
+        self._variant_missing = set()
+        self._index_by_identity = {id(it): i for i, it in enumerate(data["items"])}
+        self._index_by_key = {}
+        for i, it in enumerate(data["items"]):
+            self._index_by_key.setdefault((it.get("product"), it.get("variant")), i)
+        self._index_by_product = {}
+        for i, it in reversed(list(enumerate(data["items"]))):
+            self._index_by_product[it.get("product")] = i
 
         try:
             with transaction.atomic():
@@ -428,11 +467,13 @@ class PosQuickCheckoutAPIView(APIView):
                     is_wholesale=bool(data.get("is_wholesale")),
                 )
                 max_dp = getattr(company, "max_discount_percent", None)
-                limit_discounts = max_dp is not None and not _is_admin_for_discounts(user)
+                # В офлайн-досылке продажа уже состоялась по ценам кассы: лимит скидок не применяем
+                limit_discounts = max_dp is not None and not _is_admin_for_discounts(user) and not self._offline
                 self._add_items(cart, data["items"], limit_discounts, max_dp)
 
                 bonus = money(data.get("bonus_redeemed") or ZERO)
                 self._apply_order_discount(cart, data, bonus, limit_discounts, max_dp)
+                self._check_expected_total(cart, data)
 
                 client = None
                 if data.get("client"):
@@ -443,9 +484,13 @@ class PosQuickCheckoutAPIView(APIView):
                     if bonus > (client.bonus_balance or ZERO):
                         raise ValidationError({"bonus_redeemed": "Недостаточно бонусов у клиента."})
 
-                resp = SaleCheckoutAPIView().checkout(request, cart.id, self._checkout_data(data, cart))
+                resp = SaleCheckoutAPIView().checkout(
+                    request, cart.id, self._checkout_data(data, cart),
+                    force_negative_stock=self._offline, lenient_variants=self._offline,
+                )
                 if resp.status_code >= 400:
                     transaction.set_rollback(True)
+                    self._fill_error_indexes(resp)
                     return resp
 
                 sale = Sale.objects.select_for_update().get(pk=resp.data["sale_id"])
@@ -462,6 +507,7 @@ class PosQuickCheckoutAPIView(APIView):
                     )
                 # Хук для проверок после создания чека (лимиты долга и т.п.): исключение откатывает всю транзакцию.
                 self.after_sale_created(request, sale, client, data)
+                self._apply_debt_due_date(sale, data)
                 sale.idempotency_key = key
                 Sale.objects.filter(pk=sale.pk).update(
                     idempotency_key=key,
@@ -477,7 +523,17 @@ class PosQuickCheckoutAPIView(APIView):
             raise
         except ValidationError as e:
             if isinstance(e.detail, dict) and e.detail.get("_discount_limit"):
-                return Response(_discount_limit_error(max_dp), status=status.HTTP_400_BAD_REQUEST)
+                body = _discount_limit_error(max_dp)
+                # ТЗ Н-15: прежний code «discount_limit» остаётся; в errors[] — новый код и номер строки
+                body["errors"] = [{
+                    "index": getattr(e, "index", None), "code": "discount_limit_exceeded",
+                    "detail": body["detail"], "max_discount_percent": str(max_dp),
+                }]
+                return Response(body, status=status.HTTP_400_BAD_REQUEST)
+            if isinstance(e.detail, dict) and e.detail.get("code") and "errors" not in e.detail:
+                code = e.detail["code"]
+                code = code[0] if isinstance(code, (list, tuple)) else code
+                e.detail["errors"] = [{"index": None, "code": str(code), "detail": str(e.detail.get("detail") or "")}]
             raise
 
         sale.refresh_from_db()
@@ -485,6 +541,13 @@ class PosQuickCheckoutAPIView(APIView):
         for k in ("cashflows", "receipt_print_path", "ekassa", "payments"):
             if k in resp.data:
                 body[k] = resp.data[k]
+        if self._offline:
+            # ТЗ Н-15: что допущено при досылке — остаток в минус, вариант не выбран
+            for it in body["items"]:
+                if it["product"] in self._variant_missing and not it["variant"]:
+                    it["variant_missing"] = True
+            if self._warnings:
+                body["warnings"] = self._warnings
         return Response(body, status=status.HTTP_201_CREATED)
 
     # --- helpers ---
@@ -492,54 +555,176 @@ class PosQuickCheckoutAPIView(APIView):
     def after_sale_created(self, request, sale, client, data):
         """Переопределяется в apps.possync: проверки внутри транзакции продажи."""
 
+    # --- ТЗ Н-15 ---
+
+    def _precheck_items(self, raw):
+        """Ограничение на число позиций и общее правило для custom-строк с отрицательной ценой."""
+        items = raw.get("items") if hasattr(raw, "get") else None
+        if not isinstance(items, list):
+            return
+        if len(items) > MAX_CHECKOUT_ITEMS:
+            raise ApiError(
+                "too_many_items", f"В чеке не больше {MAX_CHECKOUT_ITEMS} позиций.",
+                top={"limit": MAX_CHECKOUT_ITEMS, "count": len(items),
+                     "errors": [{"index": None, "code": "too_many_items", "detail": f"Не больше {MAX_CHECKOUT_ITEMS} позиций."}]},
+            )
+        for idx, it in enumerate(items):
+            if isinstance(it, dict) and it.get("custom"):
+                try:
+                    neg = Decimal(str(it.get("price"))) < 0
+                except Exception:  # noqa: BLE001 — остальное проверит сериализатор
+                    neg = False
+                if neg:
+                    raise _line_error(
+                        "negative_price", idx,
+                        "Цена своей позиции не может быть отрицательной. Для уменьшения суммы используйте скидку.",
+                    )
+
+    def _orig_index(self, pos, item):
+        """Индекс строки в теле запроса (после слияния упаковок позиции в списке могут сдвинуться)."""
+        by_id = getattr(self, "_index_by_identity", None)
+        if by_id is None:
+            return pos
+        if id(item) in by_id:
+            return by_id[id(item)]
+        return self._index_by_key.get((item.get("product"), item.get("variant")), pos)
+
+    def _fill_error_indexes(self, resp):
+        """Проставляет index в errors[] отказа по остатку: ищем первую строку с этим товаром/вариантом."""
+        data = getattr(resp, "data", None)
+        if not isinstance(data, dict):
+            return
+        for e in data.get("errors") or []:
+            if e.get("index") is not None or not e.get("product_id"):
+                continue
+            pid = uuid.UUID(e["product_id"])
+            vid = uuid.UUID(e["variant_id"]) if e.get("variant_id") else None
+            idx = self._index_by_key.get((pid, vid)) if vid else None
+            if idx is None:
+                idx = self._index_by_product.get(pid)
+            e["index"] = idx
+
+    def _check_expected_total(self, cart, data):
+        expected = data.get("expected_total")
+        if expected is None:
+            return
+        cart.recalc()
+        server_total = money(cart.total or ZERO)
+        if abs(server_total - money(expected)) <= TOTAL_TOLERANCE:
+            return
+        lines = []
+        for i, ci in enumerate(CartItem.objects.filter(cart=cart)):
+            base = money((ci.unit_price or ZERO) * (ci.quantity or ZERO))
+            lines.append({
+                "index": i,
+                "product": str(ci.product_id) if ci.product_id else None,
+                "variant": str(ci.variant_id) if ci.variant_id else None,
+                "name": ci.custom_name or None,
+                "qty": str(ci.quantity),
+                "price": str(money(ci.unit_price or ZERO)),
+                "discount": str(money(ci.line_discount or ZERO)),
+                "amount": str(money(base - money(ci.line_discount or ZERO))),
+            })
+        raise ApiError(
+            "total_mismatch", "Итог чека на сервере отличается от итога кассы.",
+            status_code=status.HTTP_409_CONFLICT,
+            top={
+                "server_total": str(server_total), "expected_total": str(money(expected)), "lines": lines,
+                "errors": [{"index": None, "code": "total_mismatch", "server_total": str(server_total),
+                            "expected_total": str(money(expected))}],
+            },
+        )
+
+    def _apply_debt_due_date(self, sale, data):
+        """payment.debt_due_date → срок долговой сделки (через общий график v1/v2, один взнос на эту дату)."""
+        due = (data.get("payment") or {}).get("debt_due_date")
+        if due is None or data.get("debt_schedule") not in (None, "", [], {}):
+            return  # явный график важнее
+        from apps.possync.schedule import apply_debt_schedule
+
+        deal = ClientDeal.objects.filter(sale=sale, kind=ClientDeal.Kind.DEBT).order_by("created_at").first()
+        if deal is None:
+            return
+        if due < timezone.localdate() and not self._offline:
+            raise ApiError(
+                "invalid_debt_schedule", "Срок долга не может быть в прошлом.",
+                fields={"payment.debt_due_date": ["Дата в прошлом."]},
+            )
+        apply_debt_schedule(sale, {
+            "debt_schedule": [{"due_date": due.isoformat(), "amount": str(deal.debt_amount)}],
+            "schedule_version": data.get("schedule_version"),
+        })
+
     def _add_items(self, cart, items, limit_discounts, max_dp):
+        """
+        Строки чека одним пакетом: товары, упаковки и варианты читаются тремя запросами на весь чек,
+        CartItem пишутся bulk_create, итоги корзины считаются один раз (ТЗ Н-15: чек до 1000 позиций).
+        """
+        from apps.main.pos_utils import line_qty_consume_units
         from apps.main.pos_views import _q2, default_unit_price_for_package
 
-        product_ids = [it["product"] for it in items if not it.get("custom")]
-        products = {p.id: p for p in Product.objects.filter(company_id=cart.company_id, id__in=product_ids)}
-        performers = resolve_performers(cart.company_id, [it.get("performer") for it in items])
-        for idx, it in enumerate(items):
+        offline = bool(getattr(self, "_offline", False))
+        cid = cart.company_id
+        product_ids = {it["product"] for it in items if not it.get("custom")}
+        products = {p.id: p for p in Product.objects.filter(company_id=cid, id__in=product_ids)}
+        pkg_ids = {it["sale_package"] for it in items if it.get("sale_package")}
+        packages = {p.id: p for p in ProductPackage.objects.filter(company_id=cid, id__in=pkg_ids)}
+        var_ids = {it["variant"] for it in items if it.get("variant")}
+        variants = {
+            v.id: v for v in ProductVariant.objects.filter(company_id=cid, id__in=var_ids).select_related("product")
+        }
+        with_variants = set(
+            ProductVariant.objects.filter(product_id__in=product_ids, is_active=True).values_list("product_id", flat=True)
+        )
+        performers = resolve_performers(cid, [it.get("performer") for it in items])
+        demand_p, demand_v = defaultdict(lambda: Decimal("0")), defaultdict(lambda: Decimal("0"))
+
+        rows = []
+        for pos, it in enumerate(items):
+            idx = self._orig_index(pos, it)
             qty = qty3(it["qty"])
             performer = performers.get(it.get("performer"))
             discount = money(it.get("discount") or ZERO)
             if it.get("custom"):
                 price = _q2(it["price"])
+                if price < 0:
+                    raise _line_error("negative_price", idx, "Цена своей позиции не может быть отрицательной.")
                 if discount > price * qty:
                     raise ValidationError({"items": {idx: "Скидка больше суммы позиции."}})
-                CartItem(
-                    company=cart.company,
-                    branch=cart.branch,
-                    cart=cart,
-                    product=None,
-                    custom_name=it["name"].strip(),
-                    unit_price=price,
-                    quantity=qty,
-                    line_discount=discount,
-                    manual_discount=discount,
-                    performer=performer,
-                ).save(skip_full_clean=True)
+                rows.append(CartItem(
+                    company_id=cid, branch_id=cart.branch_id, cart=cart, product=None,
+                    custom_name=it["name"].strip(), unit_price=price, quantity=qty,
+                    line_discount=discount, manual_discount=discount, performer=performer,
+                ))
                 continue
 
             product = products.get(it["product"])
             if product is None:
-                raise ValidationError({"items": {idx: "Товар не найден."}})
+                raise _line_error("product_not_found", idx, "Товар не найден.")
             pkg = None
             if it.get("sale_package"):
-                pkg = ProductPackage.objects.filter(
-                    id=it["sale_package"], product_id=product.id, company_id=cart.company_id
-                ).first()
-                if pkg is None:
-                    raise ValidationError({"items": {idx: "Упаковка не найдена."}})
+                pkg = packages.get(it["sale_package"])
+                if pkg is None or pkg.product_id != product.id:
+                    raise _line_error("package_not_found", idx, "Упаковка не найдена.")
             variant = None
             if it.get("variant"):
-                variant = ProductVariant.objects.filter(
-                    id=it["variant"], product_id=product.id, company_id=cart.company_id
-                ).first()
+                variant = variants.get(it["variant"])
+                if variant is not None and variant.product_id != product.id:
+                    variant = None
                 if variant is None:
-                    raise ValidationError({"items": {idx: "Вариант не найден."}})
-            else:
-                if product.variants.filter(is_active=True).exists():
-                    raise ValidationError({"items": {idx: f"Товар «{product.name}» имеет размеры/цвета. Выберите размер/цвет."}})
+                    if not offline:
+                        raise _line_error("variant_not_found", idx, "Вариант не найден.")
+                    # ТЗ Н-15: офлайн — списываем с товара, помечаем variant_missing
+                    self._variant_missing.add(product.id)
+                    self._warnings.append({"code": "variant_missing", "index": idx})
+            elif product.id in with_variants:
+                if not offline:
+                    raise _line_error(
+                        "variant_required", idx,
+                        f"Товар «{product.name}» имеет размеры/цвета. Выберите размер/цвет.",
+                    )
+                self._variant_missing.add(product.id)
+                self._warnings.append({"code": "variant_missing", "index": idx})
             default_price = _q2(variant.effective_price) if variant else _q2(default_unit_price_for_package(product, pkg))
             price = _q2(it["price"]) if it.get("price") is not None else default_price
             wholesale_price = _q2(Decimal(str(getattr(product, "wholesale_price", None) or 0)))
@@ -552,31 +737,40 @@ class PosQuickCheckoutAPIView(APIView):
             if discount > base:
                 raise ValidationError({"items": {idx: "Скидка больше суммы позиции."}})
             if limit_discounts and not (is_wholesale and wholesale_price > 0 and price == wholesale_price) and discount > money(base * Decimal(str(max_dp)) / Decimal("100")):
-                raise ValidationError({"_discount_limit": True})
-            if discount <= 0 and not (is_wholesale and wholesale_price > 0 and price == wholesale_price):
+                exc = ValidationError({"_discount_limit": True})
+                exc.index = idx
+                raise exc
+            if not offline and discount <= 0 and not (is_wholesale and wholesale_price > 0 and price == wholesale_price):
                 min_price = _q2(Decimal(str(getattr(product, "purchase_price", None) or 0)))
                 if pkg:
                     ipp = Decimal(str(pkg.quantity_in_package or 0))
                     min_price = _q2(min_price / ipp) if ipp > 0 else min_price
                 if price < min_price:
-                    raise ValidationError(
-                        {"items": {idx: f"Цена продажи не может быть ниже закупочной ({min_price})."}}
+                    raise _line_error(
+                        "price_below_cost", idx,
+                        f"Цена продажи не может быть ниже закупочной ({min_price}).",
+                        min_price=str(min_price), price=str(price),
                     )
-            CartItem(
-                company=cart.company,
-                branch=cart.branch,
-                cart=cart,
-                product=product,
-                sale_package=pkg,
-                variant=variant,
-                performer=performer,
-                quantity=qty,
-                unit_price=price,
-                line_discount=discount,
-                manual_discount=discount,
-                price_manually_edited=price != default_price,
-                is_wholesale=is_wholesale,
-            ).save(skip_full_clean=True)
+            if offline and product.kind != Product.Kind.SERVICE:
+                try:
+                    units = line_qty_consume_units(qty, pkg)
+                except ValueError:
+                    units = qty
+                have_p = Decimal(str(product.quantity or 0))
+                demand_p[product.id] += units
+                over = demand_p[product.id] > have_p
+                if variant is not None:
+                    demand_v[variant.id] += units
+                    over = over or demand_v[variant.id] > Decimal(str(variant.quantity or 0))
+                if over:
+                    self._warnings.append({"code": "negative_stock", "index": idx})
+            rows.append(CartItem(
+                company_id=cid, branch_id=cart.branch_id, cart=cart, product=product,
+                sale_package=pkg, variant=variant, performer=performer, quantity=qty,
+                unit_price=price, line_discount=discount, manual_discount=discount,
+                price_manually_edited=price != default_price, is_wholesale=is_wholesale,
+            ))
+        CartItem.objects.bulk_create(rows)
         cart.recalc()
 
     def _apply_order_discount(self, cart, data, bonus, limit_discounts, max_dp):

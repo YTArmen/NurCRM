@@ -15,10 +15,13 @@ from apps.main.services.product_list_filters import apply_product_list_filters  
 
 
 class NotEnoughStock(Exception):
-    pass
+    # ТЗ Н-15: shortages — все нехватки чека [{product_id, variant_id, available, requested}] для errors[]
+    def __init__(self, *args, shortages=None):
+        super().__init__(*args)
+        self.shortages = shortages or []
 
 
-@transaction.atomic
+# ТЗ Н-15: был @transaction.atomic — savepoint на каждую строку чека, а функция ничего не пишет
 def _performer_commission(item) -> Decimal:
     """Процент мастеру с суммы строки (процент задаётся у услуги)."""
     pct = getattr(getattr(item, "product", None), "performer_commission_percent", None)
@@ -44,6 +47,7 @@ def checkout_cart(
     consultant=None,
     consultant_commission_enabled: bool = False,
     consultant_commission_percent=None,
+    lenient_variants: bool = False,
 ) -> Sale:
     """
     Перенос корзины в Sale (статус NEW) и списание остатков.
@@ -86,6 +90,8 @@ def checkout_cart(
         ProductVariant.objects.filter(product_id__in=prod_ids, is_active=True).values_list("product_id", flat=True)
     )
     for it in items:
+        if lenient_variants:
+            break  # ТЗ Н-15: офлайн-досылка — вариант не выбран, списываем с товара
         if it.product_id and it.product_id in active_variant_pids and not it.variant_id:
             p_name = products[it.product_id].name if it.product_id in products else "Товар"
             raise ValueError(f"Товар «{p_name}» имеет размеры/цвета. Выберите размер/цвет.")
@@ -100,25 +106,31 @@ def checkout_cart(
                 raise ValueError("Вариант позиции не найден.")
             consume_by_vid[it.variant_id] += cart_item_stock_consume_units(it)
     if not allow_negative_stock:
+        shortages, first_msg = [], None
         for vid, need in consume_by_vid.items():
             v = variants[vid]
             if need > Decimal(str(v.quantity or 0)):
-                raise NotEnoughStock(
-                    f"Недостаточно остатка «{products[v.product_id].name}» {v.size} {v.color}".strip()
-                    + f". Требуется {need}, доступно {v.quantity}."
-                )
-
-    if not allow_negative_stock:
+                if first_msg is None:
+                    first_msg = (
+                        f"Недостаточно остатка «{products[v.product_id].name}» {v.size} {v.color}".strip()
+                        + f". Требуется {need}, доступно {v.quantity}."
+                    )
+                shortages.append({"product_id": v.product_id, "variant_id": vid,
+                                  "available": Decimal(str(v.quantity or 0)), "requested": need})
         for pid, need in consume_by_pid.items():
             p = products[pid]
             if getattr(p, "kind", None) == Product.Kind.SERVICE:
                 continue
             have = Decimal(str(p.quantity or 0))
             if need > have:
-                raise NotEnoughStock(
-                    f"Недостаточно остатка для «{getattr(p, 'name', '') or p.id}». "
-                    f"Требуется {need} (в учётных единицах склада), доступно {have}."
-                )
+                if first_msg is None:
+                    first_msg = (
+                        f"Недостаточно остатка для «{getattr(p, 'name', '') or p.id}». "
+                        f"Требуется {need} (в учётных единицах склада), доступно {have}."
+                    )
+                shortages.append({"product_id": pid, "variant_id": None, "available": have, "requested": need})
+        if shortages:
+            raise NotEnoughStock(first_msg, shortages=shortages)
 
     comm_enabled = bool(consultant and consultant_commission_enabled)
     comm_pct = (
@@ -225,9 +237,11 @@ def checkout_cart(
         def _send_webhooks():
             from apps.main.services.webhooks import send_product_webhook
 
+            # ТЗ Н-15: один запрос на все товары чека, а не по запросу на товар
+            fresh = {p.pk: p for p in Product.objects.filter(pk__in=changed_ids)}
             for pid in changed_ids:
                 try:
-                    prod = Product.objects.get(pk=pid)
+                    prod = fresh[pid]
                     send_product_webhook(prod, "product.updated")
                 except Exception:
                     logging.getLogger("crm.webhooks").error(
