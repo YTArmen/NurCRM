@@ -20,6 +20,7 @@ from rest_framework.pagination import PageNumberPagination
 
 from apps.construction.models import Cashbox, CashFlow, CashFlowCategory, CashShift
 from apps.users.permissions import read_only_guard
+from apps.users.permissions_flags import PosAccess, flag_guard, flag_permission, is_privileged, has_any_flag, denied  # ТЗ Н-16
 from apps.users.pin import pin_guard
 
 from apps.main.notifications_market import notify_shift_closed, notify_shift_opened
@@ -190,6 +191,7 @@ class CompanyBranchScopedMixin:
 # ─────────────────────────────────────────────────────────────
 # CASHBOXES
 # ─────────────────────────────────────────────────────────────
+@flag_guard("can_view_cashbox")  # ТЗ Н-16: касса компании — запись только с правом «Кассы»
 @read_only_guard("can_edit_cashbox")
 class CashboxListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIView):
     queryset = Cashbox.objects.select_related("company", "branch").order_by("-created_at")
@@ -394,6 +396,7 @@ class CashboxListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIView
         return Response(serializer.data)
 
 
+@flag_guard("can_view_cashbox")  # ТЗ Н-16: касса компании — запись только с правом «Кассы»
 @read_only_guard("can_edit_cashbox")
 class CashboxDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Cashbox.objects.select_related("company", "branch").prefetch_related(
@@ -540,6 +543,7 @@ class CashboxDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroy
 
 
 @read_only_guard("can_edit_cashbox")
+@flag_guard("can_view_cashbox")  # ТЗ Н-16: касса компании — запись только с правом «Кассы»
 class CashboxBulkDeleteView(CompanyBranchScopedMixin, APIView):
     """Archive/delete each requested cashbox independently.
 
@@ -626,6 +630,54 @@ def _parse_amount(raw, field: str):
     return value
 
 
+def add_permission_class(perm):
+    def deco(view_cls):
+        view_cls.permission_classes = [*list(view_cls.permission_classes), perm]
+        return view_cls
+    return deco
+
+
+
+class CashFlowWriteAccess(permissions.BasePermission):
+    """ТЗ Н-16: запись в cashflows — владелец/админ, право can_view_cashbox, либо операции
+    ящика СВОЕЙ смены (shift в запросе принадлежит этому кассиру; без shift — только если у него есть открытая смена)."""
+
+    def _own_open_shift(self, user, shift_id):
+        qs = CashShift.objects.filter(cashier_id=user.id)
+        if shift_id:
+            return qs.filter(pk=shift_id).exists()
+        return qs.filter(status=CashShift.Status.OPEN).exists()
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if request.method in permissions.SAFE_METHODS or is_privileged(user) or has_any_flag(user, ["can_view_cashbox"]):
+            return True
+        if request.method == "POST":
+            raw = request.data.get("shift") if hasattr(request.data, "get") else None
+            try:
+                ok = self._own_open_shift(user, raw or None)
+            except Exception:  # битый uuid в shift
+                ok = False
+            if ok:
+                return True
+        elif request.method in ("PUT", "PATCH", "DELETE"):
+            return True  # решает has_object_permission: только операции своей смены
+        raise denied("can_view_cashbox", "Операции с кассой компании недоступны; доступны только операции вашей смены.")
+
+    def has_object_permission(self, request, view, obj):
+        user = request.user
+        if request.method in permissions.SAFE_METHODS or is_privileged(user) or has_any_flag(user, ["can_view_cashbox"]):
+            return True
+        shift = getattr(obj, "shift", None)
+        if shift is not None and shift.cashier_id == user.id:
+            return True
+        raise denied("can_view_cashbox", "Операции с кассой компании недоступны; доступны только операции вашей смены.")
+
+
+
+@add_permission_class(CashFlowWriteAccess)  # ТЗ Н-16
 @read_only_guard("can_edit_cashbox")
 class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIView):
     queryset = CashFlow.objects.select_related(
@@ -784,6 +836,7 @@ class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIVie
         if isinstance(serializer.instance, CashFlow):
             log_cashflow(self.request, serializer.instance, "create", after=cashflow_snapshot(serializer.instance))
 
+@add_permission_class(CashFlowWriteAccess)  # ТЗ Н-16
 @read_only_guard("can_edit_cashbox")
 class CashFlowDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = CashFlow.objects.select_related(
@@ -1400,6 +1453,7 @@ class CashShiftDetailView(CompanyBranchScopedMixin, generics.RetrieveAPIView):
 
 
 class CashShiftOpenView(CompanyBranchScopedMixin, generics.CreateAPIView):
+    permission_classes = [permissions.IsAuthenticated, PosAccess]  # ТЗ Н-16
     """
     ✅ Открыть смену:
       - кассир открывает себе
@@ -1459,6 +1513,7 @@ class CashShiftCloseView(APIView):
 
 
 @read_only_guard("can_edit_cashbox")
+@flag_guard("can_view_cashbox")  # ТЗ Н-16: касса компании — запись только с правом «Кассы»
 class CashFlowBulkStatusUpdateView(CompanyBranchScopedMixin, generics.GenericAPIView):
     serializer_class = CashFlowBulkStatusSerializer
     CHUNK_SIZE = 1000

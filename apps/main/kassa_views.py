@@ -362,6 +362,9 @@ def _backdate_offline_sale(sale, at):
         ])
 
 
+from apps.users.permissions_flags import PosAccess  # noqa: E402  ТЗ Н-16
+
+
 class PosQuickCheckoutAPIView(APIView):
     """
     POST /api/main/pos/checkout/
@@ -371,7 +374,7 @@ class PosQuickCheckoutAPIView(APIView):
     возвращает уже созданную продажу (200), дубль не создаётся.
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, PosAccess]  # ТЗ Н-16
 
     def post(self, request, *args, **kwargs):
         from apps.main.pos_views import (
