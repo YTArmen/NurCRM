@@ -44,6 +44,10 @@ from apps.users.scale_views import send_products_to_scale, get_scale_api_token, 
 
 from .pin import PinSetView, PinVerifyView, PinSettingsView
 
+from .views_access import (  # ТЗ Н-16
+    AccessCodeVerifyAPIView, EmployeeAccessCodeDetailAPIView, EmployeeAccessCodesAPIView, EmployeeResetPasswordAPIView,
+)
+
 urlpatterns = [
     # 🔐 Авторизация / регистрация
     path('auth/register/', RegisterAPIView.as_view(), name='user-register'),
@@ -77,6 +81,11 @@ urlpatterns = [
     path('employees/create/', EmployeeCreateAPIView.as_view(), name='employee-create'),
     path('employees/<uuid:pk>/', EmployeeDetailAPIView.as_view(), name='employee-detail'),
     path('employees/<uuid:pk>/delete/', EmployeeDestroyAPIView.as_view(), name='employee-delete'),
+    # ТЗ Н-16: сброс пароля и коды доступа сотрудников
+    path('employees/<uuid:pk>/reset-password/', EmployeeResetPasswordAPIView.as_view(), name='employee-reset-password'),
+    path('employees/<uuid:pk>/access-codes/', EmployeeAccessCodesAPIView.as_view(), name='employee-access-codes'),
+    path('employees/<uuid:pk>/access-codes/<str:action>/', EmployeeAccessCodeDetailAPIView.as_view(), name='employee-access-code'),
+    path('access-codes/verify/', AccessCodeVerifyAPIView.as_view(), name='access-code-verify'),
 
     # 👤 Личный кабинет
     path('profile/', CurrentUserAPIView.as_view(), name='user-me'),
