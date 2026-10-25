@@ -544,7 +544,7 @@ class PosQuickCheckoutAPIView(APIView):
         if self._offline:
             # ТЗ Н-15: что допущено при досылке — остаток в минус, вариант не выбран
             for it in body["items"]:
-                if it["product"] in self._variant_missing and not it["variant"]:
+                if it["product"] in {str(x) for x in self._variant_missing} and not it["variant"]:
                     it["variant_missing"] = True
             if self._warnings:
                 body["warnings"] = self._warnings

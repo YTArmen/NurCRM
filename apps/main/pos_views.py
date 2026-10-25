@@ -5450,6 +5450,13 @@ class SaleAddCustomItemAPIView(MarketCashierOnlyMixin, APIView):
             return Response({"name": "Название не может быть пустым."}, status=400)
 
         price = _q2(ser.validated_data["price"])
+        if price < 0:
+            # ТЗ Н-15: то же правило, что у pos/checkout/ — отрицательная цена своей позиции не принимается
+            # (раньше строка молча обнулялась в итоге чека). Уменьшать сумму — скидкой.
+            from core.exceptions import ApiError
+
+            msg = "Цена своей позиции не может быть отрицательной. Для уменьшения суммы используйте скидку."
+            raise ApiError("negative_price", msg, fields={"price": [msg]}, top={"price": msg})
         qty = _to_decimal(ser.validated_data.get("quantity", "1.000"), default=Decimal("1.000"))
         qty = qty3(qty)
 

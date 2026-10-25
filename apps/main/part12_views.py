@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 
 from apps.main.kassa_views import _company
 from apps.main.models import Product, ProductAlternateBarcode
+from core.exceptions import ApiError, api_exception_handler
 
 
 class BarcodeDuplicatesAPIView(APIView):
@@ -67,7 +68,8 @@ class PosCheckoutBatchAPIView(APIView):
         from django.http import Http404
         from rest_framework.exceptions import APIException, ValidationError
 
-        from apps.main.kassa_views import PosQuickCheckoutAPIView
+        # ТЗ Н-15: тот же класс, что у pos/checkout/ (упаковки sale_package_id, лимиты долга, график, ответ с остатками)
+        from apps.possync.views import PosQuickCheckoutGuardedAPIView as PosQuickCheckoutAPIView
 
         items = request.data.get("items") if isinstance(request.data, dict) else None
         if not isinstance(items, list) or not items:
@@ -96,7 +98,11 @@ class PosCheckoutBatchAPIView(APIView):
             except Http404:
                 row = {"idempotency_key": key, "status": 404, "detail": {"detail": "Не найдено."}}
             except APIException as e:
-                row = {"idempotency_key": key, "status": e.status_code, "detail": e.detail}
+                detail = e.detail
+                if isinstance(e, ApiError):
+                    # ТЗ Н-15: code/errors[]/total_mismatch и т.п. — как в обычном ответе
+                    detail = api_exception_handler(e, {}).data
+                row = {"idempotency_key": key, "status": e.status_code, "detail": detail}
             results.append(row)
         return Response({"results": results})
 
