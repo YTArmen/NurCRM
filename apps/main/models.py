@@ -742,6 +742,8 @@ class Product(models.Model):
     article = models.CharField("Артикул", max_length=64, blank=True)
 
     name = models.CharField("Название", max_length=255)
+    # ТЗ Н-33: таблица размеров для публичной карточки витрины
+    size_chart = models.ForeignKey("SizeChart", on_delete=models.SET_NULL, null=True, blank=True, related_name="products")
     description = models.TextField("Описание", blank=True, null=True)
     barcode = models.CharField("Штрихкод", max_length=64, null=True, blank=True)
 
@@ -3723,6 +3725,10 @@ class SupplierReceipt(models.Model):
     order = models.ForeignKey(
         "main.PurchaseOrder", on_delete=models.SET_NULL, null=True, blank=True, related_name="receipts",
     )
+    # ТЗ Н-33: скидка (сумма; процент — если задана в %) и доп. расходы прихода
+    discount = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"), db_default=Decimal("0.00"))
+    discount_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    extra_costs = models.JSONField(default=list, blank=True, db_default=[])
 
     class Meta:
         verbose_name = "Оприходование от поставщика"
@@ -3791,6 +3797,8 @@ class SupplierReceiptItem(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="supplier_receipt_items", db_index=True)
     qty = models.PositiveIntegerField()
     purchase_price = models.DecimalField(max_digits=11, decimal_places=3, null=True, blank=True)
+    # ТЗ Н-33: закупка за единицу с учётом скидки и доп. расходов (только если они переданы)
+    landed_price = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
 
     class Meta:
         verbose_name = "Строка оприходования"
@@ -7804,8 +7812,17 @@ class ShowcaseOrder(models.Model):
         related_name="+",
         verbose_name="Продажа на кассе",
     )
+    # ТЗ Н-33: код выдачи при самовывозе (4–6 цифр), генерируется при создании
+    pickup_code = models.CharField("Код выдачи", max_length=8, blank=True, default="", db_default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        if self._state.adding and not self.pickup_code:
+            import secrets as _secrets
+
+            self.pickup_code = "".join(_secrets.choice("0123456789") for _ in range(_secrets.choice((4, 5, 6))))
+        super().save(*args, **kwargs)
 
     class Meta:
         verbose_name = "Заказ с витрины"
@@ -8253,6 +8270,90 @@ class PosRequest(models.Model):
 
     def __str__(self):
         return f"PosRequest({self.kind}, {self.status})"
+
+# ---------------------------------------------------------------------------
+# ТЗ Н-32: медиа-хранилище и электронный чек; Н-33: таблица размеров
+# ---------------------------------------------------------------------------
+
+def main_media_upload_to(instance, filename):
+    return f"main_media/{instance.company_id}/{instance.id.hex}_{filename}"[:240]
+
+
+class MainMedia(models.Model):
+    """ТЗ Н-32 (1): файл компании (тема, фото товара, накладная), POST api/main/media/."""
+
+    class Purpose(models.TextChoices):
+        THEME = "theme", "Тема"
+        PRODUCT = "product", "Товар"
+        INVOICE = "invoice", "Накладная"
+        OTHER = "other", "Другое"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="main_media")
+    purpose = models.CharField(max_length=16, choices=Purpose.choices, default=Purpose.OTHER, db_index=True)
+    file = models.FileField(upload_to=main_media_upload_to, max_length=255)
+    size = models.PositiveIntegerField(default=0)
+    content_type = models.CharField(max_length=64, default="")
+    sha256 = models.CharField(max_length=64, default="", db_index=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Файл компании"
+        verbose_name_plural = "Файлы компании"
+        ordering = ["-created_at"]
+
+
+def _new_receipt_token():
+    import secrets as _secrets
+
+    return _secrets.token_urlsafe(24)
+
+
+class SaleReceiptLink(models.Model):
+    """ТЗ Н-32 (2): публичная ссылка на электронный чек (одна на продажу)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sale = models.OneToOneField(Sale, on_delete=models.CASCADE, related_name="public_link")
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="+")
+    token = models.CharField(max_length=64, unique=True, default=_new_receipt_token)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Публичная ссылка на чек"
+        verbose_name_plural = "Публичные ссылки на чеки"
+
+
+class SaleReceiptRating(models.Model):
+    """ТЗ Н-32 (2): оценка электронного чека покупателем (один раз на чек)."""
+
+    link = models.OneToOneField(SaleReceiptLink, on_delete=models.CASCADE, related_name="rating")
+    score = models.PositiveSmallIntegerField()
+    comment = models.TextField(blank=True, default="")
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Оценка чека"
+        verbose_name_plural = "Оценки чеков"
+
+
+class SizeChart(models.Model):
+    """ТЗ Н-33: таблица размеров витрины (showcase/size-charts/)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="size_charts")
+    name = models.CharField(max_length=128)
+    columns = models.JSONField(default=list, blank=True)
+    rows = models.JSONField(default=list, blank=True)
+    note = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Таблица размеров"
+        verbose_name_plural = "Таблицы размеров"
+        ordering = ["name"]
 
 
 from apps.main.telegram_bot.models import (

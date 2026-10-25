@@ -426,6 +426,7 @@ def _order_response(order, whatsapp_url=None) -> dict:
         "total": str(order.total),
         "delivery_fee": str(order.delivery_fee),
         "source": order.source,
+        "pickup_code": order.pickup_code,  # ТЗ Н-33
         "whatsapp_url": whatsapp_url,
         "created_at": order.created_at.isoformat(),
     }

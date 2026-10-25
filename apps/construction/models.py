@@ -78,6 +78,8 @@ class Cashbox(models.Model):
         EXPENSE_VARIABLE = "expense_variable", "Переменные расходы"
         EXPENSE_FIXED = "expense_fixed", "Постоянные расходы"
         DEBT = "debt", "Для долгов"
+        SAFE = "safe", "Сейф"  # ТЗ Н-33: не ящик кассы, наличные в смене не считает
+        BANK = "bank", "Расчётный счёт"  # ТЗ Н-33
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 

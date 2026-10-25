@@ -113,6 +113,7 @@ class ShowcaseEditorOptionsAPIView(EditorAPIView):
             "badges": ["hit", "sale", "new"],
             "media_kinds": list(ShowcaseMedia.Kind.values),
             "link_types": list(ds.LINK_TYPES),
+            "variant_pickers": list(ds.VARIANT_PICKERS),  # ТЗ Н-33
             "defaults": ds.default_document(self.company().name or "", self.company().phones_howcase),
         })
 
@@ -864,6 +865,14 @@ class ShowcaseOrderDetailAPIView(ShowcaseErrorMixin, generics.RetrieveUpdateAPIV
                     )
                 order.status = new_status
                 update_fields.append("status")
+
+            if "pickup_code" in request.data:  # ТЗ Н-33: код выдачи пишет владелец
+                code = str(request.data.get("pickup_code") or "").strip()
+                if code and not (code.isdigit() and 4 <= len(code) <= 6):
+                    raise ValidationError({"pickup_code": "Код выдачи — 4–6 цифр."})
+                if code != order.pickup_code:
+                    order.pickup_code = code
+                    update_fields.append("pickup_code")
 
             if sale_id:
                 if order.status == ShowcaseOrder.Status.CANCELED:

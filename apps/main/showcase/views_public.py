@@ -290,7 +290,7 @@ class PublicCompanyProductDetailAPIView(_CatalogMixin, generics.RetrieveAPIView)
         qs = (
             Product.objects
             .filter(company=company)  # ✅ без status фильтра
-            .select_related("brand", "category")
+            .select_related("brand", "category", "size_chart")
             .prefetch_related(
                 "images", "packages", "characteristics", "promotion_tiers",
                 Prefetch("variants", queryset=ProductVariant.objects.filter(is_active=True)),

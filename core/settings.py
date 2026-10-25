@@ -696,3 +696,7 @@ WAZZUP_DEFAULT_CHANNEL_ID = os.getenv("WAZZUP_DEFAULT_CHANNEL_ID", "")
 # Consulting CRM tenant provision default sector (Sector 'Магазин' / 'Маркет')
 CONSULTING_DEFAULT_CRM_SECTOR_ID = os.getenv("CONSULTING_DEFAULT_CRM_SECTOR_ID", "e9f05beb-5e14-4153-b523-4e1600c9b2e0")
 
+
+# ТЗ Н-32: квота медиа-хранилища на компанию (МБ) и шаблон ссылки на электронный чек
+COMPANY_MEDIA_QUOTA_MB = int(os.getenv("COMPANY_MEDIA_QUOTA_MB", "500"))
+RECEIPT_PUBLIC_URL_TEMPLATE = os.getenv("RECEIPT_PUBLIC_URL_TEMPLATE", "https://market.nurcrm.kg/receipt/{token}")

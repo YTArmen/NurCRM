@@ -1085,6 +1085,28 @@ def company_features_detail(company, *, plan_until=None):
     return [{"code": code, "until": until} for code, until in out.items()]
 
 
+def company_features_with_source(company, *, plan_until=None):
+    """ТЗ Н-32: [{code, until, source}], source: tariff | key | trial | support."""
+    from apps.users.models import CompanyAddon
+
+    out = {}
+    plan = getattr(company, "subscription_plan", None)
+    if plan is not None:
+        for code in plan.features.order_by("name").values_list("name", flat=True):
+            if code:
+                out[code] = {"code": code, "until": plan_until, "source": "tariff"}
+    for a in CompanyAddon.objects.filter(company=company).order_by("code"):
+        if a.is_effective():
+            out[a.code] = {"code": a.code, "until": a.until.isoformat() if a.until else None,
+                           "source": a.source if a.source in ("key", "trial", "support") else "support"}
+    if getattr(company, "can_view_showcase", False) and "showcase_editor" not in out:
+        out["showcase_editor"] = {"code": "showcase_editor", "until": plan_until, "source": "tariff"}
+    free = _client_app_free()
+    if free is not None and free[0] not in out:
+        out[free[0]] = {"code": free[0], "until": free[1], "source": "support"}
+    return list(out.values())
+
+
 class CompanySerializer(serializers.ModelSerializer):
     industry = IndustrySerializer(read_only=True)
     subscription_plan = SubscriptionPlanSerializer(read_only=True)

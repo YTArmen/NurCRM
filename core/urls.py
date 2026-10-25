@@ -24,6 +24,7 @@ from .views_version import ClientVersionView
 from .views_health import health_check
 from apps.main.telegram_bot.views_public import TelegramWebhookPublicView
 from apps.clientapp.landing import ReferralLandingView
+from apps.main.media_receipts import PublicReceiptAPIView, PublicReceiptPdfAPIView, PublicReceiptRatingAPIView
 
 if settings.ENABLE_API_DOCS:
     from rest_framework import permissions
@@ -76,6 +77,9 @@ apps_includes = [
 api_urlpatterns = [
     path("api/media-proxy/", media_proxy, name="media-proxy"),
     path("api/version/", ClientVersionView.as_view(), name="client-version"),
+    path("api/public/receipts/<str:token>/", PublicReceiptAPIView.as_view(), name="public-receipt"),  # ТЗ Н-32
+    path("api/public/receipts/<str:token>/pdf/", PublicReceiptPdfAPIView.as_view(), name="public-receipt-pdf"),
+    path("api/public/receipts/<str:token>/rating/", PublicReceiptRatingAPIView.as_view(), name="public-receipt-rating"),
     path("api/health/", health_check, name="api-health-check"),
     path("api/telegram/webhook/<uuid:bot_uuid>/", TelegramWebhookPublicView.as_view(), name="telegram-bot-webhook"),
     path("api/telegram/webhook/", TelegramWebhookPublicView.as_view(), name="telegram-bot-webhook-info"),

@@ -973,6 +973,8 @@ class CompanyAddon(models.Model):
     active = models.BooleanField(default=True)
     until = models.DateField(null=True, blank=True, help_text="Пусто — бессрочно")
     note = models.CharField(max_length=255, blank=True, default="")
+    # ТЗ Н-32: откуда функция — key (ключ), trial (пробный доступ), support (включила поддержка)
+    source = models.CharField(max_length=16, default="support", db_default="support")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1144,6 +1146,33 @@ class FeatureActivationKey(models.Model):
 
     def __str__(self):
         return f"{self.key} → {self.code}"
+
+
+class FeatureTrial(models.Model):
+    """ТЗ Н-32: пробный доступ к функции — один раз на функцию для компании."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="feature_trials")
+    code = models.SlugField(max_length=64)
+    expires_at = models.DateField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Пробный доступ к функции"
+        verbose_name_plural = "Пробные доступы к функциям"
+        constraints = [models.UniqueConstraint(fields=["company", "code"], name="uniq_feature_trial_company_code")]
+
+
+class FeatureKeyAttempt(models.Model):
+    """ТЗ Н-32: неверная попытка ввода ключа функции (защита от подбора, 10 в час)."""
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="+")
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Неверная попытка ключа"
+        verbose_name_plural = "Неверные попытки ключей"
 
 
 class AdminPin(models.Model):

@@ -338,11 +338,19 @@ class ShowcaseOrderSerializer(serializers.ModelSerializer):
             "source",
             "sale",
             "stock_reserved",
+            "pickup_code",  # ТЗ Н-33
             "items",
             "created_at",
             "updated_at",
         ]
         read_only_fields = ["id", "number", "total", "sale", "stock_reserved", "created_at", "updated_at"]
+        extra_kwargs = {"pickup_code": {"required": False}}
+
+    def validate_pickup_code(self, value):
+        value = (value or "").strip()
+        if value and not (value.isdigit() and 4 <= len(value) <= 6):
+            raise serializers.ValidationError("Код выдачи — 4–6 цифр.")
+        return value
 
 
 class ShowcaseOrderCreateItemSerializer(serializers.Serializer):
