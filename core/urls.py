@@ -71,6 +71,7 @@ apps_includes = [
     path('support/', include('apps.support.urls')),
     path('onec/', include('apps.onec.urls')),
     # path('crm/', include('apps.crm.urls')),
+    path('arenda/', include('apps.arenda.urls')),
 ]
 
 # API-роуты

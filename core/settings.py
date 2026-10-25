@@ -133,6 +133,7 @@ INSTALLED_APPS = [
     'apps.support',
     'apps.clientapp',
     # 'apps.crm',
+    'apps.arenda',
 ]
 
 MIDDLEWARE = [
