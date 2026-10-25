@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import include, path
 from rest_framework.routers import SimpleRouter
 
 from . import views
@@ -11,6 +11,7 @@ router.register(r"tenants", views.TenantViewSet, basename="arenda-tenant")
 router.register(r"leases", views.LeaseViewSet, basename="arenda-lease")
 
 urlpatterns = [
+    path("", include("apps.arenda.urls_money")),
     path("me/", views.MeView.as_view()),
     path("chess/", views.ChessView.as_view()),
     path("settings/", views.SettingsView.as_view()),
