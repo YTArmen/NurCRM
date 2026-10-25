@@ -37,6 +37,7 @@ EVENTS = (
     "rental_extended",
     "supplier_debt_changed",
     "features_changed",
+    "pos_request_changed",
 )
 
 
