@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('users', '0064_adminpin_companypinsetting'),
+        ('users', '0065_tz1023_perms_codes_pos'),
     ]
 
     operations = [

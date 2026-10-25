@@ -9,7 +9,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     # ТЗ Н-31: лента изменений и запросы «на кассу»
     dependencies = [
-        ("main", "0150_tz1023_bot_voice_calls"),
+        ("main", "0151_tz1023_purchase_orders"),
         ("users", "0064_adminpin_companypinsetting"),
         ("construction", "__first__"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),

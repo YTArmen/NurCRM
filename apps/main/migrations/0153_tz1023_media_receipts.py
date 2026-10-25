@@ -11,7 +11,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('main', '0150_tz1023_bot_voice_calls'),
+        ('main', '0152_tz1023_change_events'),
         ('users', '0064_adminpin_companypinsetting'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
