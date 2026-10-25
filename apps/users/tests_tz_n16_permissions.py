@@ -213,8 +213,9 @@ class RestrictionsTests(N16Base):
         self.assertDenied(r, "can_view_products")
         r = self.api_cashier.delete(f"/api/main/products/{self.product.id}/")
         self.assertDenied(r, "can_view_products")
+        # Создание товара со сканера кассиру оставлено (решение 25.10) — не 403.
         r = self.api_cashier.post("/api/main/products/create-manual/", {"name": "N", "price": "1"}, format="json")
-        self.assertDenied(r, "can_view_products")
+        self.assertNotEqual(r.status_code, 403, r.content)
         r = self.api_cashier.post("/api/main/products/bulk-update/", {}, format="json")
         self.assertDenied(r, "can_view_products")
         self.product.refresh_from_db()
@@ -287,8 +288,11 @@ class RestrictionsTests(N16Base):
 
     # --- аналитика ---
     def test_analytics_requires_flag(self):
+        # Вкладка «Продажи» открыта кассиру (решение 25.10), остальная аналитика — с правом.
+        self.assertEqual(self.api_cashier.get("/api/main/analytics/market/?tab=sales").status_code, 200)
+        self.assertEqual(self.api_cashier.get("/api/main/analytics/market/").status_code, 200)
         for url in (
-            "/api/main/analytics/market/?tab=sales", "/api/main/analytics/market/summary/",
+            "/api/main/analytics/market/?tab=products", "/api/main/analytics/market/summary/",
             "/api/main/analytics/finance/", "/api/main/analytics/pnl/", "/api/main/analytics/market/hours-sources/",
         ):
             self.assertDenied(self.api_cashier.get(url), "can_view_analytics")

@@ -47,7 +47,7 @@ def denied(flags, detail=None):
     return PermissionDenied(detail=body)
 
 
-def flag_permission(*flags, read=False, detail=None):
+def flag_permission(*flags, read=False, detail=None, allow=None):
     """Класс permission: нужен любой из флагов (владелец/админ — всегда)."""
 
     class FlagPermission(permissions.BasePermission):
@@ -61,6 +61,8 @@ def flag_permission(*flags, read=False, detail=None):
                 return True
             if not read and request.method in SAFE:
                 return True
+            if allow is not None and allow(request):
+                return True
             if has_any_flag(user, flags):
                 return True
             raise denied(flags, detail)
@@ -69,11 +71,12 @@ def flag_permission(*flags, read=False, detail=None):
     return FlagPermission
 
 
-def flag_guard(*flags, read=False, detail=None):
-    """Декоратор класса view: добавляет flag_permission к permission_classes."""
+def flag_guard(*flags, read=False, detail=None, allow=None):
+    """Декоратор класса view: добавляет flag_permission к permission_classes.
+    allow(request) -> True пропускает запрос без флага (исключение для кассы)."""
 
     def deco(view_cls):
-        view_cls.permission_classes = [*list(view_cls.permission_classes), flag_permission(*flags, read=read, detail=detail)]
+        view_cls.permission_classes = [*list(view_cls.permission_classes), flag_permission(*flags, read=read, detail=detail, allow=allow)]
         return view_cls
 
     return deco

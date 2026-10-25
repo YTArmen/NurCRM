@@ -1518,7 +1518,7 @@ class ProductCompactListView(CompanyBranchRestrictedMixin, generics.ListAPIView)
         return qs
 
 
-@flag_guard("can_view_products")  # ТЗ Н-16: запись товаров — только тем, у кого есть доступ к товарам
+# ТЗ Н-16: создание товара со сканера кассиру оставлено (решение Умара 25.10); правка и удаление — с правом «Товары».
 @read_only_guard("can_edit_products")
 class ProductCreateByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.CreateAPIView):
     """
@@ -1906,7 +1906,7 @@ class MarketSaleEmployeePayProfileRetrieveUpdateDestroyAPIView(CompanyBranchRest
 # ==========================
 # Product create manual
 # ==========================
-@flag_guard("can_view_products")  # ТЗ Н-16: запись товаров — только тем, у кого есть доступ к товарам
+# ТЗ Н-16: создание товара со сканера кассиру оставлено (решение Умара 25.10); правка и удаление — с правом «Товары».
 @read_only_guard("can_edit_products")
 class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAPIView):
     """

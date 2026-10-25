@@ -814,7 +814,9 @@ def _user_label(user_obj=None, *, first_name=None, last_name=None, email=None, p
 # ─────────────────────────────────────────────────────────────
 # Analytics API + caching
 # ─────────────────────────────────────────────────────────────
-@flag_guard("can_view_analytics", read=True)  # ТЗ Н-16: аналитика — только с правом «Аналитика»
+# ТЗ Н-16: аналитика — только с правом «Аналитика»; вкладку «Продажи» касса показывает любому кассиру
+# (решение Умара 25.10), поэтому tab=sales остаётся открытой.
+@flag_guard("can_view_analytics", read=True, allow=lambda r: r.path.rstrip("/").endswith("analytics/market") and (r.query_params.get("tab") or "sales") == "sales")
 class AnalyticsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     # Зарплаты и деньги компании — только владельцу/админу или с доступом к аналитике.
