@@ -8191,6 +8191,70 @@ class SalesTarget(models.Model):
         return f"SalesTarget({self.company_id}, {self.month}: {self.revenue_target})"
 
 
+# ТЗ Н-31: лента изменений для касс (monotonic id, хранится 7 дней)
+class ChangeEvent(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="change_events")
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    type = models.CharField("Тип", max_length=48)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    entity = models.CharField("Сущность", max_length=48, blank=True, default="")
+    entity_id = models.CharField("ID сущности", max_length=64, blank=True, default="")
+    data = models.JSONField("Данные", default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Событие изменения"
+        verbose_name_plural = "Лента изменений"
+        indexes = [models.Index(fields=["company", "id"], name="chgev_company_id_idx")]
+
+    def __str__(self):
+        return f"ChangeEvent({self.id}, {self.type})"
+
+
+# ТЗ Н-31: запрос «на кассу» (владелец просит кассира выполнить операцию)
+class PosRequest(models.Model):
+    class Kind(models.TextChoices):
+        DEBT_PAYMENT = "debt_payment", "Оплата долга клиента"
+        SALARY_PAYOUT = "salary_payout", "Выплата зарплаты"
+        SUPPLIER_PAYMENT = "supplier_payment", "Оплата поставщику"
+        RENTAL_PAYMENT = "rental_payment", "Оплата проката"
+        CASH_OUT = "cash_out", "Изъятие из кассы"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Ожидает"
+        ACCEPTED = "accepted", "Принят"
+        DECLINED = "declined", "Отклонён"
+        CANCELED = "canceled", "Отменён"
+        EXPIRED = "expired", "Истёк"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="pos_requests")
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    kind = models.CharField(max_length=24, choices=Kind.choices)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING, db_index=True)
+    cashbox = models.ForeignKey("construction.Cashbox", on_delete=models.CASCADE, related_name="+", verbose_name="Касса-адресат")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    payload = models.JSONField(default=dict, blank=True)
+    comment = models.CharField(max_length=255, blank=True, default="")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    decided_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    shift = models.ForeignKey("construction.CashShift", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    result = models.JSONField(default=dict, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Запрос на кассу"
+        verbose_name_plural = "Запросы на кассу"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["company", "status", "cashbox"], name="posreq_comp_st_cb_idx")]
+
+    def __str__(self):
+        return f"PosRequest({self.kind}, {self.status})"
+
+
 from apps.main.telegram_bot.models import (
     TelegramBotSettings,
     TelegramInquiry,

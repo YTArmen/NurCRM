@@ -4274,7 +4274,8 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
             return bad
 
         client_qs = self._filter_qs_company_branch(Client.objects.all())
-        if not _is_owner_like(request.user):
+        # ТЗ Н-31: запрос «на кассу» принимает кассир — ограничение по salesperson не применяем
+        if not _is_owner_like(request.user) and not getattr(request, "_pos_request_accept", False):
             client_qs = client_qs.filter(salesperson=request.user)
         client = get_object_or_404(client_qs.select_for_update(), id=client_id)
         idem = data["idempotency_key"]
@@ -4476,6 +4477,11 @@ class SupplierDebtPayAPIView(ClientDealsPayAnyAPIView):
             return resp
 
         payments = list(getattr(self, "payments_made", []))
+        # ТЗ Н-31: событие ленты — долг поставщику изменился
+        from apps.integrations.events import emit_event as _emit_sup
+        _emit_sup(client.company_id, "supplier_debt_changed", {
+            "supplier": client.id, "paid": resp.data.get("paid_total"), "actor": request.user.id,
+        })
         flows = list(CashFlow.objects.filter(
             source_kind=CashFlow.SourceKind.SUPPLIER_DEBT_PAYMENT,
             source_id__in=[str(p.id) for p in payments],
