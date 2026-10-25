@@ -28,6 +28,7 @@ from .services.charges import month_start
 from .services.debt import DebtInfo, calc_penalty
 from .services.words import fmt_som
 from .views import CtxMixin, ManualPaging, lease_payload
+from .views_docs import IgnoreFormatNegotiation
 
 
 # ------------------------------------------------------------------ общие помощники
@@ -276,6 +277,7 @@ class ReceiptDetailView(CtxMixin, APIView):
 
 
 class ReceiptTextView(CtxMixin, APIView):
+    content_negotiation_class = IgnoreFormatNegotiation  # ответ — text/plain или HTML, Accept клиента не мешает
     permission_classes = [IsAuthenticated, ArendaSection("cash", "tenants")]
 
     def get(self, request, pk):
@@ -284,6 +286,7 @@ class ReceiptTextView(CtxMixin, APIView):
 
 
 class ReceiptPrintView(CtxMixin, APIView):
+    content_negotiation_class = IgnoreFormatNegotiation  # ответ — text/plain или HTML, Accept клиента не мешает
     permission_classes = [IsAuthenticated, ArendaSection("cash", "tenants")]
 
     def get(self, request, pk):
@@ -469,6 +472,7 @@ class ActDetailView(CtxMixin, APIView):
 
 
 class ActPrintView(CtxMixin, APIView):
+    content_negotiation_class = IgnoreFormatNegotiation
     permission_classes = [IsAuthenticated, ArendaSection("tenants", "cash")]
 
     def get(self, request, pk):
