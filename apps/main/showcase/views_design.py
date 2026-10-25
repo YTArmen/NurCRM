@@ -865,6 +865,14 @@ class ShowcaseOrderDetailAPIView(ShowcaseErrorMixin, generics.RetrieveUpdateAPIV
                 order.status = new_status
                 update_fields.append("status")
 
+            if "pickup_code" in request.data:  # ТЗ Н-33: код выдачи пишет владелец
+                code = str(request.data.get("pickup_code") or "").strip()
+                if code and not (code.isdigit() and 4 <= len(code) <= 6):
+                    raise ValidationError({"pickup_code": "Код выдачи — 4–6 цифр."})
+                if code != order.pickup_code:
+                    order.pickup_code = code
+                    update_fields.append("pickup_code")
+
             if sale_id:
                 if order.status == ShowcaseOrder.Status.CANCELED:
                     raise ValidationError({"sale": "Нельзя привязать продажу к отменённому заказу."})

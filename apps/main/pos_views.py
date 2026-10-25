@@ -3777,7 +3777,10 @@ def _resolve_return_cashbox(sale: Sale, payload: Optional[Dict] = None):
     if not cb and sale.branch_id:
         cb = Cashbox.objects.filter(company=sale.company, branch_id=sale.branch_id, role=Cashbox.CashboxRole.POS_BRANCH).first()
     if not cb:
-        cb = Cashbox.objects.filter(company=sale.company).first()
+        # ТЗ Н-33: сейф и расчётный счёт — не ящик кассы, выбирать их запасным вариантом нельзя
+        cb = Cashbox.objects.filter(company=sale.company).exclude(
+            role__in=(Cashbox.CashboxRole.SAFE, Cashbox.CashboxRole.BANK)
+        ).first()
     return cb
 
 

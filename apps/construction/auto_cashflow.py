@@ -162,7 +162,7 @@ def resolve_cashbox(
                 return cb
             cb = (
                 Cashbox.objects.filter(company=company, branch_id=b_id, is_active=True)
-                .exclude(role__in=[Cashbox.CashboxRole.EXPENSE_VARIABLE, Cashbox.CashboxRole.EXPENSE_FIXED])
+                .exclude(role__in=[Cashbox.CashboxRole.EXPENSE_VARIABLE, Cashbox.CashboxRole.EXPENSE_FIXED, Cashbox.CashboxRole.SAFE, Cashbox.CashboxRole.BANK])  # ТЗ Н-33: сейф и р/с не ящик кассы
                 .order_by("-created_at")
                 .first()
             )
@@ -188,7 +188,7 @@ def resolve_cashbox(
 
         cb = (
             Cashbox.objects.filter(company=company, is_active=True)
-            .exclude(role__in=[Cashbox.CashboxRole.EXPENSE_VARIABLE, Cashbox.CashboxRole.EXPENSE_FIXED])
+            .exclude(role__in=[Cashbox.CashboxRole.EXPENSE_VARIABLE, Cashbox.CashboxRole.EXPENSE_FIXED, Cashbox.CashboxRole.SAFE, Cashbox.CashboxRole.BANK])  # ТЗ Н-33: сейф и р/с не ящик кассы
             .order_by("created_at")
             .first()
         )
