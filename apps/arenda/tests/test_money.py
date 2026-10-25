@@ -84,6 +84,21 @@ class PaymentTests(MoneyBase):
         r2 = self.pay(1000, add_penalty=True)
         self.assertEqual(r2.data["penalty_added"], 0)
 
+    def test_auto_penalty_and_payment_penalty_do_not_double_charge_same_day(self):
+        from apps.arenda.models import Lease
+        from apps.arenda.services.reminders import create_penalty_charge
+        lease = Lease.objects.get(tenant_id=self.t["id"])
+        base = self._overdue_base()
+        ch, created = create_penalty_charge(self.company, self.t["id"], lease, self.today, base, "0.100")
+        self.assertTrue(created)
+        # оплата с «добавить пеню» в тот же день второй пени не создаёт
+        r = self.pay(100_000, add_penalty=True)
+        self.assertEqual(r.data["penalty_added"], 0)
+        self.assertEqual(Charge.objects.filter(tenant_id=self.t["id"], kind="penalty",
+                                               voided_at__isnull=True).count(), 1)
+        # и авто-правило после оплаты не дублирует
+        self.assertFalse(create_penalty_charge(self.company, self.t["id"], lease, self.today, base, "0.100")[1])
+
     def _overdue_base(self):
         from apps.arenda.services import stats
         i = stats.debt_map(self.company, self.today, None, [self.t["id"]])[
@@ -173,7 +188,8 @@ class ReceiptTests(MoneyBase):
         self.assertEqual(r.data["number"], 3)
         self.assertEqual(r.data["label"], "Ч-00003")
         self.assertIn("Остаток долга", r.data["text"])
-        t = self.client.get(f"{API}receipts/{ids[0]}/text/")
+        t = self.client.get(f"{API}receipts/{ids[0]}/text/", HTTP_ACCEPT="text/plain")  # так просит сайт
+        self.assertEqual(t.status_code, 200)
         self.assertEqual(t["Content-Type"], "text/plain; charset=utf-8")
         self.assertIn("101", t.content.decode())
         h = self.client.get(f"{API}receipts/{ids[0]}/print/")

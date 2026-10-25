@@ -10,7 +10,7 @@ from core.exceptions import ApiError
 
 from ..models import Charge, Counter, Lease, Payment, PaymentAllocation, Receipt
 from . import stats
-from .charges import month_start
+from .charges import create_penalty_charge, month_start
 from .debt import DebtInfo, calc_penalty
 from .words import fmt_som
 
@@ -144,13 +144,11 @@ def post_payment(*, company, settings_obj, user, branch_id, tenant, amount, meth
             info = tenant_debt(company, tenant, today, settings_obj.soon_days)
             pen = calc_penalty(info.overdue_base, tenant_penalty_rate(tenant, settings_obj.penalty_rate),
                                info.overdue_days)
-            exists = Charge.objects.filter(company=company, tenant=tenant, kind="penalty", due_date=today,
-                                           voided_at__isnull=True).exists()
-            if pen > 0 and not exists:
-                penalty_charge = Charge.objects.create(
-                    company=company, branch_id=branch_id, tenant=tenant, kind="penalty",
-                    period=month_start(today), amount=pen, due_date=today,
-                    description=f"Пеня на {today:%d.%m.%Y}", created_by=user)
+            penalty_charge, created = create_penalty_charge(
+                company=company, tenant_id=tenant.pk, branch_id=branch_id, on_date=today, amount=pen,
+                description=f"Пеня на {today:%d.%m.%Y}", created_by=user)
+            if not created:
+                penalty_charge = None  # за сегодня пеня уже начислена (авто-правилом или прошлой оплатой)
     payment = Payment.objects.create(
         company=company, branch_id=branch_id, tenant=tenant, amount=amount, method=method,
         paid_at=paid_at_for(day), cashier=user, description=description, add_penalty=bool(add_penalty),

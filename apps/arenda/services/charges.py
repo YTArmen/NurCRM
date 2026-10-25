@@ -103,3 +103,23 @@ def generate_monthly_charges(on_date: date, company=None) -> dict:
 def lease_current_rent(lease, today: date) -> int:
     """Аренда в месяц на сегодня (с индексацией, без пропорции)."""
     return indexed_amount(lease_monthly_rent(lease), lease.indexation_percent, lease.start_date, today)
+
+
+def create_penalty_charge(*, company, tenant_id, branch_id, lease_id=None, on_date, amount, description,
+                          created_by=None):
+    """Единственное место, где создаётся начисление пени (Charge kind=penalty).
+
+    Идемпотентно по (арендатор, дата): если за эту дату уже есть неотменённая пеня (авто-правило или
+    оплата с «добавить пеню»), второе начисление не создаётся — вернётся существующее. -> (charge, created)."""
+    from ..models import Charge
+
+    if amount <= 0:
+        return None, False
+    ex = Charge.objects.filter(company=company, tenant_id=tenant_id, kind="penalty", due_date=on_date,
+                               voided_at__isnull=True).first()
+    if ex:
+        return ex, False
+    ch = Charge.objects.create(company=company, branch_id=branch_id, tenant_id=tenant_id, lease_id=lease_id,
+                               kind="penalty", period=month_start(on_date), amount=amount, due_date=on_date,
+                               description=description, created_by=created_by)
+    return ch, True

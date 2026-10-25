@@ -13,6 +13,7 @@ from django.utils import timezone
 from ..constants import REMINDER_RULE_KINDS
 from ..defaults import ensure_company_defaults
 from ..models import Charge, Lease, Payment, Reminder, ReminderRule, Tenant
+from .charges import create_penalty_charge as _create_penalty
 from .charges import month_start
 from .debt import allocate_fifo, calc_penalty, compute_debt
 from .stats import rented_leases
@@ -178,18 +179,9 @@ def _requisites(s):
 def create_penalty_charge(company, tenant_id, lease, on_date, base, rate_percent, created_by=None):
     """Начисление пени за один день просрочки (Charge kind=penalty). Идемпотентно по (арендатор, дата).
     Пеня на пеню не начисляется: base — просроченный остаток без пени."""
-    amount = calc_penalty(base, rate_percent, 1)
-    if amount <= 0:
-        return None, False
-    desc = f"Пеня (авто) за {on_date:%d.%m.%Y}"
-    ex = Charge.objects.filter(company=company, tenant_id=tenant_id, kind="penalty", due_date=on_date,
-                               description=desc, voided_at__isnull=True).first()
-    if ex:
-        return ex, False
-    ch = Charge.objects.create(company=company, branch_id=lease.branch_id, tenant_id=tenant_id, lease=lease,
-                               kind="penalty", period=month_start(on_date), amount=amount, due_date=on_date,
-                               description=desc, created_by=created_by)
-    return ch, True
+    return _create_penalty(company=company, tenant_id=tenant_id, branch_id=lease.branch_id, lease_id=lease.id,
+                           on_date=on_date, amount=calc_penalty(base, rate_percent, 1),
+                           description=f"Пеня (авто) за {on_date:%d.%m.%Y}", created_by=created_by)
 
 
 # ------------------------------------------------------------------ автоправила
