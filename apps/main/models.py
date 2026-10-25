@@ -3719,6 +3719,10 @@ class SupplierReceipt(models.Model):
         related_name="created_supplier_receipts",
     )
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    # ТЗ Н-29: приход по заказу поставщику
+    order = models.ForeignKey(
+        "main.PurchaseOrder", on_delete=models.SET_NULL, null=True, blank=True, related_name="receipts",
+    )
 
     class Meta:
         verbose_name = "Оприходование от поставщика"
@@ -3734,6 +3738,51 @@ class SupplierReceipt(models.Model):
             raise ValidationError({"supplier": "Поставщик другой компании."})
         if self.branch_id and self.company_id and self.branch.company_id != self.company_id:
             raise ValidationError({"branch": "Филиал принадлежит другой компании."})
+
+
+class PurchaseOrder(models.Model):
+    """ТЗ Н-29: заказ поставщику как документ (общий для всех касс/ПК/телефонов компании)."""
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Черновик"
+        SENT = "sent", "Отправлен"
+        PARTIAL = "partial", "Принят частично"
+        RECEIVED = "received", "Принят полностью"
+        CANCELLED = "cancelled", "Отменён"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="purchase_orders", db_index=True)
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="purchase_orders", null=True, blank=True, db_index=True)
+    number = models.PositiveIntegerField(verbose_name="Номер (по компании)")
+    supplier = models.ForeignKey(
+        Client, on_delete=models.CASCADE, related_name="purchase_orders", db_index=True,
+        limit_choices_to=Q(type=Client.StatusClient.SUPPLIERS),
+    )
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT, db_index=True)
+    note = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_purchase_orders")
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Заказ поставщику"
+        verbose_name_plural = "Заказы поставщикам"
+        ordering = ["-created_at", "-number"]
+        constraints = [models.UniqueConstraint(fields=["company", "number"], name="uniq_purchase_order_number_company")]
+        indexes = [models.Index(fields=["company", "supplier", "status"])]
+
+
+class PurchaseOrderLine(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order = models.ForeignKey(PurchaseOrder, on_delete=models.CASCADE, related_name="lines")
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="purchase_order_lines")
+    qty = models.DecimalField(max_digits=12, decimal_places=3)
+    purchase_price = models.DecimalField(max_digits=11, decimal_places=3, null=True, blank=True)
+    received_qty = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("0"))
+
+    class Meta:
+        ordering = ["id"]
 
 
 class SupplierReceiptItem(models.Model):

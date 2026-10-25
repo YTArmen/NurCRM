@@ -3508,11 +3508,13 @@ class SupplierReceiptReadSerializer(serializers.ModelSerializer):
     cashbox = serializers.SerializerMethodField()
     cashbox_name = serializers.SerializerMethodField()
     shift = serializers.SerializerMethodField()
+    order_id = serializers.UUIDField(read_only=True, allow_null=True)  # ТЗ Н-29
 
     class Meta:
         model = SupplierReceipt
         fields = [
             "id",
+            "order_id",
             "company",
             "branch",
             "supplier_id",
