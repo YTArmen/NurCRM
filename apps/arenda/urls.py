@@ -19,3 +19,6 @@ urlpatterns = [
     path("access/presets/", views.AccessPresetsView.as_view()),
     path("access/<uuid:user_id>/", views.AccessDetailView.as_view()),
 ] + router.urls + [path("", include("apps.arenda.urls_team"))]
+
+from .urls_docs import urlpatterns as _docs_urlpatterns  # noqa: E402
+urlpatterns = _docs_urlpatterns + urlpatterns  # этап 3: договоры/шаблоны (до роутера: leases/preview/, leases/sign/)
