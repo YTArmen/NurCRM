@@ -615,7 +615,8 @@ class LeaseViewSet(ManualPaging, CtxMixin, viewsets.ViewSet):
         if p.get("tenant"):
             qs = qs.filter(tenant_id=p["tenant"])
         if p.get("search"):
-            qs = qs.filter(Q(tenant__name__icontains=p["search"]) | Q(label__icontains=p["search"]))
+            qs = qs.filter(Q(tenant__name__icontains=p["search"]) | Q(label__icontains=p["search"])
+                           | Q(units__number__icontains=p["search"])).distinct()
         items = [self._payload(l) for l in qs.order_by("-start_date", "-created_at")]
         if p.get("status"):
             items = [i for i in items if i["status_display"] == p["status"]]
