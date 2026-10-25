@@ -1319,11 +1319,18 @@ class ProductListView(CompanyBranchRestrictedMixin, generics.ListAPIView):
                 product_images_prefetch,
             )
         )
+        if self._include_variants():
+            qs = qs.prefetch_related("variants")
         qs = _filter_products_company_only(self, qs)
         since = self._updated_since()
         if since is not None:
             qs = qs.filter(updated_at__gte=since)
         return _annotate_product_is_favorite(qs)
+
+    def _include_variants(self) -> bool:
+        """ТЗ Н-33: ?include=variants — в каждый товар добавляется массив variants (размеры/цвета)."""
+        raw = self.request.query_params.get("include") or ""
+        return "variants" in [x.strip().lower() for x in raw.split(",")]
 
     def _updated_since(self):
         """BE2-19: ?updated_since=<ISO-время> — только товары, изменённые с этого момента."""
@@ -1379,6 +1386,8 @@ class ProductListView(CompanyBranchRestrictedMixin, generics.ListAPIView):
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
+        if self._include_variants():
+            ctx["include_variants"] = True
         page = getattr(self, "_page_for_cashflows", None)
         if page:
             ctx["cashflows_by_product"] = _cashflows_by_product_map(page)
@@ -2996,9 +3005,37 @@ class ProductByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.RetrieveAPI
             .distinct()
             .first()
         )
+        self._matched_variant = None
+        self._matched_by = "barcode" if product else None
+        if product and product.barcode not in variants:
+            self._matched_by = "alternate_barcode"
+        if not product:
+            # ТЗ Н-33: штрихкод размера/цвета (ProductVariant.barcode)
+            from apps.main.models import ProductVariant as _PV
+
+            pv = _PV.objects.filter(barcode__in=variants, is_active=True).select_related("product").first()
+            if pv is not None:
+                product = self.get_queryset().filter(pk=pv.product_id).first()
+                if product is not None:
+                    self._matched_variant = pv
+                    self._matched_by = "variant_barcode"
         if not product:
             raise NotFound(detail="Товар с таким штрих-кодом не найден")
         return product
+
+    def retrieve(self, request, *args, **kwargs):
+        """Ответ — как раньше (поля товара). ТЗ Н-33: плюс product/variant/matched_by."""
+        instance = self.get_object()
+        data = dict(self.get_serializer(instance).data)
+        variant = getattr(self, "_matched_variant", None)
+        from apps.main.kassa_stage3 import ProductVariantSerializer
+
+        data["product"] = dict(data)
+        data["variant"] = (
+            ProductVariantSerializer(variant, context={"product": instance}).data if variant is not None else None
+        )
+        data["matched_by"] = getattr(self, "_matched_by", "barcode")
+        return Response(data)
 
 
 class ProductWarehouseBarcodeAPIView(CompanyBranchRestrictedMixin, APIView):
@@ -5782,6 +5819,84 @@ class SupplierReceiptLimitPagination(PageNumberPagination):
         )
 
 
+def _receipt_discount_extras(data, items, by_id):
+    """
+    ТЗ Н-33: тело прихода с discount (сумма или «10%») / discount_percent и extra_costs[{name, amount}].
+    Только если эти поля переданы. Корректировка = доп. расходы − скидка; распределяется по строкам
+    пропорционально сумме строки (qty × закупка). → None или {landed: {id(item): цена за ед.}, receipt_fields}.
+    """
+    raw_disc = data.get("discount")
+    raw_pct = data.get("discount_percent")
+    raw_extra = data.get("extra_costs")
+    if raw_disc in (None, "") and raw_pct in (None, "") and not raw_extra:
+        return None
+
+    def _dec(v, field):
+        try:
+            d = Decimal(str(v).strip())
+        except Exception:
+            raise ValidationError({field: "Ожидается число."})
+        if d < 0:
+            raise ValidationError({field: "Не может быть отрицательным."})
+        return d
+
+    base = {}
+    subtotal = Decimal("0")
+    for it in items:
+        prod = by_id.get(it["product"].id)
+        pp = it.get("purchase_price")
+        if pp is None:
+            pp = getattr(prod, "purchase_price", None)
+        line = Decimal(str(pp or 0)) * Decimal(str(int(it["qty"])))
+        base[id(it)] = line
+        subtotal += line
+
+    pct = None
+    disc = Decimal("0")
+    if isinstance(raw_disc, str) and raw_disc.strip().endswith("%"):
+        pct = _dec(raw_disc.strip()[:-1], "discount")
+    elif raw_pct not in (None, ""):
+        pct = _dec(raw_pct, "discount_percent")
+    elif raw_disc not in (None, ""):
+        disc = _dec(raw_disc, "discount")
+    if pct is not None:
+        if pct > 100:
+            raise ValidationError({"discount_percent": "Не больше 100."})
+        disc = (subtotal * pct / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if disc > subtotal:
+        raise ValidationError({"code": "discount_exceeds_total", "detail": "Скидка больше суммы прихода."})
+
+    extras = []
+    extra_total = Decimal("0")
+    if raw_extra:
+        if not isinstance(raw_extra, list):
+            raise ValidationError({"extra_costs": "Ожидается список {name, amount}."})
+        for row in raw_extra:
+            if not isinstance(row, dict):
+                raise ValidationError({"extra_costs": "Ожидается список {name, amount}."})
+            amt = _dec(row.get("amount"), "extra_costs").quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            extras.append({"name": str(row.get("name") or "").strip()[:100], "amount": f"{amt:.2f}"})
+            extra_total += amt
+
+    delta = extra_total - disc
+    landed = {}
+    for it in items:
+        line = base[id(it)]
+        qty = Decimal(str(int(it["qty"])))
+        if subtotal > 0 and line > 0 and qty > 0:
+            landed[id(it)] = (line + delta * line / subtotal) / qty
+        else:
+            landed[id(it)] = None
+    return {
+        "landed": landed,
+        "receipt_fields": {
+            "discount": disc,
+            "discount_percent": pct,
+            "extra_costs": extras,
+        },
+    }
+
+
 @read_only_guard("can_edit_procurement")
 class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
     """
@@ -5911,17 +6026,25 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
                 p.client = supplier
                 p.save(update_fields=["client", "updated_at"])
 
+        # ТЗ Н-33: скидка и доп. расходы прихода → в закупочную цену строк пропорционально.
+        adj = _receipt_discount_extras(request.data, items, by_id)
+
         # лог оприходования
         receipt = SupplierReceipt.objects.create(
             company=company,
             branch=branch,
             supplier=supplier,
             created_by=getattr(request, "user", None),
+            **(adj["receipt_fields"] if adj else {}),
         )
         payment_type = _parse_payment_type(request.data.get("payment_type"))
 
         # обновляем цены (если переданы) и увеличиваем остатки
         receipt_items = []
+        if adj:
+            for it in items:
+                if id(it) in adj["landed"] and adj["landed"][id(it)] is not None:
+                    it["purchase_price"] = adj["landed"][id(it)].quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
         for it in items:
             pid = it["product"].id
             qty = int(it["qty"])
@@ -5980,6 +6103,7 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
                     product=prod,
                     qty=qty,
                     purchase_price=it.get("purchase_price"),
+                    landed_price=((adj["landed"].get(id(it)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)) if adj and adj["landed"].get(id(it)) is not None else None),
                 )
             )
 
@@ -6064,6 +6188,12 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
             "cashbox": str(receipt_cashflows[0].cashbox_id) if receipt_cashflows and receipt_cashflows[0].cashbox_id else None,
             "shift": str(receipt_cashflows[0].shift_id) if receipt_cashflows and receipt_cashflows[0].shift_id else None,
         }
+        if adj:  # ТЗ Н-33
+            resp_data.update({
+                "discount": f"{receipt.discount:.2f}",
+                "discount_percent": f"{receipt.discount_percent:.2f}" if receipt.discount_percent is not None else None,
+                "extra_costs": receipt.extra_costs,
+            })
         if opt_in:
             # ТЗ Н-10: сделка-долг одним взносом на first_due_date, в той же транзакции.
             deal = None

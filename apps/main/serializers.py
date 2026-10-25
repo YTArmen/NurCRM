@@ -12,6 +12,7 @@ from django.utils import timezone as dj_tz
 from django.utils.dateparse import parse_datetime, parse_date
 
 from apps.main.models import (
+    SizeChart,
     Contact, Pipeline, Deal, Task, Integration, Analytics, Order, Product, Review,
     ProductInventorySession, ProductInventoryItem,
     Notification, Event, Warehouse, WarehouseEvent, ProductCategory, ProductBrand,
@@ -1106,6 +1107,21 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
     # ====== рецепт (сырьё + расход на 1 ед.) ======
     recipe = RecipeItemReadSerializer(source="recipe_items", many=True, read_only=True)
 
+    # ТЗ Н-33: таблица размеров товара (id из showcase/size-charts/)
+    size_chart = serializers.PrimaryKeyRelatedField(
+        queryset=SizeChart.objects.all(), required=False, allow_null=True
+    )
+
+    def validate_size_chart(self, value):
+        if value is not None:
+            req = self.context.get("request")
+            cid = getattr(getattr(req, "user", None), "company_id", None) or getattr(
+                getattr(getattr(req, "user", None), "owned_company", None), "id", None
+            )
+            if cid and value.company_id != cid:
+                raise serializers.ValidationError("Таблица размеров другой компании.")
+        return value
+
     # ====== клиент ======
     client = serializers.PrimaryKeyRelatedField(
         queryset=Client.objects.all(),
@@ -1270,6 +1286,7 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             "total_price",
             "purchase_batches",
             "cashflows",
+            "size_chart",  # ТЗ Н-33
         ]
 
         read_only_fields = [
@@ -1661,6 +1678,13 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             ]
         except Exception:
             data["alternate_barcodes"] = []
+        if self.context.get("include_variants"):  # ТЗ Н-33: ?include=variants
+            from apps.main.kassa_stage3 import ProductVariantSerializer
+
+            data["variants"] = ProductVariantSerializer(
+                sorted(instance.variants.all(), key=lambda v: (v.sort_order, v.size, v.color)), many=True,
+                context={"product": instance},
+            ).data
         return data
 
     # ==== CREATE / UPDATE ====
@@ -1929,6 +1953,9 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
                     )
                 else:
                     setattr(instance, field, validated_data[field])
+
+        if "size_chart" in validated_data:  # ТЗ Н-33
+            instance.size_chart = validated_data["size_chart"]
 
         if "stock" in validated_data:
             instance.stock = validated_data["stock"]
@@ -3534,6 +3561,9 @@ class SupplierReceiptReadSerializer(serializers.ModelSerializer):
             "cashbox",
             "cashbox_name",
             "shift",
+            "discount",  # ТЗ Н-33
+            "discount_percent",
+            "extra_costs",
             "items",
         ]
 
