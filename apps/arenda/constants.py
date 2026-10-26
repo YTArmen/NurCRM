@@ -44,3 +44,6 @@ DOC_KEYS = ["lease", "employment", "receipt", "act"]
 # Статусы
 SOON_DAYS = 7
 LEASE_EXPIRING_DAYS = 45
+
+# Верхняя граница денежных сумм в тыйынах (10^13 = 100 млрд сом): защита от переполнения BigInteger и 500
+MAX_MONEY = 10 ** 13

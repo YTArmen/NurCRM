@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from .constants import MAX_MONEY
+
 from apps.users.models import Branch
 
 from .models import Asset, Employee, EmploymentContract, Expense, ExpenseCategory, TaxPayment
@@ -49,7 +51,7 @@ class ExpenseSerializer(_Scoped, serializers.ModelSerializer):
     branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all())
     category = serializers.PrimaryKeyRelatedField(queryset=ExpenseCategory.objects.all())
     category_name = serializers.CharField(source="category.name", read_only=True)
-    amount = serializers.IntegerField(min_value=1)
+    amount = serializers.IntegerField(min_value=1, max_value=MAX_MONEY)
     voided = serializers.SerializerMethodField()
 
     class Meta:
@@ -69,7 +71,7 @@ class ExpenseSerializer(_Scoped, serializers.ModelSerializer):
 
 class TaxPaymentSerializer(_Scoped, serializers.ModelSerializer):
     branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all(), required=False, allow_null=True)
-    amount = serializers.IntegerField(min_value=0)
+    amount = serializers.IntegerField(min_value=0, max_value=MAX_MONEY)
 
     class Meta:
         model = TaxPayment
@@ -79,7 +81,7 @@ class TaxPaymentSerializer(_Scoped, serializers.ModelSerializer):
 
 class AssetSerializer(_Scoped, serializers.ModelSerializer):
     branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all())
-    cost = serializers.IntegerField(min_value=1)
+    cost = serializers.IntegerField(min_value=1, max_value=MAX_MONEY)
     life_years = serializers.IntegerField(min_value=1, max_value=100)
     monthly = serializers.SerializerMethodField()
     accumulated = serializers.SerializerMethodField()
@@ -106,8 +108,8 @@ class AssetSerializer(_Scoped, serializers.ModelSerializer):
 
 class EmployeeSerializer(_Scoped, serializers.ModelSerializer):
     branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all())
-    salary = serializers.IntegerField(min_value=0)
-    bonus = serializers.IntegerField(min_value=0, required=False, default=0)
+    salary = serializers.IntegerField(min_value=0, max_value=MAX_MONEY)
+    bonus = serializers.IntegerField(min_value=0, required=False, default=0, max_value=MAX_MONEY)
     contract = serializers.SerializerMethodField()
 
     class Meta:
@@ -115,6 +117,13 @@ class EmployeeSerializer(_Scoped, serializers.ModelSerializer):
         fields = ["id", "branch", "full_name", "position", "phone", "hired_at", "fired_at", "schedule", "salary",
                   "bonus", "contract"]
         read_only_fields = ["id"]
+
+    def validate(self, attrs):
+        h = attrs.get("hired_at", getattr(self.instance, "hired_at", None))
+        f = attrs.get("fired_at", getattr(self.instance, "fired_at", None))
+        if h and f and f < h:
+            raise serializers.ValidationError({"fired_at": "Дата увольнения раньше даты приёма."})
+        return attrs
 
     def get_contract(self, obj):
         c = (EmploymentContract.objects.filter(employee=obj, archived_at__isnull=True).order_by("-date").first())

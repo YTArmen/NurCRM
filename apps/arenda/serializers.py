@@ -5,7 +5,7 @@ from rest_framework import serializers
 from apps.users.models import Branch
 
 from .models import ArendaSettings, Lease, Tenant, Unit, UnitType
-from .constants import SECTIONS
+from .constants import MAX_MONEY, SECTIONS
 
 
 class _CompanyScoped:
@@ -31,7 +31,7 @@ class UnitSerializer(_CompanyScoped, serializers.ModelSerializer):
     branch = serializers.PrimaryKeyRelatedField(queryset=Branch.objects.all())
     unit_type = serializers.PrimaryKeyRelatedField(queryset=UnitType.objects.all(), required=False, allow_null=True)
     area = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=0)
-    rate = serializers.IntegerField(min_value=0)
+    rate = serializers.IntegerField(min_value=0, max_value=MAX_MONEY)
 
     class Meta:
         model = Unit
@@ -93,10 +93,10 @@ class LeaseInSerializer(serializers.Serializer):
     units = serializers.PrimaryKeyRelatedField(queryset=Unit.objects.all(), many=True, allow_empty=False)
     start_date = serializers.DateField()
     end_date = serializers.DateField(required=False, allow_null=True)
-    rent_monthly = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    rent_monthly = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=MAX_MONEY)
     pay_day = serializers.IntegerField(required=False, min_value=1, max_value=31, default=10)
-    deposit_months = serializers.IntegerField(required=False, min_value=0, default=0)
-    deposit_amount = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    deposit_months = serializers.IntegerField(required=False, min_value=0, default=0, max_value=1200)
+    deposit_amount = serializers.IntegerField(required=False, allow_null=True, min_value=0, max_value=MAX_MONEY)
     penalty_rate = serializers.DecimalField(max_digits=6, decimal_places=3, required=False, min_value=0)
     indexation_percent = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, min_value=0, default=0)
     utilities = serializers.CharField(required=False, allow_blank=True, default="")
@@ -132,6 +132,21 @@ class SettingsSerializer(serializers.ModelSerializer):
     inn = serializers.CharField(required=False, allow_blank=True, validators=[_digits("ИНН", 14)])
     bik = serializers.CharField(required=False, allow_blank=True, validators=[_digits("БИК", 6)])
     account = serializers.CharField(required=False, allow_blank=True, validators=[_digits("Счёт", 16)])
+
+    email = serializers.EmailField(required=False, allow_blank=True, max_length=128)
+    penalty_rate = serializers.DecimalField(max_digits=6, decimal_places=3, required=False, min_value=0, max_value=100)
+    payroll_social_employee = serializers.DecimalField(max_digits=5, decimal_places=2, required=False,
+                                                       min_value=0, max_value=100)
+    payroll_income_tax = serializers.DecimalField(max_digits=5, decimal_places=2, required=False,
+                                                  min_value=0, max_value=100)
+    payroll_social_employer = serializers.DecimalField(max_digits=5, decimal_places=2, required=False,
+                                                       min_value=0, max_value=100)
+    advance_percent = serializers.IntegerField(required=False, min_value=0, max_value=100)
+    advance_day = serializers.IntegerField(required=False, min_value=1, max_value=31)
+    settle_day = serializers.IntegerField(required=False, min_value=0, max_value=31)
+    soon_days = serializers.IntegerField(required=False, min_value=0, max_value=365)
+    lease_expiring_days = serializers.IntegerField(required=False, min_value=0, max_value=365)
+    indexation_notice_days = serializers.IntegerField(required=False, min_value=0, max_value=365)
 
     class Meta:
         model = ArendaSettings

@@ -10,6 +10,7 @@ from datetime import date
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from ..models import Employee, Expense, Payroll, PayrollLine
@@ -37,7 +38,9 @@ def pay_dates(month: date, s):
 
 
 def _employees(company, month: date, branch_ids=None):
-    qs = Employee.objects.filter(company=company, archived_at__isnull=True).select_related("branch")
+    # архив сотрудника = увольнение (fired_at задан): за месяцы работы он остаётся в ведомости и налогах
+    qs = (Employee.objects.filter(company=company).filter(Q(archived_at__isnull=True) | Q(fired_at__isnull=False))
+          .select_related("branch"))
     if branch_ids is not None:
         qs = qs.filter(branch_id__in=branch_ids)
     me = month_end(month)
