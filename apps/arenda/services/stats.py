@@ -69,11 +69,12 @@ def unit_state_map(company, today, branch_ids=None, soon_days=7):
     return out
 
 
-def kpis(company, today, branch_ids=None, soon_days=7):
+def kpis(company, today, branch_ids=None, soon_days=7, state=None):
     units = Unit.objects.filter(company=company, archived_at__isnull=True)
     if branch_ids is not None:
         units = units.filter(branch_id__in=branch_ids)
-    state = unit_state_map(company, today, branch_ids, soon_days)
+    if state is None:
+        state = unit_state_map(company, today, branch_ids, soon_days)
     total_area = Decimal(0)
     rented_area = Decimal(0)
     for u in units:

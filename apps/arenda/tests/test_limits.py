@@ -64,3 +64,16 @@ class LimitsTests(ArendaBase):
         self.assertEqual([x["full_name"] for x in may["lines"]], ["Уволенный"])
         june = self.client.get(A + "payroll/?month=2026-06").data
         self.assertEqual(june["lines"], [])
+
+
+class UnitListQueriesTests(ArendaBase):
+    def test_units_list_query_count_does_not_grow_with_units(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        for i in range(12):
+            self.unit(number=str(100 + i))
+        with CaptureQueriesContext(connection) as q:
+            r = self.client.get(A + "units/?page_size=50")
+        self.assertEqual(r.data["count"], 12)
+        self.assertLess(len(q), 20)  # раньше 1 + 5×N запросов: карта статусов пересчитывалась на каждое помещение

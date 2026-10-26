@@ -296,11 +296,13 @@ class UnitViewSet(CtxMixin, viewsets.ModelViewSet):
 
     def list(self, request, *a, **kw):
         items = list(self.get_queryset())
-        sm = self.get_serializer_context()["state_map"]
+        # контекст (карта статусов) считаем один раз; get_serializer() пересчитывал бы её на каждое помещение
+        ctx = self.get_serializer_context()
+        sm = ctx["state_map"]
         want = request.query_params.get("status")
         if want:
             items = [u for u in items if sm.get(u.id, {}).get("status") == want]
-        ser = lambda u: self.get_serializer(u).data
+        ser = lambda u: self.get_serializer_class()(u, context=ctx).data
         return _page_response(self, items, ser)
 
     def _check_branch_allowed(self, branch):
@@ -420,7 +422,7 @@ class ChessView(CtxMixin, APIView):
                 "reserved_for": u.reserved_for, "reserved_until": u.reserved_until.isoformat() if u.reserved_until else None,
             })
         return Response({
-            "kpi": stats.kpis(ctx.company, today, ids, soon),
+            "kpi": stats.kpis(ctx.company, today, ids, soon, state=state),
             "counters": counters,
             "floor_counters": {str(k): v for k, v in sorted(floor_counters.items())},
             "floors": [{"floor": f, "units": by_floor[f]} for f in sorted(by_floor)],
