@@ -65,8 +65,21 @@ class ReturnCheckDiscountTests(TestCase):
         self.assertEqual(sum(amounts), Decimal("75.00"))
 
         r3 = self.ret(sale, {})
-        self.assertEqual(r3.status_code, 409)
+        # Без заголовка клиента (старая касса) — 400, а не 409 (Б-02).
+        self.assertEqual(r3.status_code, 400)
         self.assertEqual(r3.data["code"], "refund_exceeds_paid")
+
+    def test_repeat_new_client_409(self):
+        sale, _ = self.make_sale()
+        self.ret(sale, {})
+        req = self.factory.post(f"/main/pos/sales/{sale.id}/return/", {"idempotency_key": str(uuid.uuid4())},
+                                format="json", HTTP_X_NURMARKET_CLIENT="kassa/1.17.61")
+        force_authenticate(req, user=self.cashier)
+        r = SaleReturnAPIView.as_view()(req, pk=sale.id)
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.data["code"], "refund_exceeds_paid")
+        self.assertEqual(r.data["data"]["paid"], "75.00")
+        self.assertEqual(r.data["data"]["refundable"], "0.00")
 
     def test_all_lines_partially_equal_paid(self):
         sale, (a, b) = self.make_sale()
