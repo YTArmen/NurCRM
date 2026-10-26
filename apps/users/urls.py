@@ -1,5 +1,6 @@
 from apps.users.app_settings_views import CompanyFeatureActivateAPIView, UserAppSettingsAPIView
 from django.urls import path
+from apps.users.support_views import SupportCompanyFeaturesAPIView
 from .views import (
     CompanyAddonListAPIView,
     RegisterAPIView,
@@ -69,6 +70,7 @@ urlpatterns = [
     path('settings/company/', CompanyUpdateAPIView.as_view(), name='company-update'),
     path('company/check-slug/', CompanyCheckSlugAPIView.as_view(), name='company-check-slug'),
     path('company/addons/', CompanyAddonListAPIView.as_view(), name='company-addons'),
+    path('support/company-features/', SupportCompanyFeaturesAPIView.as_view(), name='support-company-features'),
 
     # 👥 Работа с сотрудниками
     path('employees/', EmployeeListAPIView.as_view(), name='employee-list'),

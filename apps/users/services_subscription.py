@@ -119,6 +119,10 @@ def get_company_limits(company, plan_code: Optional[str] = None) -> Dict[str, An
         emp_used = 0
 
     emp_max = 3 if plan_code == "start" else None
+    if plan_code == "custom":
+        from apps.users.support_views import constructor_max_employees
+
+        emp_max = constructor_max_employees(company)
 
     # QA B36: считаем и модуль магазина (main.Warehouse/Product), и модуль «Склад»
     # (warehouse.Warehouse/WarehouseProduct). Раньше для оптового склада used был по
