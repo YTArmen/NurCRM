@@ -1,5 +1,8 @@
 """Этап 6: уведомления, напоминания, правила автонапоминаний (ТЗ §3.9)."""
+import uuid
+
 from django.db import transaction
+from django.db.models import Q
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
@@ -9,7 +12,7 @@ from rest_framework.views import APIView
 from core.exceptions import ApiError
 
 from . import audit
-from .branch_filter import branch_ids_from_request
+from .branch_filter import branch_ids_from_request, tenant_visible
 from .constants import REMINDER_RULE_KINDS
 from .models import Reminder, ReminderRule, Tenant
 from .pagination import ArendaPagination
@@ -64,6 +67,8 @@ class RemindView(CtxMixin, APIView):
         else:
             target_ids = list(d["tenant_ids"])
         tenants = Tenant.objects.filter(company=ctx.company, id__in=target_ids, archived_at__isnull=True)
+        if ctx.allowed_branch_ids() is not None:
+            tenants = [t for t in tenants if tenant_visible(ctx, t)]
         found = {t.id: t for t in tenants}
         if not d.get("all") and set(found) != set(target_ids):
             raise ApiError("not_found", "Арендатор не найден.", status_code=404)
@@ -89,8 +94,14 @@ class ReminderListView(CtxMixin, APIView):
 
     def get(self, request):
         qs = Reminder.objects.filter(company=self.ctx.company)
+        allowed = self.ctx.allowed_branch_ids()
+        if allowed is not None:  # только арендаторы доступных филиалов
+            qs = qs.filter(Q(tenant__branch_id__in=allowed) | Q(tenant__leases__branch_id__in=allowed)).distinct()
         if request.query_params.get("tenant"):
-            qs = qs.filter(tenant_id=request.query_params["tenant"])
+            try:
+                qs = qs.filter(tenant_id=uuid.UUID(request.query_params["tenant"]))
+            except ValueError:
+                raise ValidationError({"tenant": ["Некорректный идентификатор."]})
         pager = ArendaPagination()
         page = pager.paginate_queryset(qs, request, view=self)
         return pager.get_paginated_response([reminder_payload(r) for r in page])

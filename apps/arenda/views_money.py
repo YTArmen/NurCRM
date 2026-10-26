@@ -4,7 +4,7 @@ import uuid
 from datetime import date, timedelta
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
@@ -17,7 +17,7 @@ from apps.users.models import Branch, User
 from core.exceptions import ApiError
 
 from . import audit
-from .branch_filter import apply_branch
+from .branch_filter import apply_branch, tenant_visible
 from .models import Charge, Payment, ReconciliationAct, Receipt, Reminder, Remark, Tenant
 from .permissions import ArendaSection, deny
 from .serializers_money import ActInSerializer, PaymentInSerializer, RemarkInSerializer, StornoSerializer
@@ -36,7 +36,7 @@ from .views_docs import IgnoreFormatNegotiation
 
 def _tenant_or_404(ctx, pk):
     t = Tenant.objects.filter(pk=pk, company=ctx.company, archived_at__isnull=True).first()
-    if not t:
+    if not t or not tenant_visible(ctx, t):
         raise ApiError("not_found", "Арендатор не найден.", status_code=404)
     return t
 
@@ -421,7 +421,7 @@ class TenantCardView(CtxMixin, APIView):
 
 def _act_or_404(ctx, pk):
     a = ReconciliationAct.objects.filter(pk=pk, company=ctx.company).select_related("tenant").first()
-    if not a:
+    if not a or not tenant_visible(ctx, a.tenant):
         raise ApiError("not_found", "Акт не найден.", status_code=404)
     return a
 
@@ -454,6 +454,9 @@ class ActListView(ManualPaging, CtxMixin, APIView):
 
     def get(self, request):
         qs = ReconciliationAct.objects.filter(company=self.ctx.company).select_related("tenant").order_by("-number")
+        allowed = self.ctx.allowed_branch_ids()
+        if allowed is not None:  # сотрудник с частью филиалов видит акты только своих арендаторов
+            qs = qs.filter(Q(tenant__branch_id__in=allowed) | Q(tenant__leases__branch_id__in=allowed)).distinct()
         t = request.query_params.get("tenant")
         if t:
             try:

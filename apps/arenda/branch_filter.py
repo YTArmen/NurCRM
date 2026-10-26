@@ -29,3 +29,18 @@ def apply_branch(qs, ids, field="branch_id"):
     if ids is None:
         return qs
     return qs.filter(**{f"{field}__in": ids})
+
+
+def tenant_visible(ctx, tenant) -> bool:
+    """Сотрудник с доступом только к части филиалов не видит арендаторов чужих филиалов (карточка, договоры, акты).
+    Арендатор виден, если он заведён в доступном филиале или у него там договор; без филиала и договоров — виден всем."""
+    allowed = ctx.allowed_branch_ids()
+    if allowed is None:
+        return True
+    from .models import Lease
+    if tenant.branch_id in allowed:
+        return True
+    leases = Lease.objects.filter(tenant=tenant, archived_at__isnull=True)
+    if leases.filter(branch_id__in=allowed).exists():
+        return True
+    return tenant.branch_id is None and not leases.exists()

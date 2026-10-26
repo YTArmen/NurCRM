@@ -77,3 +77,48 @@ class UnitListQueriesTests(ArendaBase):
             r = self.client.get(A + "units/?page_size=50")
         self.assertEqual(r.data["count"], 12)
         self.assertLess(len(q), 20)  # раньше 1 + 5×N запросов: карта статусов пересчитывалась на каждое помещение
+
+
+class LeaseUnitEdgeTests(ArendaBase):
+    def test_terminate_before_start_rejected(self):
+        t, u = self.tenant(), self.unit("T1")
+        r = self.lease(t, [u], start="2026-10-01")
+        self.assertEqual(r.status_code, 201, r.data)
+        bad = self.client.post(A + f"leases/{r.data['id']}/terminate/", {"date": "2026-09-01"}, format="json")
+        self.assertEqual(bad.status_code, 400)
+        ok = self.client.post(A + f"leases/{r.data['id']}/terminate/", {"date": "2026-10-15"}, format="json")
+        self.assertEqual(ok.status_code, 200)
+
+    def test_unit_patch_response_has_fresh_reserved_status(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        u = self.unit("R1")
+        until = (timezone.localdate() + timedelta(days=5)).isoformat()
+        r = self.client.patch(A + f"units/{u['id']}/", {"reserved_for": "Иван", "reserved_until": until}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data["status"], "reserved")
+
+
+class BranchLimitedStaffTests(ArendaBase):
+    """Сотрудник с доступом к одному филиалу не видит арендаторов, акты и напоминания чужого филиала."""
+
+    def test_foreign_branch_tenant_is_hidden(self):
+        from apps.arenda.models import ArendaAccess
+
+        t_in = self.client.post(A + "tenants/", {"name": "Свой", "branch": str(self.branch.id)}, format="json").data
+        t_out = self.client.post(A + "tenants/", {"name": "Чужой", "branch": str(self.branch2.id)}, format="json").data
+        act = self.client.post(A + f"tenants/{t_out['id']}/acts/", {"date_from": "2026-01-01", "date_to": "2026-01-31"},
+                               format="json")
+        self.assertEqual(act.status_code, 201, act.data)
+        u, cl = self.staff("lim@a.kg")
+        acc = ArendaAccess.objects.create(user=u, company=self.company, sections=["tenants", "cash", "notifications"],
+                                          all_branches=False)
+        acc.branches.set([self.branch])
+        for path in (f"tenants/{t_out['id']}/", f"tenants/{t_out['id']}/card/", f"tenants/{t_out['id']}/acts/",
+                     f"acts/{act.data['id']}/", f"acts/{act.data['id']}/print/", f"tenants/{t_out['id']}/remarks/"):
+            self.assertEqual(cl.get(A + path).status_code, 404, path)
+        self.assertEqual(cl.get(A + f"tenants/{t_in['id']}/").status_code, 200)
+        self.assertEqual(cl.get(A + "acts/").data["count"], 0)
+        self.assertEqual(cl.post(A + "notifications/remind/", {"tenant_ids": [t_out["id"]], "channel": "sms"},
+                                 format="json").status_code, 404)
+        self.assertEqual(cl.get(A + "reminders/?tenant=not-a-uuid").status_code, 400)

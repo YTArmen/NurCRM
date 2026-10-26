@@ -16,7 +16,7 @@ from apps.users.models import Branch, User
 from core.exceptions import ApiError
 
 from . import audit
-from .branch_filter import apply_branch, branch_ids_from_request
+from .branch_filter import apply_branch, branch_ids_from_request, tenant_visible
 from .constants import PRESETS, SECTION_TITLES, SECTIONS
 from .models import (ArendaAccess, ArendaBranchInfo, ArendaSettings, Asset, Charge, Counter, Employee, Expense,
                      Lease, Payment, Tenant, Unit, UnitType)
@@ -340,6 +340,9 @@ class UnitViewSet(CtxMixin, viewsets.ModelViewSet):
             self._check_number(inst.branch, d["number"], exclude=inst)
         before = _ver(inst, ["number", "floor", "area", "rate"])
         obj = serializer.save()
+        # статус в ответе — по новым данным (бронь, срок), а не по карте, собранной до сохранения
+        serializer.context["state_map"] = stats.unit_state_map(self.ctx.company, self.today(), None,
+                                                               self.settings_obj().soon_days)
         audit.log(self.request, self.ctx.company, "update", "unit", obj, before=before,
                   after=_ver(obj, ["number", "floor", "area", "rate"]), branch=obj.branch)
 
@@ -512,7 +515,7 @@ class TenantViewSet(ManualPaging, CtxMixin, viewsets.ViewSet):
 
     def _get(self, pk):
         t = Tenant.objects.filter(pk=pk, company=self.ctx.company, archived_at__isnull=True).first()
-        if not t:
+        if not t or not tenant_visible(self.ctx, t):
             raise ApiError("not_found", "Арендатор не найден.", status_code=404)
         return t
 
@@ -718,6 +721,8 @@ class LeaseViewSet(ManualPaging, CtxMixin, viewsets.ViewSet):
             when = _d.fromisoformat(raw) if raw else self.today()
         except ValueError:
             raise ValidationError({"date": ["Формат YYYY-MM-DD."]})
+        if when < lease.start_date:
+            raise ValidationError({"date": ["Дата расторжения раньше начала договора."]})
         before = self._payload(lease)
         lease.status = "terminated"
         lease.terminated_at = when
