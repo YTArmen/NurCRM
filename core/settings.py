@@ -129,6 +129,7 @@ INSTALLED_APPS = [
     'apps.onec',
     'apps.releases',
     'apps.possync',
+    'apps.catalog_media',
     'apps.integrations',
     'apps.support',
     'apps.clientapp',

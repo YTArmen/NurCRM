@@ -3213,7 +3213,7 @@ class ProductByGlobalBarcodeAPIView(CompanyBranchRestrictedMixin, generics.Retri
     serializer_class = GlobalProductReadSerializer
     lookup_field = "barcode"
     # важно определить queryset, иначе миксин выдаст AssertionError
-    queryset = GlobalProduct.objects.select_related("brand", "category").all()
+    queryset = GlobalProduct.objects.select_related("brand", "category", "photo").all()
 
     def get_object(self):
         import re

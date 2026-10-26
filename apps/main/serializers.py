@@ -3946,10 +3946,35 @@ class AgentWithProductsSerializer(serializers.Serializer):
 class GlobalProductReadSerializer(serializers.ModelSerializer):
     brand = serializers.CharField(source="brand.name", read_only=True)
     category = serializers.CharField(source="category.name", read_only=True)
+    image_url = serializers.SerializerMethodField()
+    image_source = serializers.SerializerMethodField()
 
     class Meta:
         model = GlobalProduct
-        fields = ["id", "name", "barcode", "brand", "category"]
+        fields = ["id", "name", "barcode", "brand", "category", "image_url", "image_source"]
+
+    def _photo_info(self, obj):
+        """(url, source) фото из apps.catalog_media; (None, None), если фото нет."""
+        cache = self.__dict__.setdefault("_photo_cache", {})
+        if obj.pk in cache:
+            return cache[obj.pk]
+        res = (None, None)
+        try:
+            photo = obj.photo  # OneToOne (в view — select_related('photo'))
+        except Exception:
+            photo = None
+        if photo is not None:
+            url = photo.build_url(self.context.get("request"))
+            if url:
+                res = (url, photo.source)
+        cache[obj.pk] = res
+        return res
+
+    def get_image_url(self, obj):
+        return self._photo_info(obj)[0]
+
+    def get_image_source(self, obj):
+        return self._photo_info(obj)[1]
 
 
 class PromoRuleSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
