@@ -20,11 +20,14 @@ from apps.possync.tests import PossyncBase
 
 
 class CheckoutBase(PossyncBase):
+    client_hdr = "kassa/1.17.61"  # новый клиент: строгое поведение (Б-02)
+
     def co(self, items, payment=None, key=None, **extra):
         body = {"items": items, "payment": payment or {"method": "cash", "received": "1000000.00"}}
         body.update(extra)
+        hdr = {"HTTP_X_NURMARKET_CLIENT": self.client_hdr} if self.client_hdr else {}
         return self.api.post("/api/main/pos/checkout/", body, format="json",
-                             HTTP_IDEMPOTENCY_KEY=key or f"k-{uuid.uuid4()}")
+                             HTTP_IDEMPOTENCY_KEY=key or f"k-{uuid.uuid4()}", **hdr)
 
     def mk(self, n=1, **kw):
         return [Product.objects.create(company=self.company, name=f"Т{uuid.uuid4().hex[:5]}",
@@ -234,7 +237,8 @@ class NumberAndPathsTests(CheckoutBase):
         self.assertEqual(r.data["code"], "negative_price")
         self.assertEqual(r.data["errors"][0]["index"], 0)
         cart = self.api.post("/api/main/pos/sales/start/", {}, format="json").data["id"]
-        r = self.api.post(f"/api/main/pos/carts/{cart}/custom-item/", {"name": "Скидка", "price": "-5.00"}, format="json")
+        r = self.api.post(f"/api/main/pos/carts/{cart}/custom-item/", {"name": "Скидка", "price": "-5.00"}, format="json",
+                          HTTP_X_NURMARKET_CLIENT="kassa/1.17.61")
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.data["code"], "negative_price")
         # положительная — как раньше на обоих
@@ -388,7 +392,8 @@ class BulkAndClearTests(CheckoutBase):
         self.assertEqual(r.data["errors"][0]["index"], 1)
         self.assertEqual(CartItem.objects.filter(cart_id=self.cart).count(), 0)
         r = self.api.post(f"/api/main/pos/sales/{self.cart}/items/bulk/", {"items": [
-            {"custom": True, "name": "x", "price": "-1", "quantity": "1"}]}, format="json")
+            {"custom": True, "name": "x", "price": "-1", "quantity": "1"}]}, format="json",
+            HTTP_X_NURMARKET_CLIENT="kassa/1.17.61")
         self.assertEqual(r.data["code"], "negative_price")
         r = self.api.post(f"/api/main/pos/sales/{self.cart}/items/bulk/", {"items": [
             {"product_id": str(uuid.uuid4()), "quantity": "1"}]}, format="json")

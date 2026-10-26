@@ -21,6 +21,7 @@ def mk(name):
     owner.save()
     api = APIClient()
     api.force_authenticate(owner)
+    api.defaults["HTTP_X_NURMARKET_CLIENT"] = "kassa/1.17.61"  # новый клиент: 409/429 (Б-02)
     return company, api, plan
 
 
