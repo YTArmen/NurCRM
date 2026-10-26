@@ -667,6 +667,15 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
         creator = request.user
         company = getattr(creator, "owned_company", None) or getattr(creator, "company", None)
 
+        if company is not None:
+            from apps.users.services_subscription import employee_limit_error
+
+            # Лимит тарифа; блокировка строки компании — чтобы два запроса разом не прошли оба.
+            Company.objects.select_for_update().filter(pk=company.pk).first()
+            limit_error = employee_limit_error(company)
+            if limit_error:
+                raise serializers.ValidationError({"detail": limit_error, "code": "employee_limit"})
+
         primary_branch_id = validated_data.pop("primary_branch", None)
         validated_data.pop("branches", None)
         branches_objects = validated_data.pop("_branches_objects", [])

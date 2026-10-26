@@ -60,3 +60,56 @@ class SupportConstructorTests(APITestCase):
         self.assertEqual(self.post({"email": "nobody@t.kg", "codes": []}).status_code, 400)
         self.assertEqual(self.post({"email": self.owner.email, "codes": [], "max_employees": 0}).status_code, 400)
         self.assertFalse(CompanyAddon.objects.filter(company=self.company).exists())
+
+
+class EmployeeLimitTests(APITestCase):
+    """Лимит сотрудников вместе с владельцем: «Старт» 3, «Стандарт» 10, «По договору» — из конструктора."""
+
+    def setUp(self):
+        self.owner = User.objects.create_user(email=f"o_{uuid.uuid4().hex[:6]}@t.kg", password="x", role="owner")
+        self.company = Company.objects.create(name="C", owner=self.owner)
+        self.owner.company = self.company
+        self.owner.save()
+        self.client.force_authenticate(self.owner)
+
+    def use_plan(self, name):
+        self.company.subscription_plan = SubscriptionPlan.objects.create(name=name, price=Decimal("1"))
+        self.company.save()
+
+    def add(self):
+        return self.client.post("/api/users/employees/create/", {
+            "email": f"e_{uuid.uuid4().hex[:6]}@t.kg", "first_name": "A", "last_name": "B", "role": "salesperson",
+        }, format="json")
+
+    def fill(self, total):
+        for _ in range(total - 1):
+            User.objects.create_user(email=f"s_{uuid.uuid4().hex[:6]}@t.kg", password="x", role="salesperson", company=self.company)
+
+    def test_start_three(self):
+        self.use_plan("Старт")
+        self.fill(2)
+        first = self.add()
+        self.assertEqual(first.status_code, 201, first.data)
+        res = self.add()
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("3", str(res.data))
+        self.assertEqual(get_company_limits(self.company, "start")["employees"], {"used": 3, "max": 3})
+
+    def test_start_extra_employees_addon_lifts_limit(self):
+        self.use_plan("Старт")
+        self.fill(3)
+        CompanyAddon.objects.create(company=self.company, code="extra-employees")
+        self.assertEqual(self.add().status_code, 201)
+
+    def test_standard_ten(self):
+        self.use_plan("Стандарт")
+        self.fill(9)
+        self.assertEqual(self.add().status_code, 201)
+        self.assertEqual(self.add().status_code, 400)
+
+    def test_custom_from_constructor_or_unlimited(self):
+        self.use_plan("Прайм")
+        self.fill(12)
+        self.assertEqual(self.add().status_code, 201)
+        CompanyAddon.objects.create(company=self.company, code="constructor", note="конструктор support; max_employees=13")
+        self.assertEqual(self.add().status_code, 400)
