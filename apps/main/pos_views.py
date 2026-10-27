@@ -2973,6 +2973,10 @@ class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
             card_method = ser.validated_data.get("card_method")
             prepayment_method = ser.validated_data.get("prepayment_method")
 
+            # ТЗ 26.10 Б-61: партии и отрезной товар (None — нет ни партий, ни отрезов)
+            from apps.main.tz26.hw_batches.services import commit_checkout, plan_checkout
+            batches_plan = plan_checkout(cart, getattr(request, "data", None))
+
             try:
                 sale = checkout_cart(
                     cart,
@@ -3006,6 +3010,8 @@ class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
             except ValueError as e:
                 transaction.set_rollback(True)
                 return Response(_checkout_value_error_body(e, cart, cash_received), status=status.HTTP_400_BAD_REQUEST)
+
+            commit_checkout(batches_plan, sale, request.user)  # ТЗ 26.10 Б-61
 
             cons_name = None
             if sale.consultant:

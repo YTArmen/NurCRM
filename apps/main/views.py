@@ -6208,6 +6208,9 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
 
         if receipt_items:
             SupplierReceiptItem.objects.bulk_create(receipt_items)
+            # ТЗ 26.10 Б-61: batch_label строки прихода -> остаток партии (без метки ничего не делает)
+            from apps.main.tz26.hw_batches.services import record_receipt_batches
+            record_receipt_batches(company, request.data.get("items"), receipt_items)
         if po_order is not None:
             from apps.main.purchase_orders import apply_receipt_to_order
             apply_receipt_to_order(po_order, [(ri.product_id, ri.qty) for ri in receipt_items])
