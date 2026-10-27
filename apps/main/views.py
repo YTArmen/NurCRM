@@ -5369,11 +5369,11 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
         qp = request.query_params
 
         # 1. Валидация параметров (ТЗ Н-30: единый код invalid_param)
-        def _bad(field, detail):
-            return Response(
-                {"code": "invalid_param", "detail": detail, "field": field},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        def _bad(field, detail, allowed=None):
+            body = {"detail": detail, "code": "invalid_param", "field": field}  # Б-11: detail первым
+            if allowed is not None:
+                body["data"] = {"allowed": allowed}
+            return Response(body, status=status.HTTP_400_BAD_REQUEST)
 
         def _int_param(field, default):
             raw = qp.get(field, default)
@@ -5389,7 +5389,7 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
         if err:
             return err
         if analysis_days not in (7, 14, 30):
-            return _bad("analysis_days", "analysis_days должен быть 7, 14 или 30.")
+            return _bad("analysis_days", "analysis_days должен быть 7, 14 или 30.", allowed=[7, 14, 30])
         coverage_days, err = _int_param("coverage_days", "7")
         if err:
             return err
