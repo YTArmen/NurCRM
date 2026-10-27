@@ -164,6 +164,7 @@ except Exception:
 
 
 # --------- company + branch (как в барбере/букинге) ---------
+from apps.users.permissions import read_only_guard  # noqa: E402
 class CompanyBranchQuerysetMixin:
     permission_classes = [permissions.IsAuthenticated]
 
@@ -791,6 +792,7 @@ class CafeExpenseRetrieveUpdateDestroyView(CompanyBranchQuerysetMixin, generics.
         return qs
 
 
+@read_only_guard("can_edit_salary")
 class CafeWaiterPayProfileListCreateView(CompanyBranchQuerysetMixin, generics.ListCreateAPIView):
     serializer_class = CafeWaiterPayProfileSerializer
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
@@ -810,6 +812,7 @@ class CafeWaiterPayProfileListCreateView(CompanyBranchQuerysetMixin, generics.Li
         return qs
 
 
+@read_only_guard("can_edit_salary")
 class CafeWaiterPayProfileRetrieveUpdateDestroyView(CompanyBranchQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = CafeWaiterPayProfileSerializer
 

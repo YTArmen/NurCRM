@@ -21,7 +21,11 @@ from apps.construction.views import (
     CashboxReportAnalyticsView,
 )
 from apps.construction.sale_history_views import CashShiftSalesListView
+from apps.construction.views_buhgalter import AuditLogView, CashboxBalancesView, CashFlowCheckView
+
 urlpatterns = [
+    path("audit-log/", AuditLogView.as_view(), name="construction-audit-log"),
+    path("cashboxes/balances/", CashboxBalancesView.as_view(), name="cashbox-balances"),
     path("cashboxes/", CashboxListCreateView.as_view(), name="cashbox-list-create"),
     path("cashboxes/<uuid:pk>/", CashboxDetailView.as_view(), name="cashbox-detail"),
     path("cashboxes/bulk-delete/", CashboxBulkDeleteView.as_view(), name="cashbox-bulk-delete"),
@@ -36,6 +40,7 @@ urlpatterns = [
     path("cashflows/<uuid:pk>/", CashFlowDetailView.as_view(), name="cashflow-detail"),
     path("cashflows/<uuid:pk>/edit-request/", CashFlowEditRequestView.as_view(), name="cashflow-edit-request"),
     path("cashflows/<uuid:pk>/cancel-request/", CashFlowCancelRequestView.as_view(), name="cashflow-cancel-request"),
+    path("cashflows/<uuid:pk>/check/", CashFlowCheckView.as_view(), name="cashflow-check"),
     path("cashflows/bulk/status/", CashFlowBulkStatusUpdateView.as_view(), name="cashflow-bulk-status"),
 
     path("cashflow-categories/", CashFlowCategoryListCreateView.as_view(), name="cashflow-category-list-create"),

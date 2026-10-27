@@ -3,6 +3,7 @@ from datetime import timedelta
 import secrets
 import string
 
+from apps.users.permissions import READ_ONLY_FIELDS
 from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.core.mail import send_mail
@@ -394,6 +395,7 @@ class UserSerializer(serializers.ModelSerializer):
             # Склад: опасные операции (null — по умолчанию для роли)
             "can_post_negative_stock", "can_unpost_documents", "can_change_document_date",
             "can_post_closed_period", "can_cash_negative",
+            *READ_ONLY_FIELDS,
 
             # Consulting: воронка продаж
             "can_view_funnel", "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend", "can_view_leads_inbox", "funnel_grants",
@@ -665,6 +667,15 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
         creator = request.user
         company = getattr(creator, "owned_company", None) or getattr(creator, "company", None)
 
+        if company is not None:
+            from apps.users.services_subscription import employee_limit_error
+
+            # Лимит тарифа; блокировка строки компании — чтобы два запроса разом не прошли оба.
+            Company.objects.select_for_update().filter(pk=company.pk).first()
+            limit_error = employee_limit_error(company)
+            if limit_error:
+                raise serializers.ValidationError({"detail": limit_error, "code": "employee_limit"})
+
         primary_branch_id = validated_data.pop("primary_branch", None)
         validated_data.pop("branches", None)
         branches_objects = validated_data.pop("_branches_objects", [])
@@ -823,6 +834,7 @@ class EmployeeUpdateSerializer(serializers.ModelSerializer):
             "can_manage_funnel_stages",
             "can_create_funnel",
             "can_manage_lead_ad_spend",
+            *READ_ONLY_FIELDS,
             "funnel_grants",
             "branch_ids",
         ]
@@ -944,6 +956,7 @@ class UserListSerializer(serializers.ModelSerializer):
             "consulting_region_codes", "consulting_regions",
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
             "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend",
+            *READ_ONLY_FIELDS,
             "branch_ids", "primary_branch_id",
         ]
 
@@ -973,6 +986,7 @@ class UserWithPermissionsSerializer(serializers.ModelSerializer):
             "consulting_region_codes", "consulting_regions",
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
             "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend",
+            *READ_ONLY_FIELDS,
             "branch_ids", "primary_branch_id",
         ]
 

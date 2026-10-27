@@ -70,6 +70,8 @@ class QuickCheckoutItemSerializer(serializers.Serializer):
     custom = serializers.BooleanField(required=False, default=False)
     product = serializers.UUIDField(required=False, allow_null=True)
     sale_package = serializers.UUIDField(required=False, allow_null=True)
+    # Продажа упаковкой: qty — число упаковок, цена — цена упаковки (обрабатывает apps.possync.packs)
+    sale_package_id = serializers.UUIDField(required=False, allow_null=True)
     variant = serializers.UUIDField(required=False, allow_null=True)
     performer = serializers.UUIDField(required=False, allow_null=True)
     name = serializers.CharField(required=False, allow_blank=True, max_length=255)
@@ -77,6 +79,12 @@ class QuickCheckoutItemSerializer(serializers.Serializer):
     price = MoneyField(required=False, allow_null=True)
     discount = MoneyField(required=False, allow_null=True, default=ZERO)
     is_wholesale = serializers.BooleanField(required=False, default=False)
+
+    # ТЗ 11.5: принимается псевдоним quantity.
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and data.get("qty") in (None, "") and data.get("quantity") not in (None, ""):
+            data = {**data, "qty": data["quantity"]}
+        return super().to_internal_value(data)
 
     def validate(self, attrs):
         if attrs["qty"] <= 0:
@@ -93,6 +101,15 @@ class QuickCheckoutItemSerializer(serializers.Serializer):
         return attrs
 
 
+class CheckoutItemSerializer(QuickCheckoutItemSerializer):
+    """Строка чека POS checkout: qty/quantity обязательны (раньше молча ставилась 1 шт.)."""
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and all(data.get(k) in (None, "") for k in ("qty", "quantity")):
+            raise serializers.ValidationError({"qty": "Укажите количество (qty или quantity)."})
+        return super().to_internal_value(data)
+
+
 class QuickCheckoutPaymentSerializer(serializers.Serializer):
     method = serializers.ChoiceField(choices=Sale.PaymentMethod.choices, default=Sale.PaymentMethod.CASH)
     received = MoneyField(required=False, allow_null=True)
@@ -102,11 +119,17 @@ class QuickCheckoutPaymentSerializer(serializers.Serializer):
     prepayment_method = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     payments = serializers.ListField(child=serializers.DictField(), required=False)
 
+    def to_internal_value(self, data):
+        # ТЗ 12.9: старое имя cash_received принимается как received.
+        if isinstance(data, dict) and data.get("received") in (None, "") and data.get("cash_received") not in (None, ""):
+            data = {**data, "received": data["cash_received"]}
+        return super().to_internal_value(data)
+
 
 class QuickCheckoutSerializer(serializers.Serializer):
     shift = serializers.UUIDField(required=False, allow_null=True)
     client = serializers.UUIDField(required=False, allow_null=True)
-    items = QuickCheckoutItemSerializer(many=True, allow_empty=False)
+    items = CheckoutItemSerializer(many=True, allow_empty=False)
     order_discount_total = MoneyField(required=False, allow_null=True)
     order_discount_percent = serializers.DecimalField(
         max_digits=5, decimal_places=2, required=False, allow_null=True, min_value=0, max_value=100
@@ -129,6 +152,11 @@ class QuickCheckoutSerializer(serializers.Serializer):
     # серверу — продажа идёт в смену этой кассы, открытую в это время, иначе в техническую смену дня.
     sold_at = serializers.DateTimeField(required=False, allow_null=True)
     cashbox = serializers.UUIDField(required=False, allow_null=True)
+    # Удалённые строки корзины (веб-касса) — пишутся в CartItemDeletionLog (apps.possync.deletions)
+    deleted_items = serializers.ListField(child=serializers.DictField(), required=False, allow_empty=True, max_length=500)
+    # График долга (веб-касса): создаётся вместе со сделкой (apps.possync.schedule)
+    debt_schedule = serializers.JSONField(required=False, allow_null=True)
+    schedule_version = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
     def to_internal_value(self, data):
         items = data.get("items")
@@ -431,6 +459,8 @@ class PosQuickCheckoutAPIView(APIView):
                         sale=sale,
                         user=user,
                     )
+                # Хук для проверок после создания чека (лимиты долга и т.п.): исключение откатывает всю транзакцию.
+                self.after_sale_created(request, sale, client, data)
                 sale.idempotency_key = key
                 Sale.objects.filter(pk=sale.pk).update(
                     idempotency_key=key,
@@ -457,6 +487,9 @@ class PosQuickCheckoutAPIView(APIView):
         return Response(body, status=status.HTTP_201_CREATED)
 
     # --- helpers ---
+
+    def after_sale_created(self, request, sale, client, data):
+        """Переопределяется в apps.possync: проверки внутри транзакции продажи."""
 
     def _add_items(self, cart, items, limit_discounts, max_dp):
         from apps.main.pos_views import _q2, default_unit_price_for_package

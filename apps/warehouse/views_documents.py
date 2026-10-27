@@ -2,6 +2,7 @@ from rest_framework import status, permissions, filters
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from apps.users.permissions import read_only_guard
 from rest_framework import generics
 from django.shortcuts import get_object_or_404
 from django.db.models import Q, Prefetch
@@ -60,6 +61,7 @@ def _agent_allowed_for_company(agent_user, company):
     ).exists()
 
 
+@read_only_guard("can_edit_documents")
 class DocumentListCreateView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     serializer_class = serializers_documents.DocumentSerializer
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
@@ -303,6 +305,7 @@ class DocumentTransferListCreateView(_DocumentTypedListCreateView):
                 _raise_service_error(e)
 
 
+@read_only_guard("can_edit_documents")
 class DocumentDetailView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = serializers_documents.DocumentSerializer
     
@@ -510,6 +513,7 @@ class AgentDocumentDetailView(DocumentDetailView):
         return qs.filter(agent=self.request.user)
 
 
+@read_only_guard("can_edit_documents")
 class DocumentPostView(CompanyBranchRestrictedMixin, generics.GenericAPIView):
     serializer_class = serializers_documents.DocumentSerializer
     
@@ -614,6 +618,7 @@ class DocumentPostView(CompanyBranchRestrictedMixin, generics.GenericAPIView):
         return Response(self.get_serializer(doc).data)
 
 
+@read_only_guard("can_edit_documents")
 class DocumentUnpostView(CompanyBranchRestrictedMixin, generics.GenericAPIView):
     serializer_class = serializers_documents.DocumentSerializer
     
@@ -856,6 +861,7 @@ class CashApprovalRequestRejectView(CompanyBranchRestrictedMixin, generics.Gener
         return Response(out, status=status.HTTP_200_OK)
 
 
+@read_only_guard("can_edit_documents")
 class DocumentTransferCreateAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     Быстрое перемещение товара (создает документ TRANSFER и сразу проводит).
@@ -934,6 +940,7 @@ class GenerateBarcodeView(CompanyBranchRestrictedMixin, APIView):
         return Response({"barcode": generate_internal_barcode(company)})
 
 
+@read_only_guard("can_edit_products")
 class ProductListCreateView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     serializer_class = serializers_documents.ProductSimpleSerializer
     filter_backends = [DjangoFilterBackend]
@@ -973,6 +980,7 @@ class ProductListCreateView(CompanyBranchRestrictedMixin, generics.ListCreateAPI
         return qs
 
 
+@read_only_guard("can_edit_products")
 class ProductDetailView(ProtectedProductDeleteMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = serializers_documents.ProductSimpleSerializer
 

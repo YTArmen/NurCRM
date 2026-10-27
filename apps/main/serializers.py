@@ -1812,6 +1812,22 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
         promotion_raw = validated_data.pop("promotion_rules_input", None) if promotion_in else None
         alt_in = "alternate_barcodes" in getattr(self, "initial_data", {})
         alternate_raw = validated_data.pop("alternate_barcodes", None) if alt_in else None
+        # ТЗ 11.6: characteristics (read-only в схеме) принимаем из тела PATCH, как в create-manual.
+        chars_raw = getattr(self, "initial_data", {}).get("characteristics") if hasattr(getattr(self, "initial_data", None), "get") else None
+        if isinstance(chars_raw, dict):
+            chars_ser = ProductCharacteristicsSerializer(
+                instance=getattr(instance, "characteristics", None), data=chars_raw, partial=True
+            )
+            chars_ser.is_valid(raise_exception=True)
+            chars_obj, _ = ProductCharacteristics.objects.update_or_create(
+                product=instance,
+                defaults={
+                    "company": instance.company,
+                    "branch": instance.branch,
+                    **chars_ser.validated_data,
+                },
+            )
+            instance.characteristics = chars_obj  # сбросить кэш, чтобы ответ показал новые значения
         if promotion_in and promotion_raw:
             try:
                 pr_rows = parse_product_promotion_tiers_payload(promotion_raw)
@@ -2205,6 +2221,21 @@ class ClientSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
             'id', 'company', 'branch', 'created_at', 'updated_at',
             'salesperson_display', 'service_display', 'bonus_balance'
         ]
+        # ТЗ 12.16: телефон обязателен всем, кроме поставщиков (см. validate)
+        extra_kwargs = {'phone': {'required': False, 'allow_blank': True}}
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        inst = getattr(self, 'instance', None)
+        client_type = attrs.get('type', getattr(inst, 'type', None))
+        # проверяем при создании или когда телефон явно присылают (старых клиентов без телефона не трогаем)
+        if inst is None or 'phone' in attrs:
+            phone = (attrs.get('phone') or '').strip()
+            if not phone and client_type != Client.StatusClient.SUPPLIERS:
+                raise serializers.ValidationError({'phone': 'Укажите телефон.'})
+        if inst is None:
+            attrs.setdefault('phone', '')
+        return attrs
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -4319,7 +4350,11 @@ class AgentRequestCartSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSe
 
 class MarketSaleEmployeePayProfileSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
     company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")
+    # ТЗ 12.21: branch можно передать явно (null = схема для всех филиалов) и он всегда возвращается.
+    # Не передан -> как раньше: активный филиал запроса или null.
+    branch = serializers.PrimaryKeyRelatedField(
+        queryset=Branch.objects.all(), required=False, allow_null=True
+    )
 
     class Meta:
         model = MarketSaleEmployeePayProfile
@@ -4340,7 +4375,23 @@ class MarketSaleEmployeePayProfileSerializer(CompanyBranchReadOnlyMixin, seriali
         company = self._user_company()
         if company and hasattr(User, "company_id"):
             fields["user"].queryset = User.objects.filter(company_id=company.id)
+        if company and "branch" in fields:
+            fields["branch"].queryset = Branch.objects.filter(company_id=company.id)
         return fields
+
+    def create(self, validated_data):
+        company = self._user_company()
+        if company:
+            validated_data["company"] = company
+        if "branch" not in validated_data:
+            validated_data["branch"] = self._auto_branch()
+        return serializers.ModelSerializer.create(self, validated_data)
+
+    def update(self, instance, validated_data):
+        company = self._user_company()
+        if company:
+            validated_data["company"] = company
+        return serializers.ModelSerializer.update(self, instance, validated_data)
 
     def validate(self, attrs):
         data = super().validate(attrs)

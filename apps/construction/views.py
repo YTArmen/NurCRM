@@ -19,6 +19,8 @@ from rest_framework.exceptions import PermissionDenied, ValidationError, NotFoun
 from rest_framework.pagination import PageNumberPagination
 
 from apps.construction.models import Cashbox, CashFlow, CashFlowCategory, CashShift
+from apps.users.permissions import read_only_guard
+from apps.users.pin import pin_guard
 
 from apps.main.notifications_market import notify_shift_closed, notify_shift_opened
 from apps.ekassa.runtime import schedule_after_commit
@@ -97,6 +99,13 @@ def _choice_value(model, enum_name: str, member: str, fallback: str):
     enum = getattr(model, enum_name, None)
     v = getattr(enum, member, None)
     return getattr(v, "value", None) or v or fallback
+
+
+def _ensure_cash_period_open(request, company, dates):
+    """Закрытие периода (ТЗ «Бухгалтер», п. 2): операции кассы с датой <= closed_until."""
+    from apps.warehouse.services import ensure_period_open_api
+
+    ensure_period_open_api(company=company, dates=dates, user=request.user)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -181,6 +190,7 @@ class CompanyBranchScopedMixin:
 # ─────────────────────────────────────────────────────────────
 # CASHBOXES
 # ─────────────────────────────────────────────────────────────
+@read_only_guard("can_edit_cashbox")
 class CashboxListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIView):
     queryset = Cashbox.objects.select_related("company", "branch").order_by("-created_at")
     serializer_class = CashboxSerializer
@@ -384,6 +394,7 @@ class CashboxListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIView
         return Response(serializer.data)
 
 
+@read_only_guard("can_edit_cashbox")
 class CashboxDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Cashbox.objects.select_related("company", "branch").prefetch_related(
         "flows__category",
@@ -528,6 +539,7 @@ class CashboxDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroy
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@read_only_guard("can_edit_cashbox")
 class CashboxBulkDeleteView(CompanyBranchScopedMixin, APIView):
     """Archive/delete each requested cashbox independently.
 
@@ -614,6 +626,7 @@ def _parse_amount(raw, field: str):
     return value
 
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIView):
     queryset = CashFlow.objects.select_related(
         "company", "branch",
@@ -644,6 +657,13 @@ class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIVie
         if cashboxes:
             ids = [x.strip() for x in cashboxes.split(",") if x.strip()]
             qs = qs.filter(cashbox_id__in=ids)
+
+        # ✅ проверено бухгалтером: ?checked=true|false
+        checked = (qp.get("checked") or "").strip().lower()
+        if checked in ("true", "1", "yes"):
+            qs = qs.filter(checked_at__isnull=False)
+        elif checked in ("false", "0", "no"):
+            qs = qs.filter(checked_at__isnull=True)
 
         # ✅ по смене: ?shift=<uuid>
         shift_id = qp.get("shift")
@@ -758,8 +778,13 @@ class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIVie
         return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
+        _ensure_cash_period_open(self.request, self._company(), [timezone.now()])
         self._inject_company_branch_on_save(serializer)
+        from apps.construction.audit import log_cashflow, cashflow_snapshot
+        if isinstance(serializer.instance, CashFlow):
+            log_cashflow(self.request, serializer.instance, "create", after=cashflow_snapshot(serializer.instance))
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = CashFlow.objects.select_related(
         "company", "branch",
@@ -777,6 +802,7 @@ class CashFlowDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestro
     def update(self, request, *args, **kwargs):
         instance = self.get_object()
         old_status = instance.status
+        _ensure_cash_period_open(request, instance.company, [instance.created_at])
 
         # Если это заявка на редактирование или отмену
         if instance.request_kind in (CashFlow.RequestKind.EDIT, CashFlow.RequestKind.CANCEL):
@@ -785,16 +811,30 @@ class CashFlowDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestro
                 from apps.construction.services_change_requests import resolve_change_request
                 resolve_change_request(instance, new_status=new_st, user=request.user)
                 instance.refresh_from_db()
+                from apps.construction.audit import log_cashflow
+                log_cashflow(request, instance.target_flow or instance, "approve" if new_st == CashFlow.Status.APPROVED else "reject",
+                             after={"request_kind": instance.request_kind, "request_id": str(instance.pk)})
                 return Response(self.get_serializer(instance).data)
 
+        from apps.construction.audit import log_cashflow, cashflow_snapshot
+        before = cashflow_snapshot(instance)
         resp = super().update(request, *args, **kwargs)
         instance.refresh_from_db()
+        log_cashflow(request, instance, "update", before=before, after=cashflow_snapshot(instance))
         if old_status != CashFlow.Status.REJECTED and instance.status == CashFlow.Status.REJECTED:
             from apps.construction.auto_cashflow import handle_cashflow_reject
             handle_cashflow_reject(instance, user=request.user)
         return resp
 
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        _ensure_cash_period_open(request, instance.company, [instance.created_at])
+        from apps.construction.audit import log_cashflow, cashflow_snapshot
+        log_cashflow(request, instance, "delete", before=cashflow_snapshot(instance))
+        return super().destroy(request, *args, **kwargs)
 
+
+@read_only_guard("can_edit_cashbox")
 class CashFlowEditRequestView(CompanyBranchScopedMixin, APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -804,6 +844,7 @@ class CashFlowEditRequestView(CompanyBranchScopedMixin, APIView):
         target_flow = qs.filter(id=pk).first()
         if not target_flow:
             raise NotFound({"detail": "Движение кассы не найдено."})
+        _ensure_cash_period_open(request, target_flow.company, [target_flow.created_at])
 
         if target_flow.request_kind:
             return Response(
@@ -902,10 +943,14 @@ class CashFlowEditRequestView(CompanyBranchScopedMixin, APIView):
             idempotency_key=idempotency_key,
         )
 
+        from apps.construction.audit import log_cashflow
+        log_cashflow(request, target_flow, "edit_request", after={"proposed": {"type": str(prop_type), "amount": str(prop_amount), "name": prop_name}, "reason": reason, "request_id": str(req_flow.pk)})
         serializer = CashFlowSerializer(req_flow, context={"request": request})
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+@read_only_guard("can_edit_cashbox")
+@pin_guard("POST")
 class CashFlowCancelRequestView(CompanyBranchScopedMixin, APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -915,6 +960,7 @@ class CashFlowCancelRequestView(CompanyBranchScopedMixin, APIView):
         target_flow = qs.filter(id=pk).first()
         if not target_flow:
             raise NotFound({"detail": "Движение кассы не найдено."})
+        _ensure_cash_period_open(request, target_flow.company, [target_flow.created_at])
 
         if target_flow.request_kind:
             return Response(
@@ -1008,17 +1054,31 @@ class CashFlowCancelRequestView(CompanyBranchScopedMixin, APIView):
             idempotency_key=idempotency_key,
         )
 
+        from apps.construction.audit import log_cashflow
+        log_cashflow(request, target_flow, "cancel_request", after={"request_id": str(req_flow.pk)})
         serializer = CashFlowSerializer(req_flow, context={"request": request})
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowCategoryListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIView):
     queryset = CashFlowCategory.objects.select_related("company", "branch")
     serializer_class = CashFlowCategorySerializer
     pagination_class = None
 
     def get_queryset(self):
+        if self.request.method == "GET":
+            from apps.construction.categories import ensure_default_categories
+
+            ensure_default_categories(self._company())
         qs = self._scoped_queryset(super().get_queryset()).order_by("title")
+        qp = self.request.query_params
+        if qp.get("type") in ("income", "expense"):
+            qs = qs.filter(type__in=[qp["type"], "both"])
+        if (qp.get("archived") or "").lower() in ("true", "1"):
+            qs = qs.filter(archived=True)
+        elif (qp.get("archived") or "").lower() in ("false", "0"):
+            qs = qs.filter(archived=False)
         q = (self.request.query_params.get("search") or "").strip()
         if q:
             qs = qs.filter(title__icontains=q)
@@ -1029,6 +1089,7 @@ class CashFlowCategoryListCreateView(CompanyBranchScopedMixin, generics.ListCrea
         serializer.save()
 
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowCategoryDetailView(CompanyBranchScopedMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = CashFlowCategory.objects.select_related("company", "branch")
     serializer_class = CashFlowCategorySerializer
@@ -1311,6 +1372,7 @@ class CashShiftCloseView(APIView):
         return Response(out, status=200)
 
 
+@read_only_guard("can_edit_cashbox")
 class CashFlowBulkStatusUpdateView(CompanyBranchScopedMixin, generics.GenericAPIView):
     serializer_class = CashFlowBulkStatusSerializer
     CHUNK_SIZE = 1000
@@ -1339,8 +1401,11 @@ class CashFlowBulkStatusUpdateView(CompanyBranchScopedMixin, generics.GenericAPI
             raise ValidationError({"missing_ids": missing})
 
         old_flows = list(qs)
+        for cf in old_flows:  # закрытый период: смена статуса операций до closed_until запрещена
+            _ensure_cash_period_open(request, cf.company, [cf.created_at])
         updated_ids = []
         updated_count = 0
+        _before_status = {cf.id: cf.status for cf in old_flows}
 
         from apps.construction.services_change_requests import resolve_change_request
         from apps.construction.auto_cashflow import handle_cashflow_reject
@@ -1396,6 +1461,12 @@ class CashFlowBulkStatusUpdateView(CompanyBranchScopedMixin, generics.GenericAPI
                 if cf.status != CashFlow.Status.REJECTED and new_st == CashFlow.Status.REJECTED:
                     cf.status = CashFlow.Status.REJECTED
                     handle_cashflow_reject(cf, user=request.user)
+
+        from apps.construction.audit import log_cashflow
+        for cf in old_flows:
+            new_st = id_to_status.get(cf.id)
+            if new_st and new_st != _before_status.get(cf.id):
+                log_cashflow(request, cf, "update", before={"status": _before_status.get(cf.id)}, after={"status": new_st})
 
         return Response(
             {"count": updated_count, "updated_ids": updated_ids},

@@ -1012,8 +1012,26 @@ class Product(models.Model):
             if sm_rel and sm_rel.exists():
                 has_history = True
         if has_history:
+            # Удалённый товар освобождает PLU и штрихкоды: их можно сразу отдать другому товару
+            # (в строках чеков штрихкод сохранён в barcode_snapshot).
+            # Через update(), а не save(): save() выдал бы весовому товару новый PLU.
+            from django.core.cache import cache
+
+            old_plu = self.plu
+            old_barcodes = [self.barcode, *self.alternate_barcodes.values_list("barcode", flat=True)]
             self.status = self.Status.ARCHIVED
-            self.save(update_fields=["status", "updated_at"])
+            self.plu = None
+            self.barcode = None
+            self.updated_at = timezone.now()
+            Product.objects.filter(pk=self.pk).update(
+                status=self.status, plu=None, barcode=None, updated_at=self.updated_at
+            )
+            self.alternate_barcodes.all().delete()
+            if old_plu is not None:
+                cache.delete(f"product_plu:{self.company_id}:{old_plu}")
+            for bc in old_barcodes:
+                if (bc or "").strip():
+                    cache.delete(f"product_barcode:{self.company_id}:{bc.strip()}")
             # Для кассы архивный товар — удалённый: убирает его из каталога при синхронизации.
             ProductDeletion.objects.create(company_id=self.company_id, product_id=self.pk)
             return 1, {self._meta.label: 1}
@@ -1144,6 +1162,15 @@ class Product(models.Model):
                 assert_barcode_unique_in_company(
                     self.company_id, self.barcode, exclude_product_id=self.pk, branch_id=self.branch_id
                 )
+            if kwargs.get("update_fields") is not None:
+                update_fields = set(kwargs["update_fields"])
+                if self.seq is not None:
+                    update_fields.add("seq")
+                if self.code is not None:
+                    update_fields.add("code")
+                if self.plu is not None:
+                    update_fields.add("plu")
+                kwargs["update_fields"] = list(update_fields)
             super().save(*args, **kwargs)
             
         # Инвалидация кэша после сохранения
@@ -4162,6 +4189,11 @@ class ClientDeal(models.Model):
 
     def save(self, *args, **kwargs):
         custom_installments = getattr(self, "_custom_installments", None)
+        schedule_snapshot = None
+        if self.pk and not self._state.adding:
+            _old = ClientDeal.objects.filter(pk=self.pk).first()
+            if _old is not None:
+                schedule_snapshot = _old._schedule_terms()
         if self.kind != self.Kind.DEBT:
             self.debt_days = None
             self.debt_months = None
@@ -4176,7 +4208,18 @@ class ClientDeal(models.Model):
             return
 
         if self.auto_schedule or custom_installments:
+            # ТЗ 12.6: если по сделке уже есть платежи, а условия графика не менялись
+            # (правка title/note и т.п.), график не пересобираем.
+            if not custom_installments and schedule_snapshot is not None and self.payments.exists():
+                if self._schedule_terms() == schedule_snapshot:
+                    return
             self.rebuild_installments(custom_installments=custom_installments)
+
+    def _schedule_terms(self):
+        return (
+            self.kind, self.amount or Decimal("0"), self.prepayment or Decimal("0"),
+            self.debt_days, self.debt_months, self.first_due_date, self.schedule_version,
+        )
 
 
 def sync_sale_status_from_deal(deal_id) -> None:
@@ -5576,7 +5619,8 @@ class AgentRequestCart(models.Model):
                 })
 
             # списываем со склада
-            locked_qs.update(quantity=F("quantity") - need_qty)
+            # ТЗ-28 §2.1: продажа меняет updated_at, иначе касса пропустит остаток при ?updated_since=
+            locked_qs.update(quantity=F("quantity") - need_qty, updated_at=timezone.now())
 
             prod_model = type(prod)
             prod_id = prod.pk

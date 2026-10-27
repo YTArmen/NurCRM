@@ -1,5 +1,6 @@
 from apps.users.app_settings_views import CompanyFeatureActivateAPIView, UserAppSettingsAPIView
 from django.urls import path
+from apps.users.support_views import SupportCompanyFeaturesAPIView
 from .views import (
     CompanyAddonListAPIView,
     RegisterAPIView,
@@ -41,10 +42,15 @@ from apps.integrations.views import (
 )
 from apps.users.scale_views import send_products_to_scale, get_scale_api_token, register_scale
 
+from .pin import PinSetView, PinVerifyView, PinSettingsView
+
 urlpatterns = [
     # 🔐 Авторизация / регистрация
     path('auth/register/', RegisterAPIView.as_view(), name='user-register'),
     path('auth/login/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('auth/pin/', PinSetView.as_view(), name='admin-pin-set'),
+    path('auth/pin/verify/', PinVerifyView.as_view(), name='admin-pin-verify'),
+    path('auth/pin/settings/', PinSettingsView.as_view(), name='admin-pin-settings'),
     path('auth/refresh/', CustomTokenRefreshView.as_view(), name='token_refresh'),
     
     path("scales/token/", get_scale_api_token, name="scale-api-token"),
@@ -64,6 +70,7 @@ urlpatterns = [
     path('settings/company/', CompanyUpdateAPIView.as_view(), name='company-update'),
     path('company/check-slug/', CompanyCheckSlugAPIView.as_view(), name='company-check-slug'),
     path('company/addons/', CompanyAddonListAPIView.as_view(), name='company-addons'),
+    path('support/company-features/', SupportCompanyFeaturesAPIView.as_view(), name='support-company-features'),
 
     # 👥 Работа с сотрудниками
     path('employees/', EmployeeListAPIView.as_view(), name='employee-list'),

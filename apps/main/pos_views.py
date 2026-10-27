@@ -1,3 +1,4 @@
+from apps.users.pin import pin_guard
 from apps.integrations.idempotency import idempotent
 from rest_framework import generics, status, permissions, filters
 from rest_framework.views import APIView
@@ -730,12 +731,22 @@ def _reprice_cart_items_for_mode(cart: Cart) -> None:
         cart.recalc()
 
 
+# ТЗ 12.11: все безналичные способы оплаты, попадающие под фильтр payment_method=transfer.
+SALE_TRANSFER_METHODS = (
+    Sale.PaymentMethod.TRANSFER,
+    Sale.PaymentMethod.MBANK,
+    Sale.PaymentMethod.OPTIMA,
+    Sale.PaymentMethod.OBANK,
+    Sale.PaymentMethod.BAKAI,
+)
+
+
 def _aware(dt_or_date, end=False):
     tz = get_current_timezone()
     if isinstance(dt_or_date, datetime):
         return dt_or_date if is_aware(dt_or_date) else make_aware(dt_or_date, tz)
     if isinstance(dt_or_date, date):
-        t = dtime(23, 59, 59) if end else dtime(0, 0, 0)
+        t = dtime(23, 59, 59, 999999) if end else dtime(0, 0, 0)
         return make_aware(datetime.combine(dt_or_date, t), tz)
     return None
 
@@ -748,12 +759,15 @@ def _parse_range_dt(v: str, *, end: bool) -> Optional[datetime]:
     """
     if not v:
         return None
+    v = v.strip()
+    # Голая дата YYYY-MM-DD: на Python 3.11+ parse_datetime() принимает её как 00:00,
+    # поэтому дату разбираем первой (конец диапазона = конец дня).
+    d = parse_date(v) if "T" not in v and " " not in v else None
+    if d:
+        return _aware(d, end=end)
     dt = parse_datetime(v)
     if dt:
         return _aware(dt, end=end)
-    d = parse_date(v)
-    if d:
-        return _aware(d, end=end)
     return None
 
 
@@ -3222,9 +3236,11 @@ def _restock_product_for_sale_item_return(item: SaleItem, return_qty: Decimal) -
     stock_delta = line_qty_consume_units(return_qty, getattr(item, "sale_package", None))
     if stock_delta <= 0:
         return
-    Product.objects.filter(pk=item.product_id).exclude(kind=Product.Kind.SERVICE).update(quantity=F("quantity") + stock_delta)
+    Product.objects.filter(pk=item.product_id).exclude(kind=Product.Kind.SERVICE).update(
+        quantity=F("quantity") + stock_delta, updated_at=timezone.now()
+    )
     if getattr(item, "variant_id", None):
-        ProductVariant.objects.filter(pk=item.variant_id).update(quantity=F("quantity") + stock_delta)
+        ProductVariant.objects.filter(pk=item.variant_id).update(quantity=F("quantity") + stock_delta, updated_at=timezone.now())
 
 
 def _release_agent_allocations_for_qty(sale_item: SaleItem, return_qty_int: int) -> List[tuple]:
@@ -4053,6 +4069,7 @@ def _execute_sale_return(
     return debt_adj
 
 
+@pin_guard("POST")
 class SaleReturnAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, APIView):
     """
     Возврат продажи (владелец и кассир).
@@ -4077,6 +4094,10 @@ class SaleReturnAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, AP
         locked_qs = Sale.objects.select_for_update()
         locked_qs = self._filter_qs_company_branch(locked_qs)
         sale = get_object_or_404(locked_qs, id=pk)
+
+        # Закрытие периода (ТЗ «Бухгалтер», п. 2): возврат проводится сегодняшним числом.
+        from apps.warehouse.services import ensure_period_open_api
+        ensure_period_open_api(company=sale.company, dates=[timezone.now()], user=request.user)
 
         if sale.status == Sale.Status.CANCELED:
             return Response(
@@ -4430,6 +4451,28 @@ class SaleListAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, gene
         qs = super().get_queryset().annotate(sold_at=Coalesce("paid_at", "created_at"))
         qs = _apply_sale_date_filters(qs, self.request)
 
+        # ТЗ-28 §5.1: фильтры по смене, кассе, кассиру и точному времени — чтобы телефон
+        # («Мои чеки» за смену) и касса («История чеков») не грузили чеки всей компании.
+        qp = self.request.query_params
+        shift_param = (qp.get("shift") or qp.get("shift_id") or "").strip()
+        if shift_param:
+            qs = qs.filter(shift_id=shift_param)
+        cashbox_param = (qp.get("cashbox") or qp.get("cashbox_id") or "").strip()
+        if cashbox_param:
+            qs = qs.filter(cashbox_id=cashbox_param)
+        cashier_param = (qp.get("cashier") or qp.get("cashier_id") or "").strip()
+        if cashier_param:
+            qs = qs.filter(user_id=cashier_param)
+        for param, lookup in (("created_after", "created_at__gte"), ("created_before", "created_at__lte")):
+            raw = (qp.get(param) or "").strip()
+            if raw:
+                dt = parse_datetime(raw.replace(" ", "+"))
+                if dt is None:
+                    raise ValidationError({param: "Ожидается дата-время ISO 8601."})
+                if timezone.is_naive(dt):
+                    dt = timezone.make_aware(dt)
+                qs = qs.filter(**{lookup: dt})
+
         number = (self.request.query_params.get("number") or "").strip()
         if number:
             if not number.isdigit():
@@ -4479,7 +4522,11 @@ class SaleListAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, gene
         # Аналитический фильтр (страница /crm/market/analytics → «Транзакции»)
         payment_method = (self.request.query_params.get("payment_method") or "").strip()
         if payment_method:
-            qs = qs.filter(payment_method=payment_method)
+            if payment_method == Sale.PaymentMethod.TRANSFER:
+                # ТЗ 12.11: безнал разных банков тоже считается переводом.
+                qs = qs.filter(payment_method__in=SALE_TRANSFER_METHODS)
+            else:
+                qs = qs.filter(payment_method=payment_method)
 
         cashbox_param = (self.request.query_params.get("cashbox") or "").strip()
         if cashbox_param:
@@ -4520,6 +4567,13 @@ class SaleListAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, gene
         page = self.paginate_queryset(queryset)
         serializer = self.get_serializer(page, many=True)
         return self.paginator.get_paginated_response(serializer.data, total_amount=total_amount)
+
+
+def _audit_sale_deleted(request, infos):
+    from apps.construction.audit import log_request
+
+    for company, pk, before in infos[:500]:
+        log_request(request, "delete", "sale", pk, f"Чек {pk[:8]}", before=before, company=company)
 
 
 class SaleRetrieveAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
@@ -4576,7 +4630,12 @@ class SaleRetrieveAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, 
             active = get_object_or_404(_cart_queryset_for_response(), id=active.id, company=company)
             return _pos_multi_cart_response(request, active)
 
-        return super().destroy(request, *args, **kwargs)
+        # журнал (ТЗ п.8): удаление чека
+        _sale = self.get_object()
+        _info = (_sale.company, str(_sale.pk), {"total": str(_sale.total), "status": str(_sale.status)})
+        response = super().destroy(request, *args, **kwargs)
+        _audit_sale_deleted(request, [_info])
+        return response
 
 
 class SaleBulkDeleteAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, APIView):
@@ -4611,8 +4670,9 @@ class SaleBulkDeleteAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin
         if paid_ids and not allow_paid:
             return Response(
                 {
-                    "detail": "Среди переданных продаж есть оплаченные. "
-                              "Если хочешь удалить их тоже, передай allow_paid=true.",
+                    "code": "paid_sales_need_confirmation",
+                    "detail": "Среди выбранных чеков есть оплаченные. "
+                              "Удалить их можно только после подтверждения.",
                     "paid_ids": [str(x) for x in paid_ids],
                 },
                 status=400,
@@ -4628,7 +4688,9 @@ class SaleBulkDeleteAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin
         found_ids = set(str(sid) for sid in base_qs.values_list("id", flat=True))
         not_found_ids = [str(x) for x in valid_ids if str(x) not in found_ids]
 
+        _infos = [(x.company, str(x.pk), {"total": str(x.total), "status": str(x.status)}) for x in deletable_qs.select_related("company")]
         deleted_count, _ = deletable_qs.delete()
+        _audit_sale_deleted(request, _infos)
 
         return Response(
             {

@@ -815,9 +815,15 @@ class HealthAndErrorFormatTests(KassaBase):
         self.assertEqual(r.data["code"], "not_found")
 
     def test_field_errors_keep_their_shape(self):
+        # ТЗ-28 §4: ошибки полей остаются на верхнем уровне (совместимость с сайтом)
+        # и дополняются машинным code, текстом detail и плоским fields.
         r = self.api.get("/api/main/pos/returns/?date_from=bad")
         self.assertEqual(r.status_code, 400)
-        self.assertEqual(set(r.data), {"date_from"})
+        self.assertIn("date_from", r.data)
+        self.assertEqual(r.data["code"], "validation_error")
+        self.assertIn("date_from", r.data["fields"])
+        self.assertTrue(r.data["detail"])
+        self.assertEqual(set(r.data) - {"code", "detail", "fields"}, {"date_from"})
 
     def test_django_validation_error_is_400_not_500(self):
         from django.core.exceptions import ValidationError as DjangoValidationError

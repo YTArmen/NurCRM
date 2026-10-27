@@ -385,6 +385,8 @@ class CashboxWithFlowsSerializer(CompanyBranchReadOnlyMixin):
 
 
 class CashboxSerializer(CompanyBranchReadOnlyMixin):
+    # ТЗ 11.4: филиал кассы отдаём id (null — общая касса); у ReadOnlyField(source="branch.id") ключ пропадал при null
+    branch = serializers.PrimaryKeyRelatedField(read_only=True, allow_null=True)
     analytics = serializers.SerializerMethodField()
     is_consumption = serializers.BooleanField(required=False, default=False)
     role = serializers.ChoiceField(choices=Cashbox.CashboxRole.choices, required=False, allow_null=True)
@@ -495,9 +497,26 @@ class CashFlowCategorySerializer(CompanyBranchReadOnlyMixin):
         queryset=Branch.objects.all(), required=False, allow_null=True
     )
 
+    is_default = serializers.SerializerMethodField()
+
+    def get_is_default(self, obj):
+        return bool(obj.code)
+
+    def to_internal_value(self, data):
+        # ТЗ «Бухгалтер»: фронт шлёт name, исторически поле называется title.
+        if hasattr(data, "get") and "name" in data and "title" not in data:
+            data = data.copy()
+            data["title"] = data["name"]
+        return super().to_internal_value(data)
+
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        rep["name"] = rep.get("title")
+        return rep
+
     class Meta:
         model = CashFlowCategory
-        fields = ["id", "company", "branch", "title", "created_at"]
+        fields = ["id", "company", "branch", "title", "type", "archived", "is_default", "created_at"]
         read_only_fields = ["id", "company", "created_at"]
 
     def __init__(self, *args, **kwargs):
@@ -573,6 +592,10 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
         allow_null=True,
     )
     category_title = serializers.CharField(source="category.title", read_only=True, default="")
+    # ТЗ «Бухгалтер»: category_id — алиас category (на запись и чтение)
+    category_id = serializers.PrimaryKeyRelatedField(
+        queryset=CashFlowCategory.objects.all(), source="category", required=False, allow_null=True
+    )
 
     cashier = serializers.ReadOnlyField(source="cashier.id")
     cashier_display = serializers.SerializerMethodField()
@@ -606,7 +629,8 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
             "source_kind",
             "source_id",
             "shift",
-            "category",
+            "category", "category_id",
+            "checked_at", "checked_by", "accountant_note",
             "category_title",
             "cashier",
             "cashier_display",
@@ -639,6 +663,7 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
             "resolved_by",
             "resolved_at",
             "idempotency_key",
+            "checked_at", "checked_by", "accountant_note",
         ]
 
     def __init__(self, *args, **kwargs):
@@ -671,6 +696,7 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
         if target_branch is not None:
             cat_qs = cat_qs.filter(Q(branch__isnull=True) | Q(branch=target_branch))
         self.fields["category"].queryset = cat_qs
+        self.fields["category_id"].queryset = cat_qs
 
     def get_cashbox_name(self, obj):
         if obj.cashbox and obj.cashbox.branch:
@@ -718,6 +744,17 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
             raise DRFValidationError({"detail": "Касса находится в архиве.", "code": "cashbox_inactive"})
 
         category = attrs.get("category") if "category" in attrs else getattr(self.instance, "category", None)
+        if self.instance is None and category is None and "category" not in attrs:
+            # По умолчанию — статья «Прочие» (ТЗ «Бухгалтер», п. 3)
+            from apps.construction.categories import get_default_category
+
+            category = get_default_category(_get_company_from_user(user) if user else None, "other")
+            if category is not None:
+                attrs["category"] = category
+        if category is not None and "category" in attrs and getattr(category, "archived", False) and (
+            self.instance is None or self.instance.category_id != category.id
+        ):
+            raise serializers.ValidationError({"category": "Статья в архиве."})
         if category is not None:
             company = _get_company_from_user(user) if user else None
             if company and category.company_id != company.id:

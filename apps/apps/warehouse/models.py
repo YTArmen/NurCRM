@@ -1710,6 +1710,7 @@ class DocumentItem(models.Model):
     class Meta:
         verbose_name = "Строка документа"
         verbose_name_plural = "Строки документов"
+        ordering = ["product__name", "id"]
 
     def clean(self):
         from django.core.exceptions import ValidationError

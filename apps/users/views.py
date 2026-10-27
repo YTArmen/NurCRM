@@ -9,6 +9,7 @@ import logging
 
 from rest_framework import generics, permissions, status
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from apps.users.permissions import read_only_guard
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -255,6 +256,23 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
     permission_classes = [AllowAny]
 
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code == 200:
+            # журнал действий (ТЗ п.8): вход в систему
+            try:
+                from apps.construction.audit import log_change
+
+                ident = request.data.get("email") or request.data.get("username")
+                u = User.objects.filter(email__iexact=str(ident).strip()).select_related("company").first() if ident else None
+                company = (getattr(u, "company", None) or getattr(u, "owned_company", None)) if u else None
+                if company is not None:
+                    log_change(company=company, user=u, action="login", object_type="user", object_id=u.pk,
+                               object_name=(f"{u.first_name} {u.last_name}".strip() or u.email), request=request)
+            except Exception:
+                pass
+        return response
+
 
 class CustomTokenRefreshView(TokenRefreshView):
     """
@@ -366,6 +384,7 @@ class CurrentUserAPIView(generics.RetrieveUpdateAPIView):
         )
 
 
+@read_only_guard("can_edit_employees")
 class EmployeeCreateAPIView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = EmployeeCreateSerializer
@@ -376,6 +395,7 @@ class EmployeeCreateAPIView(generics.CreateAPIView):
 
 
 # ✅ SOFT DELETE
+@read_only_guard("can_edit_employees")
 class EmployeeDestroyAPIView(generics.DestroyAPIView):
     queryset = User.objects.all()
     serializer_class = UserListSerializer
@@ -408,6 +428,7 @@ class EmployeeDestroyAPIView(generics.DestroyAPIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@read_only_guard("can_edit_employees")
 class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     queryset = User.objects.all()
     serializer_class = EmployeeUpdateSerializer
@@ -438,6 +459,19 @@ class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
             return User.objects.none()
 
         return _apply_branch_filter_to_users(self.request, company, base_qs)
+
+    def perform_update(self, serializer):
+        # журнал действий (ТЗ п.8): изменение прав и роли сотрудника
+        from apps.construction.audit import log_request, user_rights
+
+        before = user_rights(serializer.instance)
+        obj = serializer.save()
+        try:
+            log_request(self.request, "rights_change", "user", obj.pk,
+                        (f"{obj.first_name} {obj.last_name}".strip() or obj.email),
+                        before=before, after=user_rights(obj))
+        except Exception:
+            pass
 
     def destroy(self, request, *args, **kwargs):
         if getattr(request.user, "role", None) == "supervisor":
@@ -516,6 +550,7 @@ def _emit_company_updated(company, changed_fields):
         )
 
 
+@read_only_guard("can_edit_settings")
 class CompanyDetailAPIView(generics.RetrieveUpdateAPIView):
     """
     GET   /api/users/company/
@@ -585,10 +620,18 @@ class ChangePasswordView(generics.UpdateAPIView):
         return Response({"detail": "Пароль успешно изменён."}, status=status.HTTP_200_OK)
 
 
+@read_only_guard("can_edit_settings")
 class CompanyUpdateAPIView(generics.RetrieveUpdateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = CompanyUpdateSerializer
     queryset = Company.objects.none()
+
+    def get_permissions(self):
+        # ТЗ 12.18: читать могут все сотрудники, менять данные компании - владелец или администратор
+        # (на сайте вкладку «Компания» видят обе роли).
+        if self.request.method in ("GET", "HEAD", "OPTIONS"):
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsCompanyOwnerOrAdmin()]
 
     def get_object(self):
         company = _get_company(self.request.user)
@@ -662,6 +705,7 @@ class RoleListAPIView(generics.ListAPIView):
         return Response(data)
 
 
+@read_only_guard("can_edit_employees")
 class CustomRoleCreateAPIView(generics.CreateAPIView):
     serializer_class = CustomRoleSerializer
     permission_classes = [IsAuthenticated, IsCompanyOwner]
@@ -671,6 +715,7 @@ class CustomRoleCreateAPIView(generics.CreateAPIView):
         serializer.save(company=company)
 
 
+@read_only_guard("can_edit_employees")
 class CustomRoleDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = CustomRoleSerializer
     permission_classes = [IsAuthenticated, IsCompanyOwner]

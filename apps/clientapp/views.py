@@ -301,15 +301,22 @@ class TelegramWebhookView(PublicAppAPIView):
 
 
 class LogoutView(AppAPIView):
-    """POST /api/v1/auth/logout {pushToken?} — отзывает текущий токен."""
+    """
+    POST /api/v1/auth/logout {pushToken?} — отзывает текущий токен и push-токены (ТЗ 14.10, п. 2.4:
+    после выхода уведомления не приходят). Если приложение прислало pushToken — удаляется только
+    токен этого устройства, иначе все push-токены клиента.
+    """
 
     def post(self, request):
         token = request.auth
         if token is not None:
             AppToken.objects.filter(pk=token.pk).update(revoked_at=timezone.now())
-        push = (request.data.get("pushToken") if isinstance(request.data, dict) else None) or ""
+        data = request.data if isinstance(request.data, dict) else {}
+        push = str(data.get("pushToken") or data.get("token") or "").strip()
+        qs = AppPushToken.objects.filter(customer=request.user)
         if push:
-            AppPushToken.objects.filter(customer=request.user, token=push).delete()
+            qs = qs.filter(token=push)
+        qs.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -455,9 +462,11 @@ class ReferralApplyView(AppAPIView):
         try:
             services.apply_referral_code(request.user, data.get("code"))
         except services.ReferralError as exc:
-            http = status.HTTP_404_NOT_FOUND if exc.code == "invalid_code" else status.HTTP_409_CONFLICT
-            if exc.code == "self_referral":
-                http = status.HTTP_400_BAD_REQUEST
+            # коды по ТЗ 14.10, раздел 3: referral_self | referral_already_applied | referral_not_found | referral_too_late
+            http = {
+                "referral_not_found": status.HTTP_404_NOT_FOUND,
+                "referral_self": status.HTTP_400_BAD_REQUEST,
+            }.get(exc.code, status.HTTP_409_CONFLICT)
             raise AppAPIError(exc.code, exc.message, http_status=http)
         return Response(services.referral_summary(request.user))
 

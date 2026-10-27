@@ -23,7 +23,7 @@ from .models import (
     Referral,
     TelegramAuthNonce,
 )
-from .push import bonus_message, format_points
+from .push import bonus_message, format_points, push_for_sale, sale_message
 
 BOT = dict(
     CLIENT_APP_TELEGRAM_BOT_TOKEN="123:abc",
@@ -34,6 +34,10 @@ WEBHOOK = "/api/v1/auth/telegram/webhook/"
 
 
 def run_now(task, *args):
+    return task(*args)
+
+
+def run_later_now(task, countdown, *args):
     return task(*args)
 
 
@@ -100,6 +104,18 @@ class PhoneTests(AppTestMixin, KassaBase):
         self.assertEqual(self.api.get("/api/main/clients/by-phone/", {"phone": "12"}).status_code, 400)
         self.assertEqual(APIClient().get("/api/main/clients/by-phone/", {"phone": "0555000222"}).status_code, 401)
 
+    def test_by_phone_creates_client_from_app_profile(self):
+        """ТЗ 14.10, п. 2.3: клиента нет, но номер подтверждён в приложении → клиент из профиля, без дублей."""
+        self.assertIsNone(self.api.get("/api/main/clients/by-phone/", {"phone": "0700 999 999"}).data["client"])
+        AppCustomer.objects.create(phone="+996700999999", full_name="Гүлнара Асанова", birth_date="1991-03-04")
+        r = self.api.get("/api/main/clients/by-phone/", {"phone": "0700 999 999"})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual((r.data["client"]["full_name"], r.data["client"]["created"], r.data["has_app"]),
+                         ("Гүлнара Асанова", True, True))
+        r2 = self.api.get("/api/main/clients/by-phone/", {"phone": "+996700999999"})
+        self.assertEqual((r2.data["client"]["id"], r2.data["client"]["created"]), (r.data["client"]["id"], False))
+        self.assertEqual(Client.objects.filter(company=self.company, phone_normalized="+996700999999").count(), 1)
+
 
 # ======================================================================
 # Этап 1. Магазины
@@ -135,14 +151,69 @@ class ShopsTests(AppTestMixin, KassaBase):
         self.assertEqual(r3.status_code, 200)
         self.assertNotEqual(r3["ETag"], etag)
 
-    def test_hidden_company_and_no_showcase_slug(self):
+    def test_hidden_company_and_catalog_slug(self):
         AppShopSettings.objects.create(company=self.company, show_in_app=False, address="Ош", latitude=Decimal("42.87"), longitude=Decimal("74.59"))
         self.assertEqual(self.app.get("/api/v1/shops").data, [])
         AppShopSettings.objects.filter(company=self.company).update(show_in_app=True)
         cache.clear()
         shop = self.app.get("/api/v1/shops").data[0]
-        self.assertIsNone(shop["catalogSlug"])
+        # ТЗ 14.10, п. 2.1: витрина открывается по slug без включения в CRM → catalogSlug есть всегда
+        self.assertEqual(shop["catalogSlug"], self.company.slug)
+        self.assertTrue(shop["catalogSlug"])
+        self.assertEqual(self.app.get(f"/api/main/public/companies/{shop['catalogSlug']}/showcase/").status_code, 200)
         self.assertNotIn("stock", shop)
+        Company.objects.filter(pk=self.company.pk).update(slug="")
+        cache.clear()
+        self.assertIsNone(self.app.get("/api/v1/shops").data[0]["catalogSlug"])
+
+    def test_shops_follow_company_and_branch_changes(self):
+        """ТЗ 14.10, п. 2.2: имя/адрес из компании и филиала, ETag меняется даже без сигналов (update())."""
+        AppShopSettings.objects.create(company=self.company, show_in_app=True,
+                                       latitude=Decimal("42.87"), longitude=Decimal("74.59"))
+        Company.objects.filter(pk=self.company.pk).update(address="Бишкек, Чуй 1", phone="+996555111111")
+        r = self.app.get("/api/v1/shops")
+        shop = r.data[0]
+        self.assertEqual((shop["name"], shop["address"], shop["phone"]), (self.company.name, "Бишкек, Чуй 1", "+996555111111"))
+        etag = r["ETag"]
+        self.assertEqual(self.app.get("/api/v1/shops", HTTP_IF_NONE_MATCH=etag).status_code, 304)
+        # смена названия компании в CRM запросом update() — сигналов нет, но отпечаток источников другой
+        Company.objects.filter(pk=self.company.pk).update(name="Новое имя")
+        r2 = self.app.get("/api/v1/shops", HTTP_IF_NONE_MATCH=etag)
+        self.assertEqual((r2.status_code, r2.data[0]["name"]), (200, "Новое имя"))
+        self.assertNotEqual(r2["ETag"], etag)
+        # app-shop-settings важнее компании
+        r3 = self.api.patch("/api/main/app-shop-settings/", {"display_name": "Витрина"}, format="json")
+        self.assertEqual(r3.status_code, 200, r3.data)
+        r4 = self.app.get("/api/v1/shops", HTTP_IF_NONE_MATCH=r2["ETag"])
+        self.assertEqual((r4.status_code, r4.data[0]["name"]), (200, "Витрина"))
+        # филиал: переименование через save() → новый ETag и новое имя
+        b = Branch.objects.create(company=self.company, name="Центр", address="Чуй 1")
+        AppShopSettings.objects.create(company=self.company, branch=b, show_in_app=True,
+                                       latitude=Decimal("42.87"), longitude=Decimal("74.59"))
+        r5 = self.app.get("/api/v1/shops")
+        self.assertEqual([x["name"] for x in r5.data], ["Витрина — Центр"])
+        Branch.objects.filter(pk=b.pk).update(name="Север")
+        r6 = self.app.get("/api/v1/shops", HTTP_IF_NONE_MATCH=r5["ETag"])
+        self.assertEqual((r6.status_code, r6.data[0]["name"]), (200, "Витрина — Север"))
+
+    def test_address_change_resets_coords_but_keeps_shop_listed(self):
+        """ТЗ 14.10, п. 2.2: после смены адреса координаты сброшены, магазин остаётся в списке без них."""
+        AppShopSettings.objects.create(company=self.company, show_in_app=True, address="Ош, Ленина 1",
+                                       latitude=Decimal("40.51"), longitude=Decimal("72.80"), geocode_status="ok",
+                                       geocoded_address="Ош, Ленина 1")
+        self.assertEqual(self.app.get("/api/v1/shops").data[0]["latitude"], 40.51)
+        with mock.patch("apps.clientapp.tasks.enqueue"):
+            r = self.api.patch("/api/main/app-shop-settings/", {"address": "Ош, Курманжан Датки 5"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        shops = self.app.get("/api/v1/shops").data
+        self.assertEqual(len(shops), 1)
+        self.assertEqual((shops[0]["address"], shops[0]["latitude"], shops[0]["longitude"]),
+                         ("Ош, Курманжан Датки 5", None, None))
+        # геокодер не нашёл адрес — магазин скрыт до исправления адреса
+        AppShopSettings.objects.filter(company=self.company, branch=None).update(geocode_status="not_found",
+                                                                                 geocode_attempts=1)
+        cache.clear()
+        self.assertEqual(self.app.get("/api/v1/shops").data, [])
 
     def test_branches_are_shops(self):
         b1 = Branch.objects.create(company=self.company, name="Центр", address="Чуй 1")
@@ -190,9 +261,9 @@ class ShopsTests(AppTestMixin, KassaBase):
             r = self.api.patch("/api/main/app-shop-settings/", {"show_in_app": True, "address": "Ош"}, format="json")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(AppShopSettings.objects.get(branch=None).geocode_status, "error")
-        # без координат магазина нет на карте (защита карты от мусора), владелец видит причину
+        # геокодер не справился — магазина нет на карте (защита от мусора), владелец видит причину
         self.assertEqual(self.app.get("/api/v1/shops").data, [])
-        self.assertIn("no_coordinates", r.data["not_visible_reasons"])
+        self.assertIn("no_coordinates", self.api.get("/api/main/app-shop-settings/").data["not_visible_reasons"])
 
 
 class PromosTests(AppTestMixin, KassaBase):
@@ -346,10 +417,21 @@ class ProfileTests(AppTestMixin, KassaBase):
                          "phone_change_requires_telegram")
 
     def test_logout_revokes_token(self):
-        _, raw = self.make_customer()
+        cust, raw = self.make_customer()
+        AppPushToken.objects.create(customer=cust, token="ExponentPushToken[a]")
+        AppPushToken.objects.create(customer=cust, token="ExponentPushToken[b]")
         api = self.authed(raw)
         self.assertEqual(api.post("/api/v1/auth/logout").status_code, 204)
         self.assertEqual(api.get("/api/v1/me").status_code, 401)
+        self.assertFalse(AppPushToken.objects.filter(customer=cust).exists())  # ТЗ 14.10, п. 2.4
+
+    def test_logout_with_push_token_removes_only_that_device(self):
+        cust, raw = self.make_customer()
+        AppPushToken.objects.create(customer=cust, token="ExponentPushToken[a]")
+        AppPushToken.objects.create(customer=cust, token="ExponentPushToken[b]")
+        self.assertEqual(self.authed(raw).post("/api/v1/auth/logout", {"pushToken": "ExponentPushToken[a]"},
+                                               format="json").status_code, 204)
+        self.assertEqual(list(AppPushToken.objects.values_list("token", flat=True)), ["ExponentPushToken[b]"])
 
     def test_delete_me_removes_customer_keeps_shop_records(self):
         cust, raw = self.make_customer()
@@ -517,6 +599,7 @@ class PushTests(AppTestMixin, KassaBase):
         sale_id = self.quick(client=str(self.client_obj.id)).data["id"]
         fake = _expo_response([{"status": "ok"}, {"status": "error", "details": {"error": "DeviceNotRegistered"}}])
         with mock.patch("apps.clientapp.tasks.enqueue", side_effect=run_now), \
+                mock.patch("apps.clientapp.tasks.enqueue_later", side_effect=run_later_now), \
                 mock.patch("apps.clientapp.push.httpx.Client", return_value=fake), \
                 self.captureOnCommitCallbacks(execute=True):
             r = self.api.post(f"/api/main/clients/{self.client_obj.id}/bonus/",
@@ -525,12 +608,40 @@ class PushTests(AppTestMixin, KassaBase):
         sent = fake.__enter__.return_value.post.call_args
         self.assertTrue(sent.args[0].startswith("https://exp.host/--/api/v2/push/send"))
         msgs = sent.kwargs["json"]
-        self.assertEqual(msgs[0]["body"], "Магазин «Kassa Co»: начислено 42,5 балла")
+        self.assertEqual((msgs[0]["title"], msgs[0]["body"]), ("Kassa Co", "Начислено 42,5 балла"))
+        self.assertEqual(msgs[0]["data"], {"type": "purchase", "companyId": str(self.company.id),
+                                           "shopId": str(self.company.id), "purchaseId": sale_id})
         self.assertEqual(set(AppPushToken.objects.values_list("token", flat=True)), {"ExponentPushToken[good]"})
+
+    def test_one_push_per_sale_with_earn_and_redeem(self):
+        """ТЗ 14.10, п. 2.4: начисление и списание одним уведомлением; повтор чека второго не даёт."""
+        AppPushToken.objects.create(customer=self.cust, token="ExponentPushToken[good]")
+        self.cust.lang = "ky"
+        self.cust.save(update_fields=["lang"])
+        ClientBonusTransaction.objects.create(company=self.company, client=self.client_obj, delta=Decimal("100"),
+                                              balance_after=Decimal("100"), reason="manual", note="старт")
+        Client.objects.filter(pk=self.client_obj.pk).update(bonus_balance=Decimal("100"))
+        sale_id = self.quick(client=str(self.client_obj.id)).data["id"]
+        queued = []
+        with mock.patch("apps.clientapp.tasks.enqueue_later", side_effect=lambda t, c, *a: queued.append(a)), \
+                self.captureOnCommitCallbacks(execute=True):
+            self.api.post(f"/api/main/clients/{self.client_obj.id}/bonus/",
+                          {"delta": "45", "reason": "earn", "sale": sale_id}, format="json")
+            self.api.post(f"/api/main/clients/{self.client_obj.id}/bonus/",
+                          {"delta": "-50", "reason": "redeem", "sale": sale_id}, format="json")
+        self.assertEqual(queued, [(sale_id,)])  # задача на продажу поставлена один раз
+        fake = _expo_response([{"status": "ok"}])
+        with mock.patch("apps.clientapp.push.httpx.Client", return_value=fake):
+            self.assertEqual(push_for_sale(sale_id), 1)
+            self.assertEqual(push_for_sale(sale_id), 0)  # повторная отправка чека — без второго уведомления
+        msgs = fake.__enter__.return_value.post.call_args.kwargs["json"]
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual((msgs[0]["title"], msgs[0]["body"]), ("Kassa Co", "45 балл кошулду, 50 балл алынды"))
 
     def test_no_push_without_sale_and_push_errors_do_not_break(self):
         AppPushToken.objects.create(customer=self.cust, token="ExponentPushToken[good]")
         with mock.patch("apps.clientapp.tasks.enqueue", side_effect=run_now), \
+                mock.patch("apps.clientapp.tasks.enqueue_later", side_effect=run_later_now), \
                 mock.patch("apps.clientapp.push.httpx.Client", side_effect=OSError("expo down")) as cl, \
                 self.captureOnCommitCallbacks(execute=True):
             r = self.api.post(f"/api/main/clients/{self.client_obj.id}/bonus/", {"delta": "5", "reason": "earn"},
@@ -545,8 +656,12 @@ class PushTests(AppTestMixin, KassaBase):
         self.assertEqual(format_points(Decimal("1"), "ru"), "1 балл")
         self.assertEqual(format_points(Decimal("3"), "ru"), "3 балла")
         self.assertEqual(format_points(Decimal("11"), "ru"), "11 баллов")
-        self.assertEqual(bonus_message("Нур", Decimal("-50"), "redeem", "ru")[1], "Магазин «Нур»: списано 50 баллов")
-        self.assertEqual(bonus_message("Нур", Decimal("10"), "earn", "ky")[1], "«Нур» дүкөнү: 10 упай кошулду")
+        self.assertEqual(bonus_message("Нур", Decimal("-50"), "redeem", "ru"), ("Нур", "Списано 50 баллов"))
+        self.assertEqual(bonus_message("Нур", Decimal("10"), "earn", "ky"), ("Нур", "10 балл кошулду"))
+        self.assertEqual(sale_message("Нур", Decimal("45"), Decimal("50"), "ru")[1], "Начислено 45, списано 50 баллов")
+        self.assertEqual(sale_message("Нур", Decimal("45"), Decimal("0"), "ru")[1], "Начислено 45 баллов")
+        self.assertEqual(sale_message("Нур", Decimal("0"), Decimal("50"), "ky")[1], "50 балл алынды")
+        self.assertEqual(sale_message("Нур", Decimal("45"), Decimal("50"), "ky")[1], "45 балл кошулду, 50 балл алынды")
 
 
 # ======================================================================
@@ -570,7 +685,7 @@ class ReferralTests(AppTestMixin, KassaBase):
         r = self.me.post("/api/v1/me/referral/apply", {"code": info["code"].lower()}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
         self.assertEqual(self.me.post("/api/v1/me/referral/apply", {"code": info["code"]}, format="json").data["error"],
-                         "already_applied")
+                         "referral_already_applied")
         with mock.patch("apps.clientapp.tasks.enqueue", side_effect=run_now), \
                 self.captureOnCommitCallbacks(execute=True):
             self.quick(client=str(self.client_obj.id))
@@ -590,10 +705,35 @@ class ReferralTests(AppTestMixin, KassaBase):
     def test_apply_rules(self):
         self.assertEqual(self.me.post("/api/v1/me/referral/apply", {"code": "NOPE123"}, format="json").status_code, 404)
         self.assertEqual(self.me.post("/api/v1/me/referral/apply", {"code": self.invitee.referral_code},
-                                      format="json").data["error"], "self_referral")
+                                      format="json").data["error"], "referral_self")
+        self.assertEqual(self.me.post("/api/v1/me/referral/apply", {"code": "NOPE123"}, format="json").data["error"],
+                         "referral_not_found")
         self.quick(client=str(self.client_obj.id))
         r = self.me.post("/api/v1/me/referral/apply", {"code": self.inviter.referral_code}, format="json")
-        self.assertEqual(r.data["error"], "not_new_customer")
+        self.assertEqual((r.status_code, r.data["error"]), (409, "referral_too_late"))
+
+    def test_inviter_gets_push_after_friend_first_purchase(self):
+        self.api.patch("/api/main/referral-rules/", {"enabled": True, "inviter_points": "100", "invitee_points": "0"},
+                       format="json")
+        AppPushToken.objects.create(customer=self.inviter, token="ExponentPushToken[inv]")
+        self.me.post("/api/v1/me/referral/apply", {"code": self.inviter.referral_code}, format="json")
+        fake = _expo_response([{"status": "ok"}])
+        with mock.patch("apps.clientapp.tasks.enqueue", side_effect=run_now), \
+                mock.patch("apps.clientapp.push.httpx.Client", return_value=fake), \
+                self.captureOnCommitCallbacks(execute=True):
+            self.quick(client=str(self.client_obj.id))
+        msgs = fake.__enter__.return_value.post.call_args.kwargs["json"]
+        self.assertEqual((msgs[0]["to"], msgs[0]["body"]), ("ExponentPushToken[inv]", "Друг сделал первую покупку: +100 баллов"))
+
+    def test_landing_page(self):
+        code = self.inviter.referral_code
+        r = self.app.get(f"/r/{code.lower()}/")
+        self.assertEqual(r.status_code, 200)
+        html = r.content.decode()
+        self.assertIn(code, html)
+        self.assertIn(f"nurcrmapp://invite/{code}", html)
+        self.assertIn("play.google.com", html)
+        self.assertEqual(self.app.get("/r/<script>/").status_code, 404)
 
     def test_apply_rate_limited(self):
         codes = [self.me.post("/api/v1/me/referral/apply", {"code": "WRONG1"}, format="json").status_code
@@ -631,6 +771,18 @@ class QrTests(AppTestMixin, KassaBase):
         res = self.api.post("/api/main/clients/resolve-qr/", {"token": "NURCRM996555000222"}, format="json")
         self.assertEqual(res.status_code, 200)
         self.assertEqual((res.data["format"], res.data["client"]["id"]), ("phone", str(self.client_obj.id)))
+
+    def test_phone_qr_creates_client_from_app_profile(self):
+        """ТЗ 14.10, п. 2.3: старый QR с номером подтверждённого профиля → клиент из профиля, один раз."""
+        self.assertIsNone(self.api.post("/api/main/clients/resolve-qr/", {"token": "NURCRM996700111222"},
+                                        format="json").data["client"])  # профиля нет — как раньше
+        res = self.api.post("/api/main/clients/resolve-qr/", {"token": "NURCRM996700555555"}, format="json")
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual((res.data["format"], res.data["verified"], res.data["client"]["full_name"],
+                          res.data["client"]["created"]), ("phone", False, "Гуля", True))
+        res2 = self.api.post("/api/main/clients/resolve-qr/", {"token": "NURCRM996700555555"}, format="json")
+        self.assertEqual((res2.status_code, res2.data["client"]["id"]), (200, res.data["client"]["id"]))
+        self.assertEqual(Client.objects.filter(phone_normalized="+996700555555").count(), 1)
 
     def test_qr_token_rate_limited(self):
         codes = [self.me.get("/api/v1/me/qr-token").status_code for _ in range(31)]

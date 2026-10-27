@@ -112,13 +112,47 @@ def build_subscription_payload(company, is_owner: bool = True) -> Dict[str, Any]
     return subscription
 
 
+# Сотрудников вместе с владельцем: «Старт» — 3 (доп. услуга extra-employees снимает лимит), «Стандарт» — 10,
+# «По договору» — сколько задал оператор в конструкторе support (не задал — без ограничений).
+START_EMPLOYEES = 3
+STANDARD_EMPLOYEES = 10
+
+
+def employee_limit(company, plan_code: Optional[str] = None) -> Optional[int]:
+    if plan_code is None:
+        plan_code = resolve_plan_code(getattr(company, "subscription_plan", None))
+    if plan_code == "start":
+        from apps.users.models import CompanyAddon
+
+        extra = CompanyAddon.objects.filter(company=company, code="extra-employees").first()
+        return None if extra is not None and extra.is_effective() else START_EMPLOYEES
+    if plan_code == "standard":
+        return STANDARD_EMPLOYEES
+    if plan_code == "custom":
+        from apps.users.support_views import constructor_max_employees
+
+        return constructor_max_employees(company)
+    return None
+
+
+def employee_limit_error(company) -> Optional[str]:
+    """Текст ошибки, если лимит сотрудников тарифа уже набран; иначе None."""
+    limit = employee_limit(company)
+    if limit is None:
+        return None
+    used = company.employees.filter(is_active=True).count()
+    if used < limit:
+        return None
+    return f"По тарифу можно не больше {limit} сотрудников вместе с владельцем. Чтобы добавить ещё, смените тариф или обратитесь в поддержку."
+
+
 def get_company_limits(company, plan_code: Optional[str] = None) -> Dict[str, Any]:
     try:
         emp_used = company.employees.filter(is_active=True).count()
     except Exception:
         emp_used = 0
 
-    emp_max = 3 if plan_code == "start" else None
+    emp_max = employee_limit(company, plan_code)
 
     # QA B36: считаем и модуль магазина (main.Warehouse/Product), и модуль «Склад»
     # (warehouse.Warehouse/WarehouseProduct). Раньше для оптового склада used был по
@@ -160,8 +194,16 @@ def get_company_limits(company, plan_code: Optional[str] = None) -> Dict[str, An
     except Exception:
         pass
 
+    # ТЗ 12.22: лимит филиалов. Поля «максимум филиалов» в тарифе нет, поэтому max=None
+    # (без ограничения); как только лимит появится в данных тарифа - подставить сюда.
+    try:
+        br_used = company.branches.count()
+    except Exception:
+        br_used = 0
+
     return {
         "employees": {"used": emp_used, "max": emp_max},
+        "branches": {"used": br_used, "max": None},
         "warehouses": {"used": wh_used, "max": None},
         "products": {"used": prod_used, "max": None},
     }

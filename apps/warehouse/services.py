@@ -431,6 +431,24 @@ def ensure_period_open(*, company, dates, user=None):
             )
 
 
+def ensure_period_open_api(*, company, dates, user=None):
+    """
+    То же, что ensure_period_open, но для DRF-вьюх (кассы, возвраты, оплаты долгов):
+    вместо BusinessRuleError бросает APIException → 400 {"detail", "code": "period_closed", "closed_until"}.
+    """
+    try:
+        ensure_period_open(company=company, dates=dates, user=user)
+    except BusinessRuleError as exc:
+        from rest_framework.exceptions import APIException
+
+        class PeriodClosed(APIException):
+            status_code = 400
+
+        raise PeriodClosed(
+            {"detail": str(exc), "code": exc.api_code, **(exc.extra or {})}
+        )
+
+
 def ensure_can_set_document_date(*, user, new_date):
     """Дата документа, отличная от сегодняшней, — только с правом can_change_document_date."""
     if user is None or new_date is None:

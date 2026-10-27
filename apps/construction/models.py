@@ -30,6 +30,15 @@ class CashFlowCategory(models.Model):
         verbose_name="Филиал",
     )
     title = models.CharField(max_length=128, verbose_name="Название")
+    # ТЗ «Бухгалтер», п. 3: статья движения денег.
+    class Kind(models.TextChoices):
+        INCOME = "income", "Доход"
+        EXPENSE = "expense", "Расход"
+        BOTH = "both", "Любой"
+
+    type = models.CharField(max_length=10, choices=Kind.choices, default=Kind.BOTH, db_default=Kind.BOTH, verbose_name="Тип статьи")
+    archived = models.BooleanField(default=False, db_default=False, verbose_name="В архиве")
+    code = models.CharField(max_length=32, blank=True, default="", db_default="", verbose_name="Код статьи по умолчанию")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
 
     class Meta:
@@ -1138,6 +1147,14 @@ class CashFlow(models.Model):
         verbose_name="Категория",
     )
 
+    # ТЗ «Бухгалтер», п. 6: отметка «проверено» (деньги не меняет)
+    checked_at = models.DateTimeField(null=True, blank=True, db_index=True, verbose_name="Проверено")
+    checked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="checked_cash_flows", verbose_name="Кто проверил",
+    )
+    accountant_note = models.TextField(blank=True, default="", db_default="", verbose_name="Комментарий бухгалтера")
+
     objects = CashFlowQuerySet.as_manager()
 
     class Meta:
@@ -1199,3 +1216,51 @@ class CashFlow(models.Model):
 
     def __str__(self):
         return f"{self.get_type_display()} {self.amount} ({self.status})"
+
+
+class AuditLog(models.Model):
+    """Журнал изменений денежных операций (ТЗ «Бухгалтер», п. 7). Только дописывается."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="audit_logs")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    action = models.CharField(max_length=32)  # create/update/delete/edit_request/cancel_request/approve/reject/closed_until
+    object_type = models.CharField(max_length=32)  # cashflow, period
+    object_id = models.CharField(max_length=64, blank=True, default="")
+    object_name = models.CharField(max_length=255, blank=True, default="")
+    before = models.JSONField(null=True, blank=True)
+    after = models.JSONField(null=True, blank=True)
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    branch = models.ForeignKey(Branch, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["company", "object_type", "object_id", "-created_at"], name="ix_audit_obj"),
+            models.Index(fields=["company", "-created_at"], name="ix_audit_company_date"),
+        ]
+
+
+class TrashEntry(models.Model):
+    """
+    Корзина удалённого (ТЗ п.9). В apps/main нельзя добавить deleted_at, поэтому при удалении
+    товара/клиента/категории/бренда сюда кладётся снимок строки (и всего, что удалится каскадом);
+    «вернуть» пересоздаёт строки из снимка. Хранится 30 дней.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="trash_entries")
+    type = models.CharField(max_length=16)  # product / client / category / brand
+    object_id = models.CharField(max_length=64)
+    object_name = models.CharField(max_length=255, blank=True, default="")
+    payload = models.JSONField(default=dict)
+    deleted_at = models.DateTimeField(auto_now_add=True)
+    deleted_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    class Meta:
+        ordering = ["-deleted_at"]
+        indexes = [
+            models.Index(fields=["company", "type", "-deleted_at"], name="ix_trash_company_type"),
+            models.Index(fields=["company", "type", "object_id"], name="ix_trash_obj"),
+        ]

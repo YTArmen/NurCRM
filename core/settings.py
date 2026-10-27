@@ -85,6 +85,8 @@ DEFAULT_CORS_ORIGINS = DEV_CORS_ORIGINS
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-dev-only-change-me")
+# Ключ support.nurcrm.kg для конструктора тарифа «По договору» (apps/users/support_views.py). Пусто — выключено.
+NURCRM_SUPPORT_TOKEN = os.getenv("NURCRM_SUPPORT_TOKEN", "")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 ALLOWED_HOSTS = _get_list_env("DJANGO_ALLOWED_HOSTS", DEFAULT_ALLOWED_HOSTS)
@@ -128,6 +130,7 @@ INSTALLED_APPS = [
     'apps.ekassa',
     'apps.onec',
     'apps.releases',
+    'apps.possync',
     'apps.integrations',
     'apps.support',
     'apps.clientapp',
@@ -136,6 +139,10 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
+    # ТЗ-28 §2.4: сжатие JSON > 200 байт (каталог 10 000 товаров ~12 МБ → ~1,5 МБ).
+    'django.middleware.gzip.GZipMiddleware',
+    # ТЗ-28 §11.2–11.4: X-Request-Id, X-Server-Time, журнал медленных запросов.
+    'core.middleware.RequestMetaMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -270,6 +277,9 @@ CLIENT_ZIP_URL = os.getenv(
     "CLIENT_ZIP_URL", "https://app.nurcrm.kg/downloads/NurCRM-1.0.0.zip"
 )
 CLIENT_RELEASE_NOTES = os.getenv("CLIENT_RELEASE_NOTES", "Первый релиз")
+
+# ТЗ-28 §11.4: порог журнала медленных запросов, мс
+SLOW_REQUEST_MS = _get_int_env("SLOW_REQUEST_MS", 1000)
 
 REST_FRAMEWORK = {
     'EXCEPTION_HANDLER': 'core.exceptions.api_exception_handler',
@@ -619,6 +629,11 @@ LOGGING = {
         },
     },
     'loggers': {
+        'nurcrm.slow_requests': {
+            'handlers': ['console'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
         'nurcrm.websocket.auth': {
             'handlers': ['console'],
             'level': _WS_LOG_LEVEL,

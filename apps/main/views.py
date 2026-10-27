@@ -6,6 +6,7 @@ from django.db import transaction, IntegrityError
 from django.db.models import Sum, Count, Avg, F, Q, Prefetch, Value as V, Value, BooleanField, Exists, OuterRef, Subquery, Case, When
 from django.utils.dateparse import parse_date, parse_datetime
 from django.utils import timezone
+import datetime as _dt
 from itertools import groupby
 from typing import List, Optional, Dict, Any
 from operator import attrgetter
@@ -20,11 +21,15 @@ from rest_framework.views import APIView
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
 from apps.main.models import ProductDeletion
+from apps.construction.trash import TrashDestroyMixin
+from apps.users.pin import pin_guard
+from apps.construction import audit as admin_audit
 from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
 from django.shortcuts import get_object_or_404
 from django.http import HttpResponse
 from rest_framework import serializers
+from apps.users.permissions import read_only_guard
 from .filters import TransactionRecordFilter, DebtFilter, DebtPaymentFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import DecimalField, ExpressionWrapper
@@ -218,6 +223,7 @@ def _parse_recipe_input(recipe_input):
     return recipe_entries, None
 
 
+from apps.users.permissions import read_only_guard  # noqa: E402
 class PublicKnowledgeBaseMixin:
     permission_classes = [permissions.AllowAny]
     serializer_class = PublicKnowledgeBaseCourseSerializer
@@ -1160,14 +1166,23 @@ class ProductListView(CompanyBranchRestrictedMixin, generics.ListAPIView):
     def _updated_since(self):
         """BE2-19: ?updated_since=<ISO-время> — только товары, изменённые с этого момента."""
         if not hasattr(self, "_since"):
-            raw = (self.request.query_params.get("updated_since") or "").strip()
+            qp = self.request.query_params
+            # ТЗ-28 §2.1: `updated_after` — то же, что updated_since; принимает ISO 8601
+            # или целое — миллисекунды с эпохи (server_time из прошлого ответа или bootstrap).
+            raw = (qp.get("updated_since") or qp.get("updated_after") or "").strip()
             self._since = None
             if raw:
-                dt = parse_datetime(raw.replace(" ", "+"))
-                if dt is None:
-                    raise ValidationError({"updated_since": "Ожидается дата-время ISO 8601."})
-                if timezone.is_naive(dt):
-                    dt = timezone.make_aware(dt)
+                if raw.isdigit():
+                    try:
+                        dt = _dt.datetime.fromtimestamp(int(raw) / 1000, tz=_dt.timezone.utc)
+                    except (OverflowError, OSError, ValueError):
+                        raise ValidationError({"updated_since": "Некорректное время (мс с эпохи)."})
+                else:
+                    dt = parse_datetime(raw.replace(" ", "+"))
+                    if dt is None:
+                        raise ValidationError({"updated_since": "Ожидается дата-время ISO 8601."})
+                    if timezone.is_naive(dt):
+                        dt = timezone.make_aware(dt)
                 self._since = dt
         return self._since
 
@@ -1184,6 +1199,15 @@ class ProductListView(CompanyBranchRestrictedMixin, generics.ListAPIView):
                 ).values_list("product_id", flat=True).distinct()
             ]
             response.data["server_time"] = server_time.isoformat()
+            # ТЗ-28 §2.1: курсор для следующего запроса (мс с эпохи) и версия каталога
+            response.data["server_time_ms"] = int(server_time.timestamp() * 1000)
+            try:
+                from apps.main.price_check import catalog_version as _catalog_version
+                response.data["catalog_version"] = _catalog_version(
+                    _filter_products_company_only(self, Product.objects.all())
+                )["version"]
+            except Exception:  # noqa: BLE001 — версия вспомогательная, список важнее
+                pass
         return response
 
     def paginate_queryset(self, queryset):
@@ -1242,11 +1266,28 @@ class ProductListView(CompanyBranchRestrictedMixin, generics.ListAPIView):
         # сортировку (query.order_by пуст), порядок «новые первыми» не должен теряться.
         current = [o for o in (list(qs.query.order_by) or []) if "is_favorite" not in o]
         if not current:
-            current = ["-seq"]
-        if any(o.lstrip("-") == "quantity" for o in current):
+            current = [F("seq").desc(nulls_last=True), "-created_at", "-id"]
+        else:
+            normalized_current = []
+            for o in current:
+                if o == "-seq":
+                    normalized_current.extend([F("seq").desc(nulls_last=True), "-created_at", "-id"])
+                elif o == "seq":
+                    normalized_current.extend([F("seq").asc(nulls_last=True), "created_at", "id"])
+                else:
+                    normalized_current.append(o)
+            current = normalized_current
+        if any(
+            isinstance(o, str) and o.lstrip("-") == "quantity"
+            for o in current
+        ):
             # Сортировка по остатку (блок «Заканчивается»): избранные сверху не нужны —
             # они сломали бы «N товаров с самым малым остатком»; seq — стабильные страницы.
-            if not any(o.lstrip("-") == "seq" for o in current):
+            if not any(
+                (isinstance(o, str) and o.lstrip("-") == "seq")
+                or (hasattr(o, "expression") and getattr(o.expression, "name", None) == "seq")
+                for o in current
+            ):
                 current.append("seq")
             return qs.order_by(*current)
         qs = qs.order_by("-is_favorite", *current)
@@ -1314,6 +1355,7 @@ class ProductCompactListView(CompanyBranchRestrictedMixin, generics.ListAPIView)
         return qs
 
 
+@read_only_guard("can_edit_products")
 class ProductCreateByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.CreateAPIView):
     """
     Создание товара только по штрих-коду (если найден в глобальной базе).
@@ -1657,6 +1699,7 @@ class ProductFavoriteAPIView(CompanyBranchRestrictedMixin, APIView):
         return Response({"product_id": str(product.id), "is_favorite": is_fav}, status=status.HTTP_200_OK)
 
 
+@read_only_guard("can_edit_salary")
 class MarketSaleEmployeePayProfileListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     serializer_class = MarketSaleEmployeePayProfileSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -1672,14 +1715,14 @@ class MarketSaleEmployeePayProfileListCreateAPIView(CompanyBranchRestrictedMixin
         branch = self._auto_branch()
         if branch is not None:
             qs = qs.filter(Q(branch=branch) | Q(branch__isnull=True))
-        else:
-            qs = qs.filter(branch__isnull=True)
+        # без активного филиала — все схемы компании (у каждой теперь виден branch)
         return qs.select_related("user", "branch").order_by("user_id", "-branch_id")
 
     def perform_create(self, serializer):
         serializer.save()
 
 
+@read_only_guard("can_edit_salary")
 class MarketSaleEmployeePayProfileRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = MarketSaleEmployeePayProfileSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -1692,14 +1735,14 @@ class MarketSaleEmployeePayProfileRetrieveUpdateDestroyAPIView(CompanyBranchRest
         branch = self._auto_branch()
         if branch is not None:
             qs = qs.filter(Q(branch=branch) | Q(branch__isnull=True))
-        else:
-            qs = qs.filter(branch__isnull=True)
+        # без активного филиала — все схемы компании (у каждой теперь виден branch)
         return qs.select_related("user", "branch")
 
 
 # ==========================
 # Product create manual
 # ==========================
+@read_only_guard("can_edit_products")
 class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAPIView):
     """
     Ручное создание товара + (опционально) добавление в глобальную базу.
@@ -1726,8 +1769,16 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
             return v
         raise ValueError(f"Недопустимый статус. Допустимые: {', '.join(sorted(codes))}.")
 
-    @transaction.atomic
     def create(self, request, *args, **kwargs):
+        # ТЗ 12.13: любой ответ-ошибка (>=400) после product.save() откатывает всю транзакцию,
+        # чтобы не оставалось наполовину сохранённого товара (повтор плодил дубли).
+        with transaction.atomic():
+            response = self._create_manual(request, *args, **kwargs)
+            if getattr(response, "status_code", 200) >= 400:
+                transaction.set_rollback(True)
+        return response
+
+    def _create_manual(self, request, *args, **kwargs):
         company = self._company()
         branch = None
         data = request.data
@@ -1872,6 +1923,26 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
         if not isinstance(packages_input, list):
             packages_input = []
 
+        # ТЗ 12.12: is_adult, minimum_quantity, plu, shelf_life_days
+        extra_fields = {}
+        if "is_adult" in data:
+            extra_fields["is_adult"] = _parse_bool_like(data.get("is_adult"))
+        if data.get("minimum_quantity") not in (None, ""):
+            try:
+                extra_fields["minimum_quantity"] = _parse_decimal_nonneg(data.get("minimum_quantity"), "minimum_quantity")
+            except ValueError:
+                return Response({"minimum_quantity": "Неверный минимальный остаток."}, status=status.HTTP_400_BAD_REQUEST)
+        for int_key, int_label in (("plu", "ПЛУ"), ("shelf_life_days", "срок хранения")):
+            raw_int = data.get(int_key)
+            if raw_int not in (None, ""):
+                try:
+                    int_val = int(str(raw_int).strip())
+                    if int_val < 0:
+                        raise ValueError
+                except ValueError:
+                    return Response({int_key: f"Неверное значение: {int_label}."}, status=status.HTTP_400_BAD_REQUEST)
+                extra_fields[int_key] = int_val
+
         product = Product(
             company=company,
             branch=branch,
@@ -1906,6 +1977,7 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
 
             created_by=request.user,
             stock=_parse_bool_like(data.get("stock", False)),
+            **extra_fields,
             **parse_upsell_fields(data),
         )
         if price_provided:
@@ -2185,7 +2257,10 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
         return Response(ser.data, status=status.HTTP_201_CREATED)
 
 
-class ProductRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+@read_only_guard("can_edit_products")
+@pin_guard("DELETE")
+class ProductRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+    trash_type = "product"
     serializer_class = ProductSerializer
 
     queryset = (
@@ -2231,8 +2306,20 @@ class ProductRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics
             )
 
 
-    @transaction.atomic
     def update(self, request, *args, **kwargs):
+        # журнал (ТЗ п.8): цена/наценка и ручной остаток — было → стало
+        before = admin_audit.product_values(kwargs.get(self.lookup_url_kwarg or self.lookup_field))
+        response = self._update_impl(request, *args, **kwargs)
+        if before is not None and 200 <= response.status_code < 300:
+            try:
+                p = Product.objects.select_related("company").get(pk=kwargs.get(self.lookup_url_kwarg or self.lookup_field))
+                admin_audit.log_product_change(request, p, before)
+            except Exception:
+                pass
+        return response
+
+    @transaction.atomic
+    def _update_impl(self, request, *args, **kwargs):
         partial = kwargs.pop("partial", False)
         instance = self.get_object()
         data = request.data
@@ -2418,6 +2505,7 @@ class ProductRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics
 
 
 
+@read_only_guard("can_edit_products")
 class ProductBulkUpdateAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     PATCH /api/main/products/bulk-update/
@@ -2629,6 +2717,8 @@ class ProductBulkUpdateAPIView(CompanyBranchRestrictedMixin, APIView):
         }, status=status.HTTP_200_OK)
 
 
+@read_only_guard("can_edit_products")
+@pin_guard()
 class ProductBulkDeleteAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     DELETE /api/main/products/bulk-delete/
@@ -2648,13 +2738,20 @@ class ProductBulkDeleteAPIView(CompanyBranchRestrictedMixin, APIView):
 
         results = {"deleted": [], "protected": [], "not_found": not_found}
 
+        from apps.construction import trash as _trash
+
         def _delete_one(p: Product):
             try:
-                if soft and hasattr(p, "is_active"):
-                    p.is_active = False
-                    p.save(update_fields=["is_active"])
-                else:
-                    p.delete()
+                pname, ppk = p.name, p.pk
+                with transaction.atomic():
+                    entry = _trash.record(request, "product", p)
+                    if soft and hasattr(p, "is_active"):
+                        p.is_active = False
+                        p.save(update_fields=["is_active"])
+                    else:
+                        p.delete()
+                    _trash.finalize(entry, "product", p)
+                admin_audit.log_request(request, "delete", "product", ppk, pname, company=p.company)
                 results["deleted"].append(str(p.id))
             except ProtectedError:
                 results["protected"].append(str(p.id))
@@ -2871,6 +2968,18 @@ class NotificationDetailView(CompanyBranchRestrictedMixin, generics.RetrieveDest
         return super().get_queryset().filter(user=self.request.user)
 
 
+class NotificationUnreadCountView(APIView):
+    """GET /api/main/notifications/unread-count/ -> {"count": N} (ТЗ 12.20). Опционально ?category=."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        qs = Notification.objects.filter(user=request.user, is_read=False)
+        cat = (request.query_params.get("category") or "").strip()
+        if cat:
+            qs = qs.filter(Q(category=cat) | Q(type=cat))
+        return Response({"count": qs.count()})
+
+
 class MarkAllNotificationsReadView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -3011,6 +3120,7 @@ class WarehouseEventRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, g
 # ===========================
 #  Product taxonomies
 # ===========================
+@read_only_guard("can_edit_products")
 class ProductCategoryListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     serializer_class = ProductCategorySerializer
     queryset = ProductCategory.objects.select_related("company", "branch", "parent").all()
@@ -3031,7 +3141,9 @@ class ProductCategoryListCreateAPIView(CompanyBranchRestrictedMixin, generics.Li
             raise
 
 
-class ProductCategoryRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+@read_only_guard("can_edit_products")
+class ProductCategoryRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+    trash_type = "category"
     serializer_class = ProductCategorySerializer
     queryset = ProductCategory.objects.select_related("company", "branch", "parent").all()
 
@@ -3048,6 +3160,7 @@ class ProductCategoryRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, 
             raise
 
 
+@read_only_guard("can_edit_products")
 class ProductBrandListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     serializer_class = ProductBrandSerializer
     queryset = ProductBrand.objects.select_related("company", "branch").all()
@@ -3068,7 +3181,9 @@ class ProductBrandListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListC
             raise
 
 
-class ProductBrandRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+@read_only_guard("can_edit_products")
+class ProductBrandRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+    trash_type = "brand"
     serializer_class = ProductBrandSerializer
     queryset = ProductBrand.objects.select_related("company", "branch").all()
 
@@ -3218,6 +3333,7 @@ class ClientPhoneAwareSearchFilter(filters.SearchFilter):
         return super().filter_queryset(request, queryset, view)
 
 
+@read_only_guard("can_edit_clients")
 class ClientListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     """
     GET  /api/main/clients/
@@ -3253,7 +3369,9 @@ class ClientListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateA
         self._save_with_company_branch(serializer, **kwargs)
 
 
-class ClientRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+@read_only_guard("can_edit_clients")
+class ClientRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
+    trash_type = "client"
     """
     GET    /api/main/clients/<uuid:pk>/
     PATCH  /api/main/clients/<uuid:pk>/
@@ -3369,6 +3487,7 @@ class ClientKPIsAPIView(CompanyBranchRestrictedMixin, APIView):
         }, status=status.HTTP_200_OK)
 
 
+@read_only_guard("can_edit_clients")
 class ClientDealListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     """
       GET  /api/main/deals/
@@ -3486,6 +3605,7 @@ class ClientDealListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCre
 
 # ===== Deals retrieve/update/destroy =====
 
+@read_only_guard("can_edit_clients")
 class ClientDealRetrieveUpdateDestroyAPIView(
     CompanyBranchRestrictedMixin,
     generics.RetrieveUpdateDestroyAPIView,
@@ -3541,6 +3661,7 @@ class ClientDealRetrieveUpdateDestroyAPIView(
 
 # ===== RESCHEDULE / PROMISED DATE (перенос срока по взносу) =====
 
+@read_only_guard("can_edit_clients")
 class ClientDealInstallmentUpdateAPIView(APIView, CompanyBranchRestrictedMixin):
     """
     PATCH /api/main/clients/<client_id>/deals/<deal_id>/installments/<installment_id>/
@@ -3689,6 +3810,7 @@ class ClientDealInstallmentUpdateAPIView(APIView, CompanyBranchRestrictedMixin):
 
 # ===== PAY (создаём DealPayment + обновляем installment) =====
 
+@read_only_guard("can_edit_clients")
 class ClientDealPayAPIView(APIView, CompanyBranchRestrictedMixin):
     """
     POST /api/main/deals/<uuid:pk>/pay/
@@ -3857,6 +3979,7 @@ class ClientDealPayAPIView(APIView, CompanyBranchRestrictedMixin):
         return Response(ClientDealSerializer(fresh, context={"request": request}).data, status=status.HTTP_200_OK)
 
 
+@read_only_guard("can_edit_clients")
 class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
     """Atomically distribute one payment across a client's debt installments.
 
@@ -3938,6 +4061,7 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
         note = data.get("note", "") or ""
         left = amount
         affected_ids = []
+        is_supplier = client.type == Client.StatusClient.SUPPLIERS
         for inst in installments:
             if left <= 0:
                 break
@@ -3963,22 +4087,41 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
             inst.paid_on = paid_date if inst.paid_amount >= inst.amount else None
             inst.save(update_fields=["paid_amount", "paid_on"])
 
-            create_auto_cashflow(
-                company=deal.company,
-                branch=deal.branch,
-                cashbox_id=data.get("cashbox_id"),
-                cashbox_role=data.get("cashbox_role") or "pos_branch",
-                shift_id=data.get("shift_id"),
-                user=request.user,
-                type=CashFlow.Type.INCOME,
-                amount=pay_amount,
-                source_kind=CashFlow.SourceKind.DEBT_REPAYMENT,
-                source_id=str(payment.id),
-                name=f"Оплата долга: {deal.title or client.full_name}",
-                source_business_operation_id="Оплата долга",
-                payment_method=pm,
-                affects_shift_drawer=(pm == "cash"),
-            )
+            if is_supplier:
+                # Долг поставщику - это РАСХОД (как в clients/{id}/deals/{deal}/pay/).
+                create_auto_cashflow(
+                    company=deal.company,
+                    branch=deal.branch,
+                    cashbox_id=data.get("cashbox_id"),
+                    cashbox_role=data.get("cashbox_role") or "expense_variable",
+                    user=request.user,
+                    shift=None,
+                    type=CashFlow.Type.EXPENSE,
+                    amount=pay_amount,
+                    source_kind=CashFlow.SourceKind.SUPPLIER_DEBT_PAYMENT,
+                    source_id=str(payment.id),
+                    name=f"Оплата долга поставщику: {deal.title or client.full_name}",
+                    source_business_operation_id="Оплата долга",
+                    payment_method=pm,
+                    affects_shift_drawer=False,
+                )
+            else:
+                create_auto_cashflow(
+                    company=deal.company,
+                    branch=deal.branch,
+                    cashbox_id=data.get("cashbox_id"),
+                    cashbox_role=data.get("cashbox_role") or "pos_branch",
+                    shift_id=data.get("shift_id"),
+                    user=request.user,
+                    type=CashFlow.Type.INCOME,
+                    amount=pay_amount,
+                    source_kind=CashFlow.SourceKind.DEBT_REPAYMENT,
+                    source_id=str(payment.id),
+                    name=f"Оплата долга: {deal.title or client.full_name}",
+                    source_business_operation_id="Оплата долга",
+                    payment_method=pm,
+                    affects_shift_drawer=(pm == "cash"),
+                )
             if deal.id not in affected_ids:
                 affected_ids.append(deal.id)
             self.applied.append((deal, pay_amount))
@@ -3998,6 +4141,7 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
 
 # ===== REFUND (создаём DealPayment refund + уменьшаем paid_amount) =====
 
+@read_only_guard("can_edit_clients")
 class ClientDealRefundAPIView(APIView, CompanyBranchRestrictedMixin):
     """
     POST /api/main/deals/<uuid:pk>/refund/
@@ -4155,12 +4299,12 @@ class BidRetrieveUpdateDestroyAPIView(generics.RetrieveUpdateDestroyAPIView):
 
 class SocialApplicationsListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     serializer_class = SocialApplicationsSerializers
-    queryset = SocialApplications.objects.select_related("company", "branch", "client").all()
+    queryset = SocialApplications.objects.all()
 
 
 class SocialApplicationsRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = SocialApplicationsSerializers
-    queryset = SocialApplications.objects.select_related("company", "branch", "client").all()
+    queryset = SocialApplications.objects.all()
 
 
 # ===========================
@@ -4281,6 +4425,7 @@ class ContractorWorkRetrieveUpdateDestroyAPIView(
 # ===========================
 #  Debts
 # ===========================
+@read_only_guard("can_edit_clients")
 class DebtListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPIView):
     """
     GET  /api/main/debts/?search=...&date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
@@ -4299,6 +4444,7 @@ class DebtListCreateAPIView(CompanyBranchRestrictedMixin, generics.ListCreateAPI
         )
 
 
+@read_only_guard("can_edit_clients")
 class DebtRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     """
     GET/PATCH/PUT/DELETE /api/main/debts/<uuid:pk>/
@@ -4328,6 +4474,10 @@ class DebtRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.Re
         if old_amount is not None and new_amount is not None and new_amount < old_amount:
             repaid_amount = (old_amount - new_amount).quantize(Decimal("0.01"))
             if repaid_amount > Decimal("0.00"):
+                # ТЗ 12.2: PATCH с меньшей суммой - это погашение. Остаток = amount - оплаты, поэтому
+                # после записи платежа возвращаем amount прежним, иначе остаток падал бы дважды.
+                instance.amount = old_amount
+                instance.save(update_fields=["amount", "updated_at"])
                 debt_payment = instance.add_payment(
                     amount=repaid_amount,
                     paid_at=timezone.localdate(),
@@ -4359,6 +4509,7 @@ class DebtRetrieveUpdateDestroyAPIView(CompanyBranchRestrictedMixin, generics.Re
                 )
 
 
+@read_only_guard("can_edit_clients")
 class DebtPayAPIView(APIView, CompanyBranchRestrictedMixin):
     """
     POST /api/main/debts/<uuid:pk>/pay/
@@ -4378,6 +4529,13 @@ class DebtPayAPIView(APIView, CompanyBranchRestrictedMixin):
         raw_pm = request.data.get("payment_method")
         from apps.main.services_debt import normalize_debt_payment_method
         pm = normalize_debt_payment_method(raw_pm)
+
+        from apps.warehouse.services import ensure_period_open_api
+        ensure_period_open_api(
+            company=debt.company,
+            dates=[ser.validated_data.get("paid_at") or timezone.localdate()],
+            user=request.user,
+        )
 
         payment = DebtPayment.objects.create(
             company=debt.company,
@@ -5228,6 +5386,7 @@ class SupplierReceiptLimitPagination(PageNumberPagination):
         )
 
 
+@read_only_guard("can_edit_procurement")
 class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     POST /api/main/suppliers/<uuid:supplier_id>/receipt/
@@ -5311,10 +5470,16 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
                     except Exception:
                         pass
             elif raw_pp is not None:
-                # Цена продажи становится равной цене из прихода (без наценки),
-                # раньше она пересчитывалась по старой наценке (50 → 83.33).
-                upd["price"] = new_purchase_price.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                upd["markup_percent"] = Decimal("0")
+                # Оприходование меняет только закупочную цену и остаток.
+                # Цена продажи (price) не трогается: раньше она перезаписывалась
+                # закупочной и товар уходил с кассы по себестоимости.
+                # Наценку пересчитываем от новой закупочной к текущей цене продажи,
+                # чтобы тройка purchase_price / markup_percent / price осталась согласованной.
+                current_price = Decimal(str(getattr(prod, "price", None) or 0))
+                if new_purchase_price > Decimal("0") and current_price > Decimal("0"):
+                    upd["markup_percent"] = (
+                        (current_price - new_purchase_price) / new_purchase_price * Decimal("100")
+                    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
             type(prod).objects.filter(id=pid).update(**upd)
             # The batch retains the shelf-life configuration at the receipt moment.
@@ -5413,6 +5578,9 @@ class SupplierReceiptQuerysetMixin:
             SupplierReceipt.objects.select_related("supplier", "company", "branch", "created_by")
             .prefetch_related("items", "items__product")
             .annotate(total_amount=Sum(line_total))
+            # Meta.ordering is dropped by Django in GROUP BY queries (annotate+Sum),
+            # so order explicitly: newest receipts first.
+            .order_by("-created_at", "-id")
         )
         return self._filter_qs_company_branch(qs)
 
@@ -5638,6 +5806,7 @@ class SupplierReturnRetrieveAPIView(CompanyBranchRestrictedMixin, generics.Retri
         return Response(data)
 
 
+@read_only_guard("can_edit_procurement")
 class SupplierReturnCreateAPIView(CompanyBranchRestrictedMixin, APIView):
     """
     POST /api/main/suppliers/<uuid:supplier_id>/returns/
@@ -5779,7 +5948,7 @@ class SupplierReturnCreateAPIView(CompanyBranchRestrictedMixin, APIView):
         for line in validated_lines:
             p = line["product"]
             q = line["qty"]
-            Product.objects.filter(id=p.id).update(quantity=F("quantity") - q)
+            Product.objects.filter(id=p.id).update(quantity=F("quantity") - q, updated_at=timezone.now())
 
             return_items.append(
                 SupplierReturnItem(
@@ -6624,7 +6793,7 @@ class ProductMoveToRawAPIView(CompanyBranchRestrictedMixin, APIView):
             )
 
         # 1) списываем из готовой продукции
-        Product.objects.filter(pk=product.pk).update(quantity=F("quantity") - qty)
+        Product.objects.filter(pk=product.pk).update(quantity=F("quantity") - qty, updated_at=timezone.now())
 
         # 2) находим/создаём запись сырья (мэппинг по company+branch+name+kind=raw)
         raw_item = (

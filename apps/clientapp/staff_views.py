@@ -78,10 +78,19 @@ class ClientByPhoneAPIView(_StaffBase):
         clients = [c for c in qs.order_by("created_at")[:20] if normalize_phone_e164(c.phone) == phone]
         if branch is not None:
             clients.sort(key=lambda c: 0 if c.branch_id == branch.id else 1)
+        created = False
+        if not clients:
+            # ТЗ 14.10, п. 2.3: клиента в компании нет, но номер подтверждён в приложении —
+            # заводим клиента из профиля (ФИО, телефон, дата рождения), чтобы старые кассы
+            # не открывали «Новый клиент» с пустым именем. Без профиля — как раньше, client: null.
+            client, created = services.client_for_kassa_or_from_app(company, branch, phone)
+            if client is not None:
+                clients = [client]
         return Response({
             "phone": phone,
-            "client": client_payload(clients[0]) if clients else None,
-            "results": [client_payload(c) for c in clients],
+            "client": client_payload(clients[0], created) if clients else None,
+            "results": [client_payload(c, created and c is clients[0]) for c in clients],
+            "has_app": services.confirmed_customer_for_phone(phone) is not None,
         })
 
 
@@ -99,17 +108,21 @@ class ClientResolveQrAPIView(_StaffBase):
         if raw.upper().startswith("NURCRMT"):
             raw = raw[7:]
         elif raw.upper().startswith("NURCRM"):
-            # переходный формат: телефон в QR — только поиск, без создания
+            # переходный формат: телефон в QR. Клиента нет — заводим из подтверждённого профиля
+            # приложения (ТЗ 14.10, п. 2.3); без профиля — только поиск, client: null.
             phone = normalize_phone_e164(raw[6:])
             if not phone:
                 raise ValidationError({"token": ["Неверный QR."]})
-            client = services.pick_client_for_kassa(company, branch, phone)
-            return Response({
-                "format": "phone",
-                "phone": phone,
-                "client": client_payload(client) if client else None,
-                "verified": False,
-            })
+            client, created = services.client_for_kassa_or_from_app(company, branch, phone)
+            return Response(
+                {
+                    "format": "phone",
+                    "phone": phone,
+                    "client": client_payload(client, created) if client else None,
+                    "verified": False,
+                },
+                status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+            )
         if not raw or len(raw) > 64:
             raise ValidationError({"token": ["Неверный QR."]})
         now = timezone.now()

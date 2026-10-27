@@ -52,8 +52,14 @@ class MapProtectionTests(AppTestMixin, KassaBase):
     def test_needs_coords_and_admin_can_hide(self):
         r = self.api.patch(SETTINGS, {"show_in_app": True, "address": "Бишкек, Чуй 1"}, format="json")
         self.assertEqual(r.status_code, 200, r.data)
+        # ТЗ 14.10, п. 2.2: пока геокодер не прошёл, магазин в списке без координат
+        listed = self.app.get("/api/v1/shops").json()
+        self.assertEqual((len(listed), listed[0]["latitude"]), (1, None))
+        # геокодер адрес не нашёл — магазин скрыт, владелец видит причину
+        AppShopSettings.objects.filter(company=self.company, branch=None).update(geocode_status="not_found",
+                                                                                 geocode_attempts=1)
         self.assertEqual(self.app.get("/api/v1/shops").json(), [])
-        self.assertIn("no_coordinates", r.data["not_visible_reasons"])
+        self.assertIn("no_coordinates", self.api.get(SETTINGS).data["not_visible_reasons"])
 
         self.api.patch(SETTINGS, {"latitude": "42.87", "longitude": "74.59"}, format="json")
         self.assertEqual(len(self.app.get("/api/v1/shops").json()), 1)
