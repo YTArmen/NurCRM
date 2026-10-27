@@ -370,6 +370,8 @@ def reprice_cart(cart, client, request=None) -> bool:
         if it.product_id:
             totals[it.product_id] = totals.get(it.product_id, Decimal("0")) + _line_qty(it)
     changed = []
+    info = {}
+    cart_opt = bool(getattr(cart, "is_wholesale", False))
     for it in items:
         p = it.product
         if p is None or it.variant_id or it.sale_package_id or getattr(it, "sale_unit_id", None):
@@ -377,31 +379,54 @@ def reprice_cart(cart, client, request=None) -> bool:
         unit = q2(it.unit_price)
         retail = q2(p.price)
         wholesale = q2(p.wholesale_price) if p.wholesale_price else ZERO
-        cart_opt = bool(getattr(cart, "is_wholesale", False))
-        if it.is_wholesale or cart_opt or it.price_manually_edited or unit != retail:
-            src = "wholesale" if (it.is_wholesale or cart_opt or (wholesale > 0 and unit == wholesale)) else "manual"
-            price, src, base = unit, src, retail
+        res_price, res_src, base = ctx.resolve(p, totals.get(p.id))
+        computed_before = it.price_source == "retail" or it.price_source == "volume" or it.price_source.startswith("level:")
+        if it.is_wholesale or cart_opt:
+            price, src = unit, "wholesale"  # ручной опт важнее уровня клиента
+        elif unit == res_price:
+            price, src = res_price, res_src  # касса сама посчитала так же, как сервер
+        elif (unit == retail and not it.price_manually_edited) or (computed_before and not it.price_manually_edited):
+            price, src = res_price, res_src
         else:
-            price, src, base = ctx.resolve(p, totals.get(p.id))
+            price, src = unit, ("wholesale" if (wholesale > 0 and unit == wholesale) else "manual")
+        info[(it.product_id, it.variant_id, it.sale_package_id)] = (src, base)
         if (unit, it.price_source, it.base_price) != (price, src, base):
             it.unit_price, it.price_source, it.base_price = price, src, base
             changed.append(it)
+    # корзина после продажи удаляется — источник цены строк запоминаем на запросе (см. copy_price_info_to_sale)
+    try:
+        request._hw_price_info = info
+    except AttributeError:
+        pass
     if changed:
         CartItem.objects.bulk_update(changed, ["unit_price", "price_source", "base_price"])
         cart.recalc()
     return True
 
 
-def copy_price_info_to_sale(cart, sale) -> None:
-    """price_source/base_price строк корзины -> строки продажи (сопоставление по товару/варианту/упаковке)."""
+def reprice_for_request(request, cart, client_id) -> bool:
+    """Крючок кассы: клиент по id (своей компании) -> reprice_cart. Без флага/новой кассы ничего не делает."""
+    from core.api_compat import is_hardware_strict
+
+    if not is_hardware_strict(request, cart.company):
+        return False
+    client = None
+    if client_id:
+        from apps.main.models import Client
+
+        client = Client.objects.select_related("price_level").filter(pk=client_id, company_id=cart.company_id).first()
+    return reprice_cart(cart, client, request)
+
+
+def copy_price_info_to_sale(request, sale) -> None:
+    """price_source/base_price строк (запомнены при пересчёте на запросе) -> строки продажи."""
     from apps.main.models import SaleItem
 
-    for it in cart.items.all():
-        if not it.price_source or not it.product_id:
-            continue
-        SaleItem.objects.filter(
-            sale=sale, product_id=it.product_id, variant_id=it.variant_id, sale_package_id=it.sale_package_id
-        ).update(price_source=it.price_source, base_price=it.base_price)
+    for (pid, vid, pkg), (src, base) in (getattr(request, "_hw_price_info", None) or {}).items():
+        if pid:
+            SaleItem.objects.filter(sale=sale, product_id=pid, variant_id=vid, sale_package_id=pkg).update(
+                price_source=src, base_price=base
+            )
 
 
 def quote_lines(company, client, lines) -> list:
@@ -546,7 +571,7 @@ def after_checkout(request, cart, sale, client) -> None:
     """
     from core.api_compat import is_hardware_strict
 
-    copy_price_info_to_sale(cart, sale)
+    copy_price_info_to_sale(request, sale)
     if client is None or sale.client_id != client.id:
         return
     data = getattr(request, "data", None)

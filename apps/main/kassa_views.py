@@ -43,6 +43,13 @@ from apps.main.pos_serializers import MoneyField, QtyField, _is_owner_like
 from apps.main.pos_utils import money, qty3
 from apps.main.views import CompanyBranchRestrictedMixin, _filter_clients_visible_for_user
 from core.exceptions import ApiError
+from apps.main.tz26.hw_prices.services import (
+    attach_debtor_objects as hw_attach_debtor_objects,
+    check_credit_limit as hw_check_credit_limit,
+    default_due_date as hw_default_due_date,
+    link_direct_debt as hw_link_direct_debt,
+    reprice_for_request as hw_reprice_for_request,
+)
 
 Q2 = Decimal("0.01")
 ZERO = Decimal("0.00")
@@ -473,6 +480,7 @@ class PosQuickCheckoutAPIView(APIView):
                 # В офлайн-досылке продажа уже состоялась по ценам кассы: лимит скидок не применяем
                 limit_discounts = max_dp is not None and not _is_admin_for_discounts(user) and not self._offline
                 self._add_items(cart, data["items"], limit_discounts, max_dp)
+                hw_reprice_for_request(request, cart, data.get("client"))  # ТЗ 26.10 Б-55: цена по уровню клиента (под флагом)
 
                 bonus = money(data.get("bonus_redeemed") or ZERO)
                 self._apply_order_discount(cart, data, bonus, limit_discounts, max_dp)
@@ -1085,6 +1093,8 @@ class ClientDebtorsAPIView(_ClientScopedMixin, APIView):
             by_client = _debtor_sales([uuid.UUID(r["client"]) for r in out], company.id)
             for r in out:
                 r["sales"] = by_client.get(uuid.UUID(r["client"]), [])
+        if "objects" in [x.strip() for x in (qp.get("include") or "").split(",")]:
+            hw_attach_debtor_objects(out, company.id)  # ТЗ 26.10 Б-56: долг по объектам
         if page_meta is not None:
             return Response({**page_meta, "results": out})
         return Response(out)
@@ -1507,11 +1517,12 @@ class ClientDirectDebtAPIView(CompanyBranchRestrictedMixin, APIView):
 
         comment = (request.data.get("comment") or "").strip()
         due_date_raw = request.data.get("due_date")
-        due_date = parse_date(str(due_date_raw)) if due_date_raw else timezone.localdate() + timedelta(days=30)
+        due_date = parse_date(str(due_date_raw)) if due_date_raw else hw_default_due_date(request, client)
         if due_date is None:
             raise ValidationError({"due_date": "Ожидается дата YYYY-MM-DD."})
 
         with transaction.atomic():
+            hw_check_credit_limit(request, client, amount)  # ТЗ 26.10 Б-56: 409 credit_limit_exceeded (под флагом)
             # ТЗ ч.12, 3.2: долг без продажи — сделка с одним взносом, без выручки
             deal = ClientDeal.objects.create(
                 company=company,
@@ -1525,6 +1536,7 @@ class ClientDirectDebtAPIView(CompanyBranchRestrictedMixin, APIView):
                 debt_days=1,
                 first_due_date=due_date,
             )
+            hw_link_direct_debt(request, client, deal)  # ТЗ 26.10 Б-56: object
 
         return Response(
             {
