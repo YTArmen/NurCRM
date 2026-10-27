@@ -5546,6 +5546,9 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
             for pkg in pkgs:
                 if pkg.product_id not in pack_size_map:
                     pack_size_map[pkg.product_id] = float(pkg.quantity_in_package)
+            from apps.main.tz26.hw_units.receipts import default_receipt_pack_sizes
+
+            pack_size_map.update(default_receipt_pack_sizes(product_ids))  # ТЗ 26.10 Б-53 п.5
 
         # 7. Последняя закупка
         last_purchase_map = {}
@@ -6116,6 +6119,9 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
         ser.is_valid(raise_exception=True)
 
         items = ser.validated_data["items"]
+        from apps.main.tz26.hw_units.receipts import convert_receipt_items
+
+        convert_receipt_items(items)  # ТЗ 26.10 Б-53 п.5: строки в единицах закупки -> базовые
         product_ids = [it["product"].id for it in items]
         drawer_shift = _receipt_drawer_shift(request, company)
 

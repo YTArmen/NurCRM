@@ -29,6 +29,8 @@ class PurchaseOrderLineSerializer(serializers.Serializer):
     qty = serializers.DecimalField(max_digits=12, decimal_places=3, min_value=Decimal("0.001"))
     purchase_price = serializers.DecimalField(max_digits=11, decimal_places=3, required=False, allow_null=True, min_value=Decimal("0"))
     received_qty = serializers.DecimalField(max_digits=12, decimal_places=3, required=False, min_value=Decimal("0"))
+    # ТЗ 26.10 Б-53 п.5: единица закупки (qty и purchase_price — в ней; хранится в базовых)
+    sale_unit_id = serializers.IntegerField(required=False, allow_null=True, write_only=True)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -83,6 +85,9 @@ class PurchaseOrderBase(CompanyBranchRestrictedMixin):
 
     @staticmethod
     def _replace_lines(order, lines):
+        from apps.main.tz26.hw_units.receipts import convert_order_lines
+
+        lines = convert_order_lines(lines)  # ТЗ 26.10 Б-53 п.5
         old = {}
         for ln in order.lines.all():
             old[ln.product_id] = old.get(ln.product_id, Decimal("0")) + ln.received_qty

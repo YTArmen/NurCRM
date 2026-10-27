@@ -3488,6 +3488,8 @@ class SupplierReceiptItemSerializer(serializers.Serializer):
     variants = serializers.ListField(
         child=serializers.DictField(), required=False, allow_empty=True
     )
+    # ТЗ 26.10 Б-53 п.5: единица закупки (qty — в ней, purchase_price — за единицу)
+    sale_unit_id = serializers.IntegerField(required=False, allow_null=True)
 
 
 class SupplierReceiptCreateSerializer(serializers.Serializer):
