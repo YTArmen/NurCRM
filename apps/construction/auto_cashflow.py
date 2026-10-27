@@ -105,7 +105,7 @@ def resolve_cashbox(
                 raise DRFValidationError({"detail": "Касса находится в архиве.", "code": "cashbox_inactive"})
             return cb
         if require_cashbox:
-            raise DRFValidationError({"detail": "Касса не найдена или не принадлежит компании.", "code": "cashbox_inactive"})
+            raise DRFValidationError({"detail": "Касса не найдена или не принадлежит компании.", "code": "cashbox_not_found"})
 
     # Debt payments use the company debt cashbox if configured.  Resolving the
     # shift is deliberately left to create_auto_cashflow so drawer accounting
