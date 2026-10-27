@@ -143,6 +143,14 @@ def get_webhook_info(token: str) -> dict:
         raise TelegramAPIError(f"Ошибка соединения с Telegram: {exc}")
 
 
+def _mirror_to_inbox(chat_id, text, data) -> None:
+    try:
+        from apps.inbox import bot_hooks
+        bot_hooks.on_bot_send(chat_id, text, data)
+    except Exception:
+        pass
+
+
 def send_message(token: str, chat_id: str, text: str, parse_mode: str = "HTML", reply_markup: dict = None) -> dict:
     """Отправляет текстовое сообщение в чат."""
     if not token or not chat_id or not text:
@@ -170,6 +178,8 @@ def send_message(token: str, chat_id: str, text: str, parse_mode: str = "HTML", 
                 data = resp2.json()
             if not data.get("ok"):
                 data.setdefault("error_code", resp.status_code)
+            else:
+                _mirror_to_inbox(chat_id, text, data)  # ящик «Чаты»: ответ бота виден в диалоге
             return data
     except Exception as exc:
         logger.error("sendMessage error for chat %s: %s", chat_id, exc)
