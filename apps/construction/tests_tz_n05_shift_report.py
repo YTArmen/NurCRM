@@ -107,3 +107,17 @@ class ShiftReportN05Tests(TestCase):
         rep = build_shift_report(self.shift)
         self.assertEqual(rep["closing_cash"], rep["counted_cash"])
         self.assertEqual(rep["closing_cash"], "48.00")
+
+    def test_acceptance_cash_sales_split(self):
+        """Б-07: чек 4 (предоплата 1 нал., долг 3) + продажа 2 нал. → cash_sales 3, без предоплат 2, предоплаты 1."""
+        debt = self._sale(status=Sale.Status.DEBT, payment_method="debt", total=D("4.00"), paid_now=D("1.00"),
+                          cash_amount=D("1.00"), debt_initial=D("3.00"), debt_remaining=D("3.00"))
+        SalePayment.objects.create(company=self.company, sale=debt, method="cash", amount=D("1.00"))
+        SalePayment.objects.bulk_create([SalePayment(company=self.company, sale=debt, method="debt", amount=D("3.00"))])
+        self._paid_cash_sale(2)
+        rep = build_shift_report(self.shift)
+        by = {r["code"]: D(r["amount"]) for r in rep["cash_in_drawer_breakdown"]}
+        self.assertEqual(D(rep["cash_sales"]), D("3.00"))
+        self.assertEqual(D(rep["cash_sales_excl_prepayments"]), D("2.00"))
+        self.assertEqual(by["prepayments_cash"], D("1.00"))
+        self.assertEqual(sum(D(r["amount"]) for r in rep["cash_in_drawer_breakdown"][:-1]), D(rep["expected_cash"]))
