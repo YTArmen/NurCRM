@@ -357,7 +357,10 @@ def _price_lines(company, items_input, catalog: svc.PublicCatalog):
                 f"items[{idx}].variant", f"Выберите размер и цвет для товара «{prod.name}».",
                 "variant_required", extra={"index": idx})
         qty = Decimal(str(item["qty"]))
-        if not prod.is_weight and qty != qty.to_integral_value():
+        from apps.main.tz26.hw_units.units import order_line_unit, product_allows_fraction, to_base_line
+
+        ounit = order_line_unit(prod, item, idx, variant_obj)  # ТЗ 26.10 Б-53 п.8: единица продажи
+        if not prod.is_weight and qty != qty.to_integral_value() and not product_allows_fraction(prod, ounit):
             raise ShowcaseFieldError(f"items[{idx}].qty", f"Товар «{prod.name}» продаётся только целыми штуками.")
         if variant_obj is not None:
             # ТЗ Н-27: хватает ли остатка (с учётом одинаковых вариантов в разных строках корзины)
@@ -371,12 +374,19 @@ def _price_lines(company, items_input, catalog: svc.PublicCatalog):
                     "variant_out_of_stock", status_code=status.HTTP_409_CONFLICT,
                     extra={"index": idx, "available": int(have) if have == have.to_integral_value() else str(have)})
         unit_price = variant_prices(variant_obj, prod)[0] if variant_obj is not None else Decimal(str(prod.price or 0))
+        name_suffix = ""
+        if ounit is not None:  # цена единицы; в строку и резерв идут базовые единицы
+            from apps.main.tz26.hw_units.units import effective_unit_price
+
+            unit_price = effective_unit_price(prod, ounit)
         gross, line_discount, net, tier = svc.kassa_line(prod, unit_price, qty, company)
+        if ounit is not None:
+            qty, unit_price, name_suffix = to_base_line(ounit, qty, unit_price)
         items_total += net
         lines.append({
             "product": prod,
             "variant": variant_obj,
-            "product_name": name_with_variant(prod.name, variant_obj),
+            "product_name": name_with_variant(prod.name, variant_obj) + name_suffix,
             "qty": qty,
             "price": _money(unit_price),
             "gross": gross,

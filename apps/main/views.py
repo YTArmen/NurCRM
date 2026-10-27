@@ -1317,6 +1317,7 @@ class ProductListView(CompanyBranchRestrictedMixin, generics.ListAPIView):
                 # Те же ~100 лишних запросов на страницу давали доп. штрихкоды и
                 # партии срока годности — теперь грузятся одним запросом каждый.
                 "alternate_barcodes",
+                "sale_units",  # ТЗ 26.10 Б-53
                 "expiry_batches",
                 product_images_prefetch,
             )
@@ -1773,6 +1774,10 @@ class ProductCreateByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.Creat
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+        from apps.main.tz26.hw_units.units import apply_product_extras  # ТЗ 26.10 Б-52, Б-53
+
+        apply_product_extras(product, data)
+
         product = (
             _annotate_product_is_favorite(
                 Product.objects.filter(pk=product.pk)
@@ -1783,6 +1788,7 @@ class ProductCreateByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.Creat
                     "recipe_items__item_make",
                     "promotion_tiers",
                     "alternate_barcodes",
+                    "sale_units",  # ТЗ 26.10 Б-53
                     product_images_prefetch,
                 )
             )
@@ -2378,6 +2384,10 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+        from apps.main.tz26.hw_units.units import apply_product_extras  # ТЗ 26.10 Б-52, Б-53
+
+        apply_product_extras(product, data)
+
         # add to global product base (optional)
         if barcode:
             GlobalProduct.objects.get_or_create(
@@ -2396,6 +2406,7 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
                     "recipe_items__item_make",
                     "promotion_tiers",
                     "alternate_barcodes",
+                    "sale_units",  # ТЗ 26.10 Б-53
                     product_images_prefetch,
                 )
             )
@@ -2465,6 +2476,7 @@ class ProductRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestri
             "recipe_items__item_make",
             "promotion_tiers",
             "alternate_barcodes",
+            "sale_units",  # ТЗ 26.10 Б-53
             product_images_prefetch,
         )
         .all()
@@ -2678,6 +2690,7 @@ class ProductRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestri
                     "recipe_items__item_make",
                     "promotion_tiers",
                     "alternate_barcodes",
+                    "sale_units",  # ТЗ 26.10 Б-53
                     product_images_prefetch,
                 )
             )
@@ -2990,6 +3003,7 @@ class ProductByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.RetrieveAPI
                 "recipe_items__item_make",
                 "promotion_tiers",
                 "alternate_barcodes",
+                "sale_units",  # ТЗ 26.10 Б-53
                 product_images_prefetch,
             )
             .all()
@@ -3021,6 +3035,7 @@ class ProductByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.RetrieveAPI
             .first()
         )
         self._matched_variant = None
+        self._matched_unit = None
         self._matched_by = "barcode" if product else None
         if product and product.barcode not in variants:
             self._matched_by = "alternate_barcode"
@@ -3034,6 +3049,17 @@ class ProductByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.RetrieveAPI
                 if product is not None:
                     self._matched_variant = pv
                     self._matched_by = "variant_barcode"
+        if not product:
+            # ТЗ 26.10 Б-53 п.3: штрихкод единицы продажи (коробка/мешок)
+            from apps.main.tz26.hw_units.units import find_sale_unit_by_barcode
+
+            for code in variants:
+                unit = find_sale_unit_by_barcode(self._company().id, code)
+                if unit is not None:
+                    product = self.get_queryset().filter(pk=unit.product_id).first()
+                    if product is not None:
+                        self._matched_unit, self._matched_by = unit, "sale_unit_barcode"
+                        break
         if not product:
             raise NotFound(detail="Товар с таким штрих-кодом не найден")
         return product
@@ -3049,6 +3075,10 @@ class ProductByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.RetrieveAPI
         if variant is not None:  # без совпадения по варианту ключа variant нет (контракт possync)
             data["variant"] = ProductVariantSerializer(variant, context={"product": instance}).data
         data["matched_by"] = getattr(self, "_matched_by", "barcode")
+        if getattr(self, "_matched_unit", None) is not None:  # ТЗ 26.10 Б-53 п.3
+            from apps.main.tz26.hw_units.units import sale_unit_scan_payload
+
+            data.update(sale_unit_scan_payload(self._matched_unit))
         return Response(data)
 
 
@@ -5525,6 +5555,9 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
             for pkg in pkgs:
                 if pkg.product_id not in pack_size_map:
                     pack_size_map[pkg.product_id] = float(pkg.quantity_in_package)
+            from apps.main.tz26.hw_units.receipts import default_receipt_pack_sizes
+
+            pack_size_map.update(default_receipt_pack_sizes(product_ids))  # ТЗ 26.10 Б-53 п.5
 
         # 7. Последняя закупка
         last_purchase_map = {}
@@ -6095,6 +6128,9 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
         ser.is_valid(raise_exception=True)
 
         items = ser.validated_data["items"]
+        from apps.main.tz26.hw_units.receipts import convert_receipt_items
+
+        convert_receipt_items(items)  # ТЗ 26.10 Б-53 п.5: строки в единицах закупки -> базовые
         product_ids = [it["product"].id for it in items]
         drawer_shift = _receipt_drawer_shift(request, company)
 

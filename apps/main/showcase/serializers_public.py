@@ -61,6 +61,7 @@ class PublicProductSerializer(serializers.ModelSerializer):
     colors = serializers.SerializerMethodField()
     sizes = serializers.SerializerMethodField()
     size_chart = serializers.SerializerMethodField()  # ТЗ Н-33
+    sale_units = serializers.SerializerMethodField()  # ТЗ 26.10 Б-53 п.7: только продажные поля
 
     # Витрина (ТЗ-BE-2026-05, п. 6.4/6.13): бейдж владельца, закрепление, акция кассы.
     badge = serializers.SerializerMethodField()
@@ -82,6 +83,8 @@ class PublicProductSerializer(serializers.ModelSerializer):
             "title",
             "description",
             "unit",
+            "unit_code", "quantity_step", "min_sale_quantity",  # ТЗ 26.10 Б-52
+            "sale_units",  # ТЗ 26.10 Б-53 п.7
             "is_weight",
             "in_stock",
             "low_stock",
@@ -119,6 +122,11 @@ class PublicProductSerializer(serializers.ModelSerializer):
             "characteristics",
             "packages",
         ]
+
+    def get_sale_units(self, obj):
+        from apps.main.tz26.hw_units.units import serialize_sale_units
+
+        return serialize_sale_units(obj, public=True)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

@@ -58,7 +58,7 @@ def checkout_cart(
     cart.recalc()
 
     items = list(
-        cart.items.select_related("product", "sale_package", "variant")
+        cart.items.select_related("product", "sale_package", "variant", "sale_unit")
     )
     if not items:
         raise ValueError("Корзина пуста.")
@@ -171,6 +171,8 @@ def checkout_cart(
             snap = pos_money(pp / ipp) if ipp > 0 else pos_money(pp)
         else:
             snap = pos_money(pp)
+        if it.sale_unit_id:  # ТЗ 26.10 Б-53: себестоимость единицы продажи = базовая x factor
+            snap = pos_money(pp * it.sale_unit.factor)
         sale_items.append(
             SaleItem(
                 company=cart.company,
@@ -193,6 +195,8 @@ def checkout_cart(
                 performer_id=it.performer_id,
                 performer_commission_amount=_performer_commission(it),
                 is_wholesale=bool(getattr(it, "is_wholesale", False) or getattr(cart, "is_wholesale", False)),
+                sale_unit_id=it.sale_unit_id,  # ТЗ 26.10 Б-53
+                base_quantity=(cart_item_stock_consume_units(it) if it.sale_unit_id else None),
             )
         )
     SaleItem.objects.bulk_create(sale_items)

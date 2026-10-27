@@ -240,7 +240,7 @@ class PublicCompanyShowcaseAPIView(_CatalogMixin, generics.ListAPIView):
             .filter(company=company)  # ✅ без status фильтра
             .select_related("brand", "category")
             .prefetch_related(
-                "images", "packages", "characteristics", "promotion_tiers",
+                "images", "packages", "characteristics", "promotion_tiers", "sale_units",
                 Prefetch("variants", queryset=ProductVariant.objects.filter(is_active=True)),
             )
             .annotate(
@@ -295,7 +295,7 @@ class PublicCompanyProductDetailAPIView(_CatalogMixin, generics.RetrieveAPIView)
             .filter(company=company)  # ✅ без status фильтра
             .select_related("brand", "category", "size_chart")
             .prefetch_related(
-                "images", "packages", "characteristics", "promotion_tiers",
+                "images", "packages", "characteristics", "promotion_tiers", "sale_units",
                 Prefetch("variants", queryset=ProductVariant.objects.filter(is_active=True)),
             )
         )

@@ -156,6 +156,10 @@ class SaleItemsBulkAPIView(MarketCashierOnlyMixin, APIView):
                     raise _line_error("price_below_cost", idx,
                                       f"Цена продажи не может быть ниже закупочной ({min_price}).",
                                       min_price=str(min_price), price=str(base_price))
+            if pkg is None:  # ТЗ 26.10 Б-52: шаг и минимум (под флагом hardware_2026_11)
+                from apps.main.tz26.hw_units.services import check_line_quantity
+
+                check_line_quantity(request, cart.company, product, qty, index=idx)
             units = line_qty_consume_units(qty, pkg)
             used[product.id] += units
             if product.kind != Product.Kind.SERVICE and not can_minus and used[product.id] > Decimal(str(product.quantity or 0)):

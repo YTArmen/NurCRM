@@ -133,10 +133,23 @@ class SaleItemSerializer(serializers.ModelSerializer):
     kind = serializers.CharField(source="product.kind", read_only=True, default="product")
     variant_size = serializers.CharField(source="variant.size", read_only=True, default=None)
     variant_color = serializers.CharField(source="variant.color", read_only=True, default=None)
+    sale_unit = serializers.SerializerMethodField()  # ТЗ 26.10 Б-53
+    base_quantity = serializers.SerializerMethodField()
+
+    def get_sale_unit(self, obj):
+        from apps.main.tz26.hw_units.units import get_sale_unit_for_line
+
+        return get_sale_unit_for_line(obj)
+
+    def get_base_quantity(self, obj):
+        from apps.main.tz26.hw_units.units import get_base_quantity_for_line
+
+        return get_base_quantity_for_line(obj)
 
     class Meta:
         model = CartItem
         fields = (
+            "sale_unit", "base_quantity",
             "id", "cart", "product",
             "kind",
             "product_name", "barcode",
@@ -320,6 +333,8 @@ class AddItemSerializer(serializers.Serializer):
     discount_percent = serializers.DecimalField(max_digits=5, decimal_places=2, required=False)
     # Продажа поштучно из пачки: id упаковки ProductPackage (quantity_in_package = шт в пачке)
     sale_package_id = serializers.UUIDField(required=False, allow_null=True)
+    # ТЗ 26.10 Б-53: единица продажи (коробка/мешок); quantity — в этих единицах
+    sale_unit_id = serializers.IntegerField(required=False, allow_null=True)
     # Разрешить продажу "в минус" (игнорировать проверку остатка).
     # Будет применено только для owner/admin (см. pos_views).
     allow_minus = serializers.BooleanField(required=False, default=False)
@@ -1060,6 +1075,8 @@ class SaleItemReadSerializer(serializers.ModelSerializer):
     price_override_reason = serializers.SerializerMethodField()
     returnable_qty = serializers.SerializerMethodField()
     quantity_refunded = serializers.SerializerMethodField()  # ТЗ Н-07
+    sale_unit = serializers.SerializerMethodField()  # ТЗ 26.10 Б-53
+    base_quantity = serializers.SerializerMethodField()
 
     is_custom = serializers.BooleanField(read_only=True)
     price = serializers.SerializerMethodField(read_only=True)
@@ -1101,8 +1118,20 @@ class SaleItemReadSerializer(serializers.ModelSerializer):
             "price_override_reason",
             "returnable_qty",
             "quantity_refunded",
+            "sale_unit",
+            "base_quantity",
         )
         read_only_fields = fields
+
+    def get_sale_unit(self, obj):
+        from apps.main.tz26.hw_units.units import get_sale_unit_for_line
+
+        return get_sale_unit_for_line(obj)
+
+    def get_base_quantity(self, obj):
+        from apps.main.tz26.hw_units.units import get_base_quantity_for_line
+
+        return get_base_quantity_for_line(obj)
 
     def get_quantity_refunded(self, obj):
         """ТЗ Н-07: сколько по строке уже возвращено (по SaleReturn.returned_items)."""

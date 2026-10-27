@@ -1240,6 +1240,14 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
     upsell_priority = serializers.IntegerField(required=False, min_value=0, max_value=100)
     upsell_excluded = serializers.BooleanField(required=False)
     cashflows = serializers.SerializerMethodField(read_only=True)
+    # ТЗ 26.10 Б-53: единицы продажи/закупки (запись — полной заменой списка)
+    sale_units = serializers.SerializerMethodField(read_only=True)
+    sale_units_input = serializers.ListField(child=serializers.DictField(), write_only=True, required=False)
+
+    def get_sale_units(self, obj):
+        from apps.main.tz26.hw_units.units import serialize_sale_units
+
+        return serialize_sale_units(obj)
 
     class Meta:
         model = Product
@@ -1287,6 +1295,8 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             "purchase_batches",
             "cashflows",
             "size_chart",  # ТЗ Н-33
+            "unit_code", "quantity_step", "min_sale_quantity", "quantity_decimals",  # ТЗ 26.10 Б-52
+            "sale_units", "sale_units_input",  # ТЗ 26.10 Б-53
         ]
 
         read_only_fields = [
@@ -1694,6 +1704,7 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
     def create(self, validated_data):
         item_make_data = validated_data.pop("item_make_ids", [])
         packages_data = validated_data.pop("packages_input", [])
+        units_raw = validated_data.pop("sale_units_input", None)  # ТЗ 26.10 Б-53
         promotion_in = "promotion_rules_input" in validated_data
         promotion_raw = validated_data.pop("promotion_rules_input", None) if promotion_in else None
         alt_in = "alternate_barcodes" in getattr(self, "initial_data", {})
@@ -1828,6 +1839,9 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
 
         from apps.main.tz26.hw_catalog.services import apply_input  # ТЗ 26.10 Б-57/58/59
         apply_input(self, product)
+        from apps.main.tz26.hw_units.units import apply_product_extras  # ТЗ 26.10 Б-52, Б-53
+
+        apply_product_extras(product, getattr(self, "initial_data", None), units_raw=units_raw)
         return product
 
     @transaction.atomic
@@ -1836,6 +1850,7 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
         branch = None
 
         packages_data = validated_data.pop("packages_input", None)
+        units_raw = validated_data.pop("sale_units_input", None)  # ТЗ 26.10 Б-53
         supplier_ids = validated_data.pop("supplier_ids", None)
         promotion_in = "promotion_rules_input" in validated_data
         promotion_raw = validated_data.pop("promotion_rules_input", None) if promotion_in else None
@@ -2045,6 +2060,9 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
 
         from apps.main.tz26.hw_catalog.services import apply_input  # ТЗ 26.10 Б-57/58/59
         apply_input(self, instance)
+        from apps.main.tz26.hw_units.units import apply_product_extras  # ТЗ 26.10 Б-52, Б-53
+
+        apply_product_extras(instance, getattr(self, "initial_data", None), units_raw=units_raw)
         return instance
 # ===========================
 # Review / Notification
@@ -3475,6 +3493,8 @@ class SupplierReceiptItemSerializer(serializers.Serializer):
     variants = serializers.ListField(
         child=serializers.DictField(), required=False, allow_empty=True
     )
+    # ТЗ 26.10 Б-53 п.5: единица закупки (qty — в ней, purchase_price — за единицу)
+    sale_unit_id = serializers.IntegerField(required=False, allow_null=True)
 
 
 class SupplierReceiptCreateSerializer(serializers.Serializer):

@@ -28,6 +28,10 @@ def cart_item_stock_consume_units(item) -> Decimal:
     С sale_package: quantity — в штуках внутри упаковки, списание = quantity / quantity_in_package.
     """
     q = Decimal(str(getattr(item, "quantity", None) or 0))
+    if getattr(item, "sale_unit_id", None):  # ТЗ 26.10 Б-53: строка в единице продажи, списание = quantity x factor
+        from apps.main.tz26.hw_units.units import base_quantity_of
+
+        return base_quantity_of(item)
     sp_id = getattr(item, "sale_package_id", None)
     if not sp_id:
         return qty3(q)
