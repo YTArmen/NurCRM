@@ -9,4 +9,5 @@ urlpatterns = [
     path("", include("apps.main.tz26.ai_stock.public_urls")),
     path("", include("apps.main.tz26.pos_sync.public_urls")),
     path("", include("apps.main.tz26.pos_print.public_urls")),
+    path("", include("apps.main.tz26.hw_batches.public_urls")),
 ]

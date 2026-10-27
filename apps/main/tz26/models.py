@@ -7,3 +7,4 @@ from apps.main.tz26.staff.models import *  # noqa: F401,F403
 from apps.main.tz26.ai_stock.models import *  # noqa: F401,F403
 from apps.main.tz26.pos_sync.models import *  # noqa: F401,F403
 from apps.main.tz26.pos_print.models import *  # noqa: F401,F403
+from apps.main.tz26.hw_batches.models import *  # noqa: F401,F403
