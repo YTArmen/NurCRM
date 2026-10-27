@@ -37,6 +37,7 @@ from apps.main.models import (
 )
 
 from apps.consalting.models import ServicesConsalting
+from apps.main.tz26.hw_prices.serializers import ProductPricesField as _HwProductPricesField, ProductVolumePricesField as _HwVolumePricesField
 from apps.users.models import User, Company, Branch
 from apps.utils import _is_owner_like
 
@@ -1122,6 +1123,14 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
                 raise serializers.ValidationError("Таблица размеров другой компании.")
         return value
 
+    # ТЗ 26.10 Б-55: цены по уровням и от количества (логика — apps/main/tz26/hw_prices)
+    prices = _HwProductPricesField(required=False)
+    volume_prices = _HwVolumePricesField(required=False)
+
+    def save(self, **kwargs):
+        from apps.main.tz26.hw_prices.services import product_serializer_save
+        return product_serializer_save(self, super().save, **kwargs)
+
     # ====== клиент ======
     client = serializers.PrimaryKeyRelatedField(
         queryset=Client.objects.all(),
@@ -1287,6 +1296,7 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             "purchase_batches",
             "cashflows",
             "size_chart",  # ТЗ Н-33
+            "prices", "volume_prices",  # ТЗ 26.10 Б-55
         ]
 
         read_only_fields = [
@@ -2253,7 +2263,8 @@ class ClientSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
             'salesperson', 'salesperson_display',
             'service', 'service_display',
             'telegram_chat_id', 'bonus_balance',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at',
+            'price_level', 'credit_limit', 'default_due_days', 'client_kind',  # ТЗ 26.10 Б-55, Б-56
         ]
         read_only_fields = [
             'id', 'company', 'branch', 'created_at', 'updated_at',
@@ -2273,6 +2284,8 @@ class ClientSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
                 raise serializers.ValidationError({'phone': 'Укажите телефон.'})
         if inst is None:
             attrs.setdefault('phone', '')
+        from apps.main.tz26.hw_prices.services import client_fields_check  # ТЗ 26.10 Б-55, Б-56
+        client_fields_check(self, attrs)
         return attrs
 
     def __init__(self, *args, **kwargs):
