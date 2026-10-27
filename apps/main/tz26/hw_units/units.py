@@ -211,3 +211,237 @@ def apply_product_extras(product, data, *, units_raw=None):
         units_raw = data.get("sale_units_input")
     if units_raw is not None:
         sync_sale_units(product, units_raw)
+
+
+def sale_unit_scan_payload(unit) -> dict:
+    """Добавка к ответу поиска по штрихкоду единицы: sale_unit, matched_by, quantity (= factor)."""
+    return {
+        "sale_unit": serialize_sale_unit(unit),
+        "matched_by": "sale_unit_barcode",
+        "quantity": _fmt(unit.factor, 3),
+    }
+
+
+# ---------------------------------------------------------------- Б-53 п.4: строка корзины с единицей продажи
+
+def unit_factor(item) -> Decimal:
+    """Коэффициент единицы строки корзины/продажи (1, если единицы нет)."""
+    su = getattr(item, "sale_unit", None) if getattr(item, "sale_unit_id", None) else None
+    return Decimal(str(su.factor)) if su is not None else Decimal(1)
+
+
+def base_quantity_of(item) -> Decimal:
+    """Сколько базовых единиц товара в строке: quantity x factor (строка с sale_unit)."""
+    return q3(Decimal(str(getattr(item, "quantity", None) or 0)) * unit_factor(item))
+
+
+def sale_unit_line_fields(item):
+    """Для сериализаторов строки: (sale_unit {id,name,factor} | None, base_quantity | None)."""
+    if not getattr(item, "sale_unit_id", None):
+        return None, None
+    return sale_unit_brief(item.sale_unit), _fmt(base_quantity_of(item), 3)
+
+
+def get_sale_unit_for_line(obj):
+    return sale_unit_line_fields(obj)[0]
+
+
+def get_base_quantity_for_line(obj):
+    return sale_unit_line_fields(obj)[1]
+
+
+def _get_sale_unit(product, unit_id):
+    from apps.main.models import ProductSaleUnit
+
+    try:
+        unit = ProductSaleUnit.objects.filter(pk=int(unit_id), product_id=product.id).first()
+    except (TypeError, ValueError):
+        unit = None
+    if unit is None or not unit.for_sale:
+        raise ApiError("sale_unit_not_found", "Единица продажи не найдена или не разрешена к продаже.", status_code=404)
+    return unit
+
+
+def upsert_sale_unit_item(request, cart, product, unit, qty, *, unit_price=None, discount_total=None,
+                          discount_percent=None, can_minus=False):
+    """Добавляет qty единиц продажи в корзину (слияние по товару и единице). Возвращает CartItem.
+
+    quantity строки — в единицах продажи, unit_price — цена единицы; списание остатка — quantity x factor.
+    Правило слияния: одна строка на (товар, единица продажи); та же пара суммируется, другая единица того
+    же товара в той же корзине — 409 sale_unit_conflict (в БД одна строка товара без упаковки на корзину).
+    """
+    from django.db import transaction  # noqa: F401
+
+    from apps.main.models import Cart, CartItem, Product
+    from apps.main.pos_utils import total_cart_consume_packs_for_product
+    from apps.main.pos_views import (
+        _discount_limit_error,
+        _line_discount_from_request,
+        _line_discount_over_limit,
+        _q2,
+    )
+
+    from .services import check_line_quantity
+
+    qty = q3(qty)
+    if qty <= 0:
+        raise _bad("quantity", "Количество должно быть > 0.")
+    factor = Decimal(str(unit.factor))
+    cart = Cart.objects.select_for_update().get(id=cart.id)
+
+    others = CartItem.objects.select_for_update().filter(
+        cart=cart, product=product, sale_package__isnull=True, variant__isnull=True)
+    target = None
+    for ci in others:
+        if ci.sale_unit_id == unit.id:
+            target = ci
+        else:
+            raise ApiError("sale_unit_conflict",
+                           "В корзине уже есть этот товар в другой единице. Уберите ту строку или продавайте в одной единице.",
+                           status_code=409, data={"item_id": str(ci.id)})
+
+    wholesale = bool(getattr(cart, "is_wholesale", False))
+    if unit_price is not None:
+        base_price = _q2(unit_price)
+    else:
+        base_price = effective_unit_price(product, unit, wholesale=wholesale)
+    disc = _line_discount_from_request(base_price, qty, discount_total, discount_percent)
+
+    user = request.user
+    is_admin = getattr(user, "role", None) in ["owner", "admin"]
+    max_dp = user.company.max_discount_percent
+    if not is_admin and _line_discount_over_limit(base_price, qty, disc, max_dp):
+        body = _discount_limit_error(max_dp)
+        raise ApiError("discount_limit_exceeded", body.get("detail") or "Скидка больше разрешённой.")
+
+    if disc <= 0:
+        min_price = _q2(Decimal(str(product.purchase_price or 0)) * factor)
+        if base_price < min_price:
+            raise ApiError("price_below_cost", f"Цена продажи не может быть ниже закупочной ({min_price}).",
+                           fields={"unit_price": [f"Цена продажи не может быть ниже закупочной ({min_price})."]},
+                           top={"unit_price": f"Цена продажи не может быть ниже закупочной ({min_price})."})
+
+    new_qty = q3((target.quantity if target else Decimal(0)) + qty)
+    check_line_quantity(request, cart.company, product, new_qty, sale_unit=unit)
+
+    other = total_cart_consume_packs_for_product(cart.id, product.id)
+    if target:
+        other = q3(other - base_quantity_of(target))
+    need = q3(new_qty * factor)
+    have = Decimal(str(product.quantity or 0))
+    if product.kind != Product.Kind.SERVICE and not can_minus and q3(other + need) > have:
+        raise ApiError("insufficient_stock",
+                       f"Недостаточно остатка. Доступно не более {q3(max(Decimal(0), have - other))} (в базовых единицах).",
+                       data={"available": str(q3(max(Decimal(0), have - other))), "requested": str(need)})
+
+    if target:
+        item = target
+        item.quantity = new_qty
+        update_f = ["quantity", "base_quantity"]
+        if unit_price is not None:
+            item.unit_price = base_price
+            item.price_manually_edited = True
+            update_f += ["unit_price", "price_manually_edited"]
+        if discount_total is not None or discount_percent is not None:
+            item.manual_discount = item.manual_discount_base() + disc
+            item.line_discount = item.manual_discount
+            update_f += ["line_discount", "manual_discount"]
+        item.base_quantity = need
+        item.save(update_fields=update_f, skip_full_clean=True)
+    else:
+        item = CartItem(
+            cart=cart, company=cart.company, branch=getattr(cart, "branch", None), product=product,
+            sale_unit=unit, quantity=new_qty, base_quantity=need, unit_price=base_price,
+            line_discount=disc, manual_discount=disc,
+            price_manually_edited=unit_price is not None,
+        )
+        item.save(skip_full_clean=True)
+    cart.recalc()
+    return item
+
+
+def add_sale_unit_item_response(request, cart, product, data, *, can_minus=False):
+    """Крючок add-item: строка с `sale_unit_id`. Ответ — корзина + added_item_id, как у обычной строки."""
+    from rest_framework import status
+
+    from apps.main.pos_views import _cart_response
+
+    unit = _get_sale_unit(product, data.get("sale_unit_id"))
+    item = upsert_sale_unit_item(
+        request, cart, product, unit, data.get("quantity") or Decimal(1),
+        unit_price=data.get("unit_price"), discount_total=data.get("discount_total"),
+        discount_percent=data.get("discount_percent"), can_minus=can_minus,
+    )
+    resp = _cart_response(request, cart.id, status_code=status.HTTP_201_CREATED)
+    if isinstance(resp.data, dict):
+        resp.data["added_item_id"] = str(item.id)
+        resp.data["added_item"] = {
+            "id": str(item.id), "product": str(product.id), "sale_package": None,
+            "sale_unit": sale_unit_brief(unit),
+        }
+    return resp
+
+
+def scan_sale_unit_response(request, url_cart, unit, qty):
+    """Крючок scan: штрихкод единицы продажи -> в корзину qty таких единиц (по умолчанию 1)."""
+    from django.db import transaction
+    from django.shortcuts import get_object_or_404
+    from rest_framework import status
+
+    from apps.main.models import Cart
+    from apps.main.pos_views import (
+        _cart_queryset_for_response,
+        _lock_pos_target_cart,
+        _pos_multi_cart_response,
+    )
+
+    product = unit.product
+    sale_id = request.data.get("sale_id") if hasattr(request.data, "get") else None
+    with transaction.atomic():
+        cart = _lock_pos_target_cart(
+            company=request.user.company, user=request.user, shift=url_cart.shift, sale_id=sale_id,
+        )
+        upsert_sale_unit_item(request, cart, product, unit, qty)
+        cart_id = cart.id
+    cart = get_object_or_404(_cart_queryset_for_response(), id=cart_id, company=request.user.company)
+    resp = _pos_multi_cart_response(request, cart, status_code=status.HTTP_201_CREATED)
+    if isinstance(resp.data, dict):
+        resp.data.update(sale_unit_scan_payload(unit))
+    return resp
+
+
+def load_line_units(company_id, items) -> dict:
+    """Крючок pos/checkout: {id: ProductSaleUnit} для строк с sale_unit / sale_unit_id."""
+    from apps.main.models import ProductSaleUnit
+
+    ids = {it.get("sale_unit") or it.get("sale_unit_id") for it in items if isinstance(it, dict)}
+    ids.discard(None)
+    if not ids:
+        return {}
+    return {u.id: u for u in ProductSaleUnit.objects.filter(product__company_id=company_id, id__in=ids)}
+
+
+def pick_line_unit(it, product, pkg, unit_map, seen, idx):
+    """Единица продажи строки pos/checkout (или None). Ошибки — по строке, с index.
+
+    Один товар в одном чеке только в одной единице (иначе 409 sale_unit_conflict): строки сливать нельзя,
+    а раздельные строки одного товара запрещены уникальным ограничением корзины.
+    """
+    from apps.main.kassa_views import _line_error
+
+    uid = it.get("sale_unit") or it.get("sale_unit_id")
+    prev = seen.get(product.id, "-")
+    if uid is None:
+        if prev not in ("-", None):
+            raise _line_error("sale_unit_conflict", idx, "Товар уже есть в чеке в другой единице.", http=409)
+        seen[product.id] = None
+        return None
+    unit = unit_map.get(uid)
+    if unit is None or unit.product_id != product.id or not unit.for_sale:
+        raise _line_error("sale_unit_not_found", idx, "Единица продажи не найдена.", http=404)
+    if pkg is not None:
+        raise _line_error("validation_error", idx, "Нельзя указывать sale_unit вместе с упаковкой.")
+    if prev != "-" and prev != unit.id:
+        raise _line_error("sale_unit_conflict", idx, "Товар уже есть в чеке в другой единице.", http=409)
+    seen[product.id] = unit.id
+    return unit

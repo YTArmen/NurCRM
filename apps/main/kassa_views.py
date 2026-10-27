@@ -92,6 +92,9 @@ class QuickCheckoutItemSerializer(serializers.Serializer):
     # Продажа упаковкой: qty — число упаковок, цена — цена упаковки (обрабатывает apps.possync.packs)
     sale_package_id = serializers.UUIDField(required=False, allow_null=True)
     variant = serializers.UUIDField(required=False, allow_null=True)
+    # ТЗ 26.10 Б-53: единица продажи (id); qty — в этих единицах, price — цена единицы
+    sale_unit = serializers.IntegerField(required=False, allow_null=True)
+    sale_unit_id = serializers.IntegerField(required=False, allow_null=True)
     performer = serializers.UUIDField(required=False, allow_null=True)
     name = serializers.CharField(required=False, allow_blank=True, max_length=255)
     qty = QtyField()
@@ -260,7 +263,16 @@ def _quick_item(it) -> dict:
         "cost_price": str(money(getattr(it, "purchase_price_snapshot", ZERO) or ZERO)),
         "total": str(money(base - discount)),
         "line_total": str(money(base - discount)),  # ТЗ 26.10 Б-52: имя из приёмки
+        **_sale_unit_fields(it),
     }
+
+
+def _sale_unit_fields(it) -> dict:
+    """ТЗ 26.10 Б-53: sale_unit {id,name,factor} и base_quantity в строке ответа (null у обычных строк)."""
+    from apps.main.tz26.hw_units.units import sale_unit_line_fields
+
+    su, bq = sale_unit_line_fields(it)
+    return {"sale_unit": su, "base_quantity": bq}
 
 
 def resolve_performers(company_id, ids):
@@ -682,6 +694,9 @@ class PosQuickCheckoutAPIView(APIView):
         )
         performers = resolve_performers(cid, [it.get("performer") for it in items])
         demand_p, demand_v = defaultdict(lambda: Decimal("0")), defaultdict(lambda: Decimal("0"))
+        from apps.main.tz26.hw_units.units import effective_unit_price, load_line_units, pick_line_unit
+
+        unit_map, unit_seen = load_line_units(cid, items), {}  # ТЗ 26.10 Б-53
 
         rows = []
         for pos, it in enumerate(items):
@@ -729,11 +744,14 @@ class PosQuickCheckoutAPIView(APIView):
                     )
                 self._variant_missing.add(product.id)
                 self._warnings.append({"code": "variant_missing", "index": idx})
+            unit = pick_line_unit(it, product, pkg, unit_map, unit_seen, idx)  # ТЗ 26.10 Б-53
             if pkg is None and not offline:  # ТЗ 26.10 Б-52: шаг и минимум (под флагом hardware_2026_11)
                 from apps.main.tz26.hw_units.services import check_line_quantity
 
-                check_line_quantity(self.request, cart.company, product, qty, index=idx)
+                check_line_quantity(self.request, cart.company, product, qty, sale_unit=unit, index=idx)
             default_price = _q2(variant.effective_price) if variant else _q2(default_unit_price_for_package(product, pkg))
+            if unit is not None:  # ТЗ 26.10 Б-53: цена единицы продажи
+                default_price = effective_unit_price(product, unit, wholesale=bool(getattr(cart, "is_wholesale", False)))
             price = _q2(it["price"]) if it.get("price") is not None else default_price
             wholesale_price = _q2(Decimal(str(getattr(product, "wholesale_price", None) or 0)))
             is_wholesale = bool(
@@ -753,6 +771,8 @@ class PosQuickCheckoutAPIView(APIView):
                 if pkg:
                     ipp = Decimal(str(pkg.quantity_in_package or 0))
                     min_price = _q2(min_price / ipp) if ipp > 0 else min_price
+                if unit is not None:
+                    min_price = _q2(min_price * unit.factor)
                 if price < min_price:
                     raise _line_error(
                         "price_below_cost", idx,
@@ -764,6 +784,8 @@ class PosQuickCheckoutAPIView(APIView):
                     units = line_qty_consume_units(qty, pkg)
                 except ValueError:
                     units = qty
+                if unit is not None:
+                    units = qty3(qty * unit.factor)
                 have_p = Decimal(str(product.quantity or 0))
                 demand_p[product.id] += units
                 over = demand_p[product.id] > have_p
@@ -777,6 +799,7 @@ class PosQuickCheckoutAPIView(APIView):
                 sale_package=pkg, variant=variant, performer=performer, quantity=qty,
                 unit_price=price, line_discount=discount, manual_discount=discount,
                 price_manually_edited=price != default_price, is_wholesale=is_wholesale,
+                sale_unit=unit, base_quantity=(qty3(qty * unit.factor) if unit is not None else None),
             ))
         CartItem.objects.bulk_create(rows)
         cart.recalc()

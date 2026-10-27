@@ -3026,6 +3026,7 @@ class ProductByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.RetrieveAPI
             .first()
         )
         self._matched_variant = None
+        self._matched_unit = None
         self._matched_by = "barcode" if product else None
         if product and product.barcode not in variants:
             self._matched_by = "alternate_barcode"
@@ -3039,6 +3040,17 @@ class ProductByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.RetrieveAPI
                 if product is not None:
                     self._matched_variant = pv
                     self._matched_by = "variant_barcode"
+        if not product:
+            # ТЗ 26.10 Б-53 п.3: штрихкод единицы продажи (коробка/мешок)
+            from apps.main.tz26.hw_units.units import find_sale_unit_by_barcode
+
+            for code in variants:
+                unit = find_sale_unit_by_barcode(self._company().id, code)
+                if unit is not None:
+                    product = self.get_queryset().filter(pk=unit.product_id).first()
+                    if product is not None:
+                        self._matched_unit, self._matched_by = unit, "sale_unit_barcode"
+                        break
         if not product:
             raise NotFound(detail="Товар с таким штрих-кодом не найден")
         return product
@@ -3054,6 +3066,10 @@ class ProductByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.RetrieveAPI
         if variant is not None:  # без совпадения по варианту ключа variant нет (контракт possync)
             data["variant"] = ProductVariantSerializer(variant, context={"product": instance}).data
         data["matched_by"] = getattr(self, "_matched_by", "barcode")
+        if getattr(self, "_matched_unit", None) is not None:  # ТЗ 26.10 Б-53 п.3
+            from apps.main.tz26.hw_units.units import sale_unit_scan_payload
+
+            data.update(sale_unit_scan_payload(self._matched_unit))
         return Response(data)
 
 

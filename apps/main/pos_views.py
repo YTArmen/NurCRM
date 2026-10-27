@@ -390,7 +390,7 @@ def _cart_queryset_for_response():
         "id", "product_id", "position", "min_amount", "discount_percent", "promo_quantity"
     ).order_by("position", "id")
     item_qs = (
-        CartItem.objects.select_related("product", "variant")
+        CartItem.objects.select_related("product", "variant", "sale_unit")
         .only(
             "id",
             "cart_id",
@@ -405,6 +405,8 @@ def _cart_queryset_for_response():
             "variant__id",
             "variant__size",
             "variant__color",
+            "sale_unit_id", "base_quantity",  # ТЗ 26.10 Б-53
+            "sale_unit__id", "sale_unit__name", "sale_unit__factor",
             "product__id",
             "product__name",
             "product__barcode",
@@ -711,6 +713,12 @@ def _reprice_cart_items_for_mode(cart: Cart) -> None:
         if not it.product_id or not it.product:
             continue
         p = it.product
+        if it.sale_unit_id:  # ТЗ 26.10 Б-53: цена единицы продажи
+            from apps.main.tz26.hw_units.units import effective_unit_price
+
+            it.unit_price = effective_unit_price(p, it.sale_unit, wholesale=bool(getattr(cart, "is_wholesale", False)))
+            changed.append(it)
+            continue
         if getattr(cart, "is_wholesale", False):
             raw_wholesale = getattr(p, "wholesale_price", None)
             raw_retail = getattr(p, "price", None)
@@ -2644,6 +2652,12 @@ class SaleScanAPIView(MarketCashierOnlyMixin, APIView):
         barcode = ser.validated_data["barcode"].strip()
         qty = ser.validated_data["quantity"]
 
+        from apps.main.tz26.hw_units.units import find_sale_unit_by_barcode, scan_sale_unit_response
+
+        _unit = find_sale_unit_by_barcode(url_cart.company_id, barcode)  # ТЗ 26.10 Б-53: скан коробки/мешка
+        if _unit is not None:
+            return scan_sale_unit_response(request, url_cart, _unit, qty)
+
         variant = (
             ProductVariant.objects.select_related("product")
             .filter(company_id=url_cart.company_id, barcode=barcode, is_active=True)
@@ -2702,6 +2716,10 @@ class SaleAddItemAPIView(MarketCashierOnlyMixin, APIView):
         qty = ser.validated_data["quantity"]
         allow_minus = bool(ser.validated_data.get("allow_minus"))
         can_minus = allow_minus and _is_owner_like(request.user)
+        if ser.validated_data.get("sale_unit_id"):  # ТЗ 26.10 Б-53 п.4: строка в единице продажи
+            from apps.main.tz26.hw_units.units import add_sale_unit_item_response
+
+            return add_sale_unit_item_response(request, cart, product, ser.validated_data, can_minus=can_minus)
         variant = None
         if ser.validated_data.get("variant_id"):
             variant = get_object_or_404(
@@ -3487,6 +3505,10 @@ def _restock_product_for_sale_item_return(item: SaleItem, return_qty: Decimal) -
     if item.product and item.product.kind == Product.Kind.SERVICE:
         return
     stock_delta = line_qty_consume_units(return_qty, getattr(item, "sale_package", None))
+    if getattr(item, "sale_unit_id", None):  # ТЗ 26.10 Б-53 п.6: возврат в единицах продажи -> базовые
+        from apps.main.tz26.hw_units.units import unit_factor
+
+        stock_delta = qty3(stock_delta * unit_factor(item))
     if stock_delta <= 0:
         return
     Product.objects.filter(pk=item.product_id).exclude(kind=Product.Kind.SERVICE).update(
@@ -4555,6 +4577,15 @@ class ProductFindByBarcodeAPIView(MarketCashierOnlyMixin, APIView):
         if not barcode:
             return Response([], status=200)
 
+        from apps.main.tz26.hw_units.units import find_sale_unit_by_barcode, sale_unit_scan_payload
+
+        unit = find_sale_unit_by_barcode(request.user.company_id, barcode)  # ТЗ 26.10 Б-53 п.3
+        if unit is not None:
+            return Response([{
+                "id": str(unit.product_id), "name": unit.product.name, "barcode": barcode,
+                "price": str(unit.price if unit.price is not None else unit.product.price),
+                **sale_unit_scan_payload(unit),
+            }], status=200)
         try:
             product = _resolve_product_by_barcode_for_pos(
                 request.user.company_id,
@@ -5334,6 +5365,10 @@ class CartItemUpdateDestroyAPIView(MarketCashierOnlyMixin, APIView):
         if Decimal(str(getattr(item, "line_discount", None) or 0)) > 0:
             return unit_price
         min_price = _q2(Decimal(str(getattr(item.product, "purchase_price", None) or 0)))
+        if item.sale_unit_id:  # ТЗ 26.10 Б-53: закупочная цена единицы = базовая x factor
+            from apps.main.tz26.hw_units.units import unit_factor
+
+            min_price = _q2(min_price * unit_factor(item))
         if unit_price < min_price:
             return min_price
         return unit_price
@@ -5368,6 +5403,8 @@ class CartItemUpdateDestroyAPIView(MarketCashierOnlyMixin, APIView):
 
                 check_line_quantity(request, cart.company, item.product, qty, sale_unit=item.sale_unit)
             item.quantity = qty
+            if item.sale_unit_id:
+                item.base_quantity = qty3(qty * item.sale_unit.factor)
 
         unit_price = data.get("unit_price")
         line_discount = data.get("discount_total")
@@ -5400,6 +5437,7 @@ class CartItemUpdateDestroyAPIView(MarketCashierOnlyMixin, APIView):
         update_fields = []
         if qty is not None:
             update_fields.append("quantity")
+            update_fields.append("base_quantity")  # ТЗ 26.10 Б-53
         if unit_price is not None:
             update_fields.append("unit_price")
             update_fields.append("price_manually_edited")
@@ -6254,6 +6292,8 @@ class AgentCartItemUpdateDestroyAPIView(MarketCashierOnlyMixin, APIView):
 
                 check_line_quantity(request, cart.company, item.product, qty, sale_unit=item.sale_unit)
             item.quantity = qty
+            if item.sale_unit_id:
+                item.base_quantity = qty3(qty * item.sale_unit.factor)
 
         unit_price = data.get("unit_price")
         line_discount = data.get("discount_total")
@@ -6282,6 +6322,7 @@ class AgentCartItemUpdateDestroyAPIView(MarketCashierOnlyMixin, APIView):
         update_fields = []
         if qty is not None:
             update_fields.append("quantity")
+            update_fields.append("base_quantity")  # ТЗ 26.10 Б-53
         if unit_price is not None:
             update_fields.append("unit_price")
             update_fields.append("price_manually_edited")
