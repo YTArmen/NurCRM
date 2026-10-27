@@ -49,7 +49,7 @@ class RentalN21Tests(KassaBase):
         self.cashier.can_view_clients = False
         self.cashier.save()
         self.api.force_authenticate(self.cashier)
-        row = self.api.get("/api/rentals/").data["results"][0]
+        row = self.api.get("/api/rentals/", HTTP_X_NURMARKET_CLIENT="kassa/1.17.61").data["results"][0]
         self.assertEqual(row["client_phone"], "********0222")
 
     def test_extend_cash_goes_to_shift(self):
@@ -109,6 +109,11 @@ class RentalN21Tests(KassaBase):
         self._rent()
         past = today - timedelta(days=5)
         self._rent(date_from=past.isoformat(), date_to=(past + timedelta(days=1)).isoformat())
+        # Б-02/Б-21: формат {count…} — новому клиенту; старая касса (без заголовка) получает массив
+        old = self.api.get("/api/rentals/")
+        self.assertIsInstance(old.data, list)
+        self.assertEqual(len(old.data), 2)
+        self.api.credentials(HTTP_X_NURMARKET_CLIENT="kassa/1.17.61")
         for q in ("", "?status=overdue", "?status=active&limit=20"):
             data = self.api.get("/api/rentals/" + q).data
             self.assertEqual(set(data), {"count", "next", "previous", "results"})
