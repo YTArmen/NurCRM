@@ -103,6 +103,24 @@ class ShiftDrawerFundingTests(TestCase):
         self.assertEqual(resp.status_code, 400)
         self.assertIn("shift", resp.data)
 
+    # ── Б-02: старая касса не должна повторять очередь вечно — 400 с кодом, не 403 ──
+    def test_foreign_shift_is_400_shift_not_owned(self):
+        other = User.objects.create_user(
+            email=f"other2_{uuid.uuid4().hex[:6]}@test.com", password="pass", company=self.company
+        )
+        self.api.force_authenticate(other)
+        resp = self.api.post(URL, self._payload(shift=str(self.shift.id)), format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(resp.data["code"], "shift_not_owned", resp.data)
+        self.assertEqual(list(resp.data.keys())[0], "detail")
+
+    def test_closed_shift_is_400_shift_closed(self):
+        self.shift.status = CashShift.Status.CLOSED
+        self.shift.save(update_fields=["status"])
+        resp = self.api.post(URL, self._payload(shift=str(self.shift.id)), format="json")
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertEqual(resp.data["code"], "shift_closed")
+
     # ── §8, кейс 5 ──
     def test_several_open_shifts_require_explicit_shift(self):
         other = User.objects.create_user(

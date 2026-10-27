@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from core.exceptions import ApiError  # Б-02
 from django.db.models import Q, Sum
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -747,9 +748,8 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
             cb_qs = cb_qs.filter(Q(branch__isnull=True) | Q(branch=target_branch))
         self.fields["cashbox"].queryset = cb_qs
 
+        # Б-02: чужую смену не прячем в queryset (иначе общий 400 без кода): validate() даёт 400 shift_not_owned.
         sh_qs = CashShift.objects.filter(company=company)
-        if not _is_owner_like(user):
-            sh_qs = sh_qs.filter(cashier=user)
         self.fields["shift"].queryset = sh_qs
 
         cat_qs = CashFlowCategory.objects.filter(company=company)
@@ -861,10 +861,13 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
                 raise serializers.ValidationError({"shift": "Смена относится к другой кассе."})
 
             if shift.status != CashShift.Status.OPEN:
-                raise serializers.ValidationError({"shift": "Нельзя делать движение по закрытой смене."})
+                # Б-02: старая касса повторяет очередь на любой отказ кроме 400 — даём 400 с понятным кодом.
+                _m = "Нельзя делать движение по закрытой смене."
+                raise ApiError("shift_closed", _m, top={"shift": _m})
 
             if user and (not _is_owner_like(user)) and shift.cashier_id != user.id:
-                raise serializers.ValidationError({"shift": "Это не ваша смена."})
+                _m = "Это не ваша смена."
+                raise ApiError("shift_not_owned", _m, top={"shift": _m})
 
         # «Оплачено из кассы (ящика) смены» — shift-drawer-funding-purchases-backend.md.
         # Обычная ручная запись ящик не трогает: calc_live_totals учитывает только
