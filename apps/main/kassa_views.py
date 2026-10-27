@@ -259,6 +259,7 @@ def _quick_item(it) -> dict:
         "amount": str(money(base - discount)),
         "cost_price": str(money(getattr(it, "purchase_price_snapshot", ZERO) or ZERO)),
         "total": str(money(base - discount)),
+        "line_total": str(money(base - discount)),  # ТЗ 26.10 Б-52: имя из приёмки
     }
 
 
@@ -728,6 +729,10 @@ class PosQuickCheckoutAPIView(APIView):
                     )
                 self._variant_missing.add(product.id)
                 self._warnings.append({"code": "variant_missing", "index": idx})
+            if pkg is None and not offline:  # ТЗ 26.10 Б-52: шаг и минимум (под флагом hardware_2026_11)
+                from apps.main.tz26.hw_units.services import check_line_quantity
+
+                check_line_quantity(self.request, cart.company, product, qty, index=idx)
             default_price = _q2(variant.effective_price) if variant else _q2(default_unit_price_for_package(product, pkg))
             price = _q2(it["price"]) if it.get("price") is not None else default_price
             wholesale_price = _q2(Decimal(str(getattr(product, "wholesale_price", None) or 0)))

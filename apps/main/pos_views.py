@@ -2660,6 +2660,10 @@ class SaleScanAPIView(MarketCashierOnlyMixin, APIView):
                 return Response({"not_found": True, "message": lookup_error or "Товар не найден"}, status=404)
 
         effective_qty = _effective_qty_from_scale_data(scale_data, qty)
+        if variant is None:  # ТЗ 26.10 Б-52: шаг и минимум (под флагом hardware_2026_11)
+            from apps.main.tz26.hw_units.services import check_line_quantity
+
+            check_line_quantity(request, url_cart.company, product, effective_qty)
 
         with transaction.atomic():
             cart = _lock_pos_target_cart(
@@ -2770,6 +2774,10 @@ class SaleAddItemAPIView(MarketCashierOnlyMixin, APIView):
             combined_consume = line_qty_consume_units(target.quantity + qty, pkg)
         else:
             combined_consume = line_qty_consume_units(qty, pkg)
+        if pkg is None:  # ТЗ 26.10 Б-52: шаг и минимум (под флагом hardware_2026_11)
+            from apps.main.tz26.hw_units.services import check_line_quantity
+
+            check_line_quantity(request, cart.company, product, (target.quantity + qty) if target else qty)
         have = Decimal(str(product.quantity or 0))
         if product.kind != Product.Kind.SERVICE and (not can_minus) and qty3(other + combined_consume) > have:
             return Response(
@@ -5355,6 +5363,10 @@ class CartItemUpdateDestroyAPIView(MarketCashierOnlyMixin, APIView):
                 item.delete()
                 cart.recalc()
                 return Response(SaleCartSerializer(cart).data, status=200)
+            if item.product_id and not item.sale_package_id:  # ТЗ 26.10 Б-52 (под флагом hardware_2026_11)
+                from apps.main.tz26.hw_units.services import check_line_quantity
+
+                check_line_quantity(request, cart.company, item.product, qty, sale_unit=item.sale_unit)
             item.quantity = qty
 
         unit_price = data.get("unit_price")
@@ -6237,6 +6249,10 @@ class AgentCartItemUpdateDestroyAPIView(MarketCashierOnlyMixin, APIView):
                 item.delete()
                 cart.recalc()
                 return Response(SaleCartSerializer(cart).data, status=200)
+            if item.product_id and not item.sale_package_id:  # ТЗ 26.10 Б-52 (под флагом hardware_2026_11)
+                from apps.main.tz26.hw_units.services import check_line_quantity
+
+                check_line_quantity(request, cart.company, item.product, qty, sale_unit=item.sale_unit)
             item.quantity = qty
 
         unit_price = data.get("unit_price")

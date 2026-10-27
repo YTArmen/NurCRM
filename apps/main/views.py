@@ -1316,6 +1316,7 @@ class ProductListView(CompanyBranchRestrictedMixin, generics.ListAPIView):
                 # Те же ~100 лишних запросов на страницу давали доп. штрихкоды и
                 # партии срока годности — теперь грузятся одним запросом каждый.
                 "alternate_barcodes",
+                "sale_units",  # ТЗ 26.10 Б-53
                 "expiry_batches",
                 product_images_prefetch,
             )
@@ -1767,6 +1768,10 @@ class ProductCreateByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.Creat
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+        from apps.main.tz26.hw_units.units import apply_product_extras  # ТЗ 26.10 Б-52, Б-53
+
+        apply_product_extras(product, data)
+
         product = (
             _annotate_product_is_favorite(
                 Product.objects.filter(pk=product.pk)
@@ -1777,6 +1782,7 @@ class ProductCreateByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.Creat
                     "recipe_items__item_make",
                     "promotion_tiers",
                     "alternate_barcodes",
+                    "sale_units",  # ТЗ 26.10 Б-53
                     product_images_prefetch,
                 )
             )
@@ -2369,6 +2375,10 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+        from apps.main.tz26.hw_units.units import apply_product_extras  # ТЗ 26.10 Б-52, Б-53
+
+        apply_product_extras(product, data)
+
         # add to global product base (optional)
         if barcode:
             GlobalProduct.objects.get_or_create(
@@ -2387,6 +2397,7 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
                     "recipe_items__item_make",
                     "promotion_tiers",
                     "alternate_barcodes",
+                    "sale_units",  # ТЗ 26.10 Б-53
                     product_images_prefetch,
                 )
             )
@@ -2456,6 +2467,7 @@ class ProductRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestri
             "recipe_items__item_make",
             "promotion_tiers",
             "alternate_barcodes",
+            "sale_units",  # ТЗ 26.10 Б-53
             product_images_prefetch,
         )
         .all()
@@ -2669,6 +2681,7 @@ class ProductRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestri
                     "recipe_items__item_make",
                     "promotion_tiers",
                     "alternate_barcodes",
+                    "sale_units",  # ТЗ 26.10 Б-53
                     product_images_prefetch,
                 )
             )
@@ -2981,6 +2994,7 @@ class ProductByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.RetrieveAPI
                 "recipe_items__item_make",
                 "promotion_tiers",
                 "alternate_barcodes",
+                "sale_units",  # ТЗ 26.10 Б-53
                 product_images_prefetch,
             )
             .all()
