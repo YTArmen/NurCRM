@@ -120,3 +120,102 @@ class AiActionTests(Base):
         self.post(self.client_for(self.cashier), "new")
         self.assertEqual(purge_old(), 1)
         self.assertEqual(list(AiAction.objects.values_list("call_id", flat=True)), ["new"])
+
+
+class StockHealthTests(Base):
+    URL = "/api/main/analytics/stock-health/"
+
+    def setUp(self):
+        super().setUp()
+        from apps.main.models import Sale, SaleItem
+        self.Sale, self.SaleItem = Sale, SaleItem
+        from apps.construction.models import Cashbox
+        self.cashbox = Cashbox.objects.create(name="К1", company=self.company, role=Cashbox.CashboxRole.POS_MAIN)
+        self.analyst = self._staff(can_view_analytics=True)
+        self.analyst_proc = self._staff(can_view_analytics=True, can_view_market_procurement=True)
+
+    def product(self, name, qty="10", price="150", pp="100"):
+        p = Product.objects.create(company=self.company, name=name, price=Decimal(price),
+                                   purchase_price=Decimal(pp), quantity=Decimal(qty))
+        Product.objects.filter(pk=p.pk).update(created_at=timezone.now() - timedelta(days=400))
+        return p
+
+    def sell(self, p, qty, days_ago):
+        when = timezone.now() - timedelta(days=days_ago)
+        sale = self.Sale.objects.create(company=self.company, cashbox=self.cashbox, status=self.Sale.Status.PAID, paid_at=when)
+        self.SaleItem.objects.create(company=self.company, sale=sale, product=p, name_snapshot=p.name,
+                                     unit_price=p.price, quantity=Decimal(qty))
+
+    def get(self, user=None, **params):
+        return self.client_for(user or self.owner).get(self.URL, params)
+
+    def by_name(self, r):
+        return {x["name"]: x for x in r.data["results"]}
+
+    def test_fields_and_math(self):
+        a = self.product("А", qty="30")
+        self.sell(a, "30", 10)
+        self.sell(a, "60", 50)
+        r = self.get(limit="all")
+        self.assertEqual(r.status_code, 200, r.data)
+        x = self.by_name(r)["А"]
+        self.assertEqual(x["sold_30d"], Decimal("30.000"))
+        self.assertEqual(x["sold_90d"], Decimal("90.000"))
+        self.assertEqual(x["avg_per_day_30d"], Decimal("1.000"))
+        self.assertEqual(x["days_of_stock"], Decimal("30.00"))  # остаток / среднее в день
+        self.assertEqual(x["stock_value_purchase"], Decimal("3000.00"))
+        self.assertEqual(x["markup_percent"], Decimal("50.00"))
+        self.assertIsNotNone(x["last_sold_at"])
+
+    def test_no_sales_days_61(self):
+        old = self.product("Старый")
+        self.sell(old, "1", 61)
+        fresh = self.product("Свежий")
+        self.sell(fresh, "1", 5)
+        never = self.product("Никогда")
+        r = self.get(no_sales_days=60)
+        names = set(self.by_name(r))
+        self.assertEqual(names, {"Старый", "Никогда"})
+
+    def test_days_of_stock_and_markup_filters(self):
+        a = self.product("Мало", qty="3")
+        self.sell(a, "30", 3)  # 1/день -> 3 дня
+        b = self.product("Много", qty="300")
+        self.sell(b, "30", 3)
+        c = self.product("Тонкая", qty="500", price="110", pp="100")
+        self.assertEqual(set(self.by_name(self.get(days_of_stock_below=7))), {"Мало"})
+        self.assertEqual(set(self.by_name(self.get(markup_below=20))), {"Тонкая"})
+
+    def test_ordering_limit_and_tab_alias(self):
+        for i, q in enumerate(("1", "5", "3")):
+            self.sell(self.product(f"P{i}"), q, 2)
+        r = self.client_for(self.owner).get("/api/main/analytics/market/", {"tab": "stock_health", "ordering": "-sold_30d", "limit": 2})
+        self.assertEqual(r.status_code, 200, getattr(r, "data", None))
+        self.assertEqual([x["name"] for x in r.data["results"]], ["P1", "P2"])
+        self.assertEqual(r.data["count"], 3)
+        self.assertEqual(self.get(ordering="bogus").status_code, 400)
+
+    def test_purchase_fields_need_rights(self):
+        self.product("А")
+        self.assertEqual(self.get(user=self.cashier).status_code, 403)  # нет can_view_analytics
+        x = self.get(user=self.analyst).data["results"][0]
+        self.assertNotIn("stock_value_purchase", x)
+        self.assertNotIn("markup_percent", x)
+        self.assertNotIn("purchase_price", x)
+        self.assertEqual(self.get(user=self.analyst, markup_below=20).status_code, 403)
+        self.assertEqual(self.get(user=self.analyst, ordering="markup_percent").status_code, 403)
+        y = self.get(user=self.analyst_proc).data["results"][0]
+        self.assertIn("stock_value_purchase", y)
+
+    def test_constant_queries_on_many_products(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        Product.objects.bulk_create([
+            Product(company=self.company, name=f"B{i}", price=Decimal("10"), purchase_price=Decimal("5"), quantity=Decimal("3"))
+            for i in range(300)])
+        p = Product.objects.filter(company=self.company).first()
+        self.sell(p, "5", 1)
+        with CaptureQueriesContext(connection) as ctx:
+            r = self.get(limit="all")
+        self.assertEqual(r.data["count"], 300)
+        self.assertLess(len(ctx), 15, len(ctx))

@@ -990,6 +990,9 @@ class AnalyticsView(APIView):
             _require_finance_access(request.user)
 
         branch = _get_active_branch(request)
+        if tab == "stock_health":  # ТЗ 26.10 Б-66: без общего кэша — набор полей зависит от прав
+            from apps.main.tz26.ai_stock.stock_health import stock_health_data
+            return Response(stock_health_data(request, company, branch, self._include_global(request)))
         period = _get_period(request)
 
         company_id = str(getattr(company, "id", ""))
