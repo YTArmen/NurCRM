@@ -1182,6 +1182,8 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
         ),
     )
     discount_percent = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    # Б-06: пересчитать цену продажи из закупки и наценки (иначе PATCH purchase_price цену не трогает).
+    recalc_price = serializers.BooleanField(required=False, default=False, write_only=True)
 
     country = serializers.CharField(required=False, allow_blank=True)
     expiration_date = serializers.DateField(required=False, allow_null=True)
@@ -1245,6 +1247,7 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             "purchase_price",
             "markup_percent",
             "price",
+            "recalc_price",
             "wholesale_price",
             "discount_percent",
             "plu",
@@ -1652,6 +1655,9 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             data = super().to_representation(instance)
         if "stock" in data:
             data["is_promo"] = data["stock"]
+        # Б-06: в ответе PATCH/PUT — менялась ли цена продажи этим запросом.
+        if hasattr(self, "_price_changed"):
+            data["price_changed"] = bool(self._price_changed)
         try:
             data["alternate_barcodes"] = [
                 {"barcode": item.barcode, "name": item.name, "quantity": item.quantity}
@@ -1689,6 +1695,7 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
         description = (validated_data.pop("description", "") or "").strip()
 
         # ===== цены: двусторонняя логика =====
+        validated_data.pop("recalc_price", None)  # при создании смысла не имеет
         purchase_price = self._to_dec(validated_data.pop("purchase_price", Decimal("0")))
         markup_percent = self._to_dec(validated_data.pop("markup_percent", Decimal("0")))
         price_in = validated_data.pop("price", None)
@@ -1858,6 +1865,7 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
         # склад и падал с IntegrityError (uq_company_main_barcode_not_empty).
 
         # ===== цены: двусторонняя логика =====
+        recalc_price = bool(validated_data.pop("recalc_price", False))
         has_purchase = "purchase_price" in validated_data
         has_markup = "markup_percent" in validated_data
         has_price = "price" in validated_data
@@ -1876,16 +1884,29 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             markup_percent = self._to_dec(validated_data["markup_percent"])
             price = self._calc_price(purchase_price, markup_percent)
 
-        # 3) иначе пришёл только purchase_price -> пересчитываем разумно
+        # 3) иначе пришёл только purchase_price (Б-06, 27.10.2026): цена продажи НЕ меняется,
+        #    пересчитывается только наценка. Раньше при markup_percent > 0 цена пересчитывалась
+        #    по старой наценке (закупка 150→160 при 30 % давала 195→205) и касса продавала дороже.
+        #    Пересчёт цены из наценки — только по явному флагу {"recalc_price": true}.
         elif has_purchase:
-            if Decimal(instance.markup_percent or 0) != Decimal("0"):
+            if recalc_price and Decimal(instance.markup_percent or 0) != Decimal("0"):
                 price = self._calc_price(purchase_price, markup_percent)
             else:
                 markup_percent = self._calc_markup(purchase_price, price)
 
+        # recalc_price без purchase_price: пересчитать цену от текущей закупки и наценки.
+        elif recalc_price and not has_price and not has_markup:
+            price = self._calc_price(purchase_price, markup_percent)
+
+        old_price = self._to_dec(instance.price)
         instance.purchase_price = purchase_price
         instance.markup_percent = markup_percent
         instance.price = price
+        # Ответ PATCH: price_changed — поменялась ли цена продажи этим запросом.
+        self._price_changed = (
+            self._to_dec(price).quantize(self._Q2, rounding=ROUND_HALF_UP)
+            != old_price.quantize(self._Q2, rounding=ROUND_HALF_UP)
+        )
 
         # ===== PATCH-friendly обновление остальных полей =====
         updatable_fields = (
@@ -3390,6 +3411,8 @@ class SupplierReceiptItemSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
+    # Б-06: пересчитать цену продажи по новой закупке и текущей наценке (по умолчанию цена не меняется).
+    recalc_price = serializers.BooleanField(required=False, default=False)
 
 
 class SupplierReceiptCreateSerializer(serializers.Serializer):

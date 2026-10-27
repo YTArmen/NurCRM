@@ -2498,10 +2498,11 @@ class ProductRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestri
             )
             .get()
         )
-        return Response(
-            self.get_serializer(instance).data,
-            status=status.HTTP_200_OK,
-        )
+        data = self.get_serializer(instance).data
+        # Б-06: price_changed считает сериализатор, который делал update, — переносим в ответ.
+        if hasattr(serializer, "_price_changed"):
+            data["price_changed"] = bool(serializer._price_changed)
+        return Response(data, status=status.HTTP_200_OK)
 
 
 
@@ -5475,13 +5476,32 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
                 # закупочной и товар уходил с кассы по себестоимости.
                 # Наценку пересчитываем от новой закупочной к текущей цене продажи,
                 # чтобы тройка purchase_price / markup_percent / price осталась согласованной.
+                # Б-06 (27.10.2026): пересчёт цены из наценки — только по флагу строки
+                # {"recalc_price": true}; наценка при этом остаётся прежней.
                 current_price = Decimal(str(getattr(prod, "price", None) or 0))
-                if new_purchase_price > Decimal("0") and current_price > Decimal("0"):
+                current_markup = Decimal(str(getattr(prod, "markup_percent", None) or 0))
+                if it.get("recalc_price") and current_markup != Decimal("0"):
+                    upd["price"] = (
+                        new_purchase_price * (Decimal("1") + current_markup / Decimal("100"))
+                    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                elif new_purchase_price > Decimal("0") and current_price > Decimal("0"):
                     upd["markup_percent"] = (
                         (current_price - new_purchase_price) / new_purchase_price * Decimal("100")
                     ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
             type(prod).objects.filter(id=pid).update(**upd)
+            # Журнал товара (ТЗ п.8): смена цены продажи приходом — было → стало.
+            if "price" in upd:
+                try:
+                    _old_price = Decimal(str(getattr(prod, "price", None) or 0))
+                    if _old_price.quantize(Decimal("0.01")) != Decimal(upd["price"]).quantize(Decimal("0.01")):
+                        admin_audit.log_request(
+                            request, "price_change", "product", pid, prod.name,
+                            before={"price": str(_old_price)}, after={"price": str(upd["price"])},
+                            company=company,
+                        )
+                except Exception:
+                    pass
             # The batch retains the shelf-life configuration at the receipt moment.
             from apps.main.services.product_expiry_batches import receive_stock
             receive_stock(prod, qty, source_kind="purchase", source_id=receipt.id, user=request.user)

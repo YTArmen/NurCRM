@@ -1100,22 +1100,46 @@ class Product(models.Model):
         self.seq = max_seq + 1
 
     def _recalc_price(self):
+        """
+        Б-06 (27.10.2026): цена продажи (price) — источник истины. Сервер никогда не
+        пересчитывает её сам при сохранении существующего товара: раньше любой save()
+        с markup_percent > 0 перезаписывал price = purchase_price × (1 + наценка), и после
+        смены закупки (PATCH purchase_price, приход) касса продавала по «новой» цене
+        (150→160 при наценке 30 % давало 195→205). Теперь:
+          - существующий товар: price только квантуется; пересчёт из наценки — только
+            если код-путь явно выставил `_recalc_price_from_markup = True`
+            (PATCH {"recalc_price": true}, строка прихода с recalc_price);
+          - новый товар: как раньше — если задана наценка, а цена нет, цена считается
+            из закупки и наценки (так создают карточки импорт и create-by-barcode).
+        """
         base = self.purchase_price or Decimal("0")
         percent = self.markup_percent or Decimal("0")
+
+        def _q(v):
+            return Decimal(v).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        if getattr(self, "_recalc_price_from_markup", False):
+            self.price = _q(base * (Decimal("1") + percent / Decimal("100")))
+            return
 
         # Если цена задана вручную в конкретном код-пути (например create-manual),
         # не пересчитываем её из наценки, чтобы не появлялись «копейки» из-за округлений.
         if getattr(self, "_manual_price", False) and self.price is not None:
-            self.price = Decimal(self.price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            self.price = _q(self.price)
             return
 
         # ✅ уважай ручную цену даже если price=0
         if self.price is not None and percent == Decimal("0"):
-            self.price = Decimal(self.price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            self.price = _q(self.price)
             return
 
-        result = base * (Decimal("1") + percent / Decimal("100"))
-        self.price = result.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if not self._state.adding:
+            # Существующий товар: цену не трогаем.
+            if self.price is not None:
+                self.price = _q(self.price)
+            return
+
+        self.price = _q(base * (Decimal("1") + percent / Decimal("100")))
 
     def clean(self):
         if self.kind != self.Kind.PRODUCT:
@@ -1170,6 +1194,10 @@ class Product(models.Model):
                     update_fields.add("code")
                 if self.plu is not None:
                     update_fields.add("plu")
+                # Б-46 (27.10.2026): auto_now не пишется в БД, если поля нет в update_fields.
+                # Любое частичное сохранение товара двигает updated_at — иначе кассы,
+                # следящие за каталогом по updated_at, не узнают об изменении.
+                update_fields.add("updated_at")
                 kwargs["update_fields"] = list(update_fields)
             super().save(*args, **kwargs)
             

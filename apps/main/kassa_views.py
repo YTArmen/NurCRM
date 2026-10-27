@@ -19,7 +19,7 @@ from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import permissions, serializers, status
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -44,6 +44,36 @@ from apps.main.views import CompanyBranchRestrictedMixin, _filter_clients_visibl
 
 Q2 = Decimal("0.01")
 ZERO = Decimal("0.00")
+
+
+class PriceChangedError(APIException):
+    """
+    Б-03 (27.10.2026): цена строки чека не совпадает с текущей ценой каталога, а клиент
+    прислал заголовок X-NurMarket-Strict-Price: 1. Чек не проводится, касса получает
+    актуальные цены и пересчитывает чек.
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    default_code = "price_changed"
+
+    def __init__(self, mismatch):
+        super().__init__({
+            "code": "price_changed",
+            "detail": "Цены изменились. Обновите каталог и пересчитайте чек.",
+            "price_mismatch": mismatch,
+        })
+
+
+def _strict_price(request) -> bool:
+    headers = getattr(request, "headers", None) or {}
+    raw = headers.get("X-NurMarket-Strict-Price")
+    if raw is None:
+        # pos/checkout/batch/ подставляет обычный dict: ключи там в том регистре, в каком пришли.
+        for k, v in dict(headers).items():
+            if str(k).lower() == "x-nurmarket-strict-price":
+                raw = v
+                break
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _idempotency_key(request, required=True):
@@ -79,6 +109,8 @@ class QuickCheckoutItemSerializer(serializers.Serializer):
     price = MoneyField(required=False, allow_null=True)
     discount = MoneyField(required=False, allow_null=True, default=ZERO)
     is_wholesale = serializers.BooleanField(required=False, default=False)
+    # Б-03 (27.10.2026): кассир сознательно продал не по цене каталога — не считать расхождением.
+    price_override = serializers.BooleanField(required=False, default=False)
 
     # ТЗ 11.5: принимается псевдоним quantity.
     def to_internal_value(self, data):
@@ -145,6 +177,8 @@ class QuickCheckoutSerializer(serializers.Serializer):
     print_receipt = serializers.BooleanField(required=False, default=False)
     allow_minus = serializers.BooleanField(required=False, default=False)
     is_wholesale = serializers.BooleanField(required=False, default=False)
+    # Б-03: все цены чека заданы сознательно (не сверять с каталогом).
+    price_override = serializers.BooleanField(required=False, default=False)
     # BE2-10: продажа, сделанная без связи и досланная позже.
     offline = serializers.BooleanField(required=False, default=False)
     offline_created_at = serializers.DateTimeField(required=False, allow_null=True)
@@ -428,7 +462,12 @@ class PosQuickCheckoutAPIView(APIView):
                 )
                 max_dp = getattr(company, "max_discount_percent", None)
                 limit_discounts = max_dp is not None and not _is_admin_for_discounts(user)
+                self._price_mismatch = []
+                self._price_override_all = bool(data.get("price_override"))
                 self._add_items(cart, data["items"], limit_discounts, max_dp)
+                if self._price_mismatch and _strict_price(request):
+                    # Строгий режим (новая касса, онлайн): чек не проводим, отдаём актуальные цены.
+                    raise PriceChangedError(self._price_mismatch)
 
                 bonus = money(data.get("bonus_redeemed") or ZERO)
                 self._apply_order_discount(cart, data, bonus, limit_discounts, max_dp)
@@ -484,6 +523,19 @@ class PosQuickCheckoutAPIView(APIView):
         for k in ("cashflows", "receipt_print_path", "ekassa", "payments"):
             if k in resp.data:
                 body[k] = resp.data[k]
+        # Б-03: расхождения цен строк с каталогом — в ответ и в журнал продажи.
+        mismatch = list(getattr(self, "_price_mismatch", None) or [])
+        body["price_mismatch"] = mismatch
+        if mismatch:
+            try:
+                from apps.construction import audit as admin_audit
+
+                admin_audit.log_request(
+                    request, "price_mismatch", "sale", sale.pk, str(sale.doc_number or ""),
+                    after={"items": mismatch}, company=company,
+                )
+            except Exception:
+                pass
         return Response(body, status=status.HTTP_201_CREATED)
 
     # --- helpers ---
@@ -497,6 +549,8 @@ class PosQuickCheckoutAPIView(APIView):
         product_ids = [it["product"] for it in items if not it.get("custom")]
         products = {p.id: p for p in Product.objects.filter(company_id=cart.company_id, id__in=product_ids)}
         performers = resolve_performers(cart.company_id, [it.get("performer") for it in items])
+        if not hasattr(self, "_price_mismatch"):
+            self._price_mismatch = []
         for idx, it in enumerate(items):
             qty = qty3(it["qty"])
             performer = performers.get(it.get("performer"))
@@ -561,6 +615,25 @@ class PosQuickCheckoutAPIView(APIView):
                     raise ValidationError(
                         {"items": {idx: f"Цена продажи не может быть ниже закупочной ({min_price})."}}
                     )
+            # Б-03 (27.10.2026): цена строки не совпадает с текущей ценой каталога и клиент не
+            # сказал, что это сознательно (price_override / скидка / оптовая цена) — запоминаем
+            # расхождение. Продажа проходит (оффлайн-досылка со старым каталогом), в ответе
+            # будет price_mismatch; со строгим заголовком X-NurMarket-Strict-Price — 409.
+            if (
+                it.get("price") is not None
+                and price != default_price
+                and discount <= 0
+                and not it.get("price_override")
+                and not getattr(self, "_price_override_all", False)
+                and not (is_wholesale and wholesale_price > 0 and price == wholesale_price)
+            ):
+                self._price_mismatch.append({
+                    "index": idx,
+                    "product_id": str(product.id),
+                    "name": product.name,
+                    "sent": str(price),
+                    "current": str(default_price),
+                })
             CartItem(
                 company=cart.company,
                 branch=cart.branch,
