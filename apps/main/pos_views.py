@@ -81,6 +81,10 @@ from apps.main.models import ProductVariant
 from apps.main.cache_utils import invalidate_cache_pattern
 from apps.main.services import checkout_cart, NotEnoughStock
 from apps.main.cart_service import abandon_cart
+from apps.main.tz26.hw_prices.services import (
+    after_checkout as hw_after_checkout,
+    reprice_for_request as hw_reprice_for_request,
+)
 from apps.ekassa.runtime import schedule_after_commit
 from apps.ekassa.shift_bridge import sync_ekassa_after_local_shift_open_by_id
 
@@ -2971,6 +2975,7 @@ class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
                 else:
                     cart.save(update_fields=["shift"])
 
+            hw_reprice_for_request(request, cart, client_id)  # ТЗ 26.10 Б-55: цена по уровню клиента (под флагом)
             cart.recalc()
             if not payments and payment_method == Sale.PaymentMethod.CASH and cash_received < cart.total:
                 # ТЗ Н-15: код и суммы; старый ключ detail сохранён
@@ -3038,6 +3043,7 @@ class SaleCheckoutAPIView(MarketCashierOnlyMixin, APIView):
                 return Response(_checkout_value_error_body(e, cart, cash_received), status=status.HTTP_400_BAD_REQUEST)
 
             commit_checkout(batches_plan, sale, request.user)  # ТЗ 26.10 Б-61
+            hw_after_checkout(request, cart, sale, client_obj)  # ТЗ 26.10 Б-55, Б-56: цены строк, объект, лимит долга
 
             cons_name = None
             if sale.consultant:

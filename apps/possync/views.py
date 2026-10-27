@@ -679,6 +679,9 @@ class PosQuickCheckoutGuardedAPIView(PosQuickCheckoutAPIView):
                         {"variant_id": str(vid), "quantity": _d3(q)}
                         for vid, q in ProductVariant.objects.filter(id__in=variant_ids).values_list("id", "quantity")
                     ]
+            from apps.main.tz26.hw_prices.services import enrich_sale_response
+
+            enrich_sale_response(sale, data)  # ТЗ 26.10 Б-55, Б-56: object, price_source/base_price строк
             if sale.debt_initial and sale.debt_initial > 0:
                 data.update(schedule_payload(sale))
             company = _company(request)
