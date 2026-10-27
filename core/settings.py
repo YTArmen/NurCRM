@@ -357,6 +357,7 @@ CELERY_IMPORTS = (
     'apps.main.rentals_tasks',
     'apps.main.tz26.ai_stock.tasks',  # ТЗ 26.10 Б-65
     'apps.main.tz26.pos_print.tasks',  # ТЗ 26.10 Б-69
+    'apps.inbox.tasks',  # ТЗ 26.10 Б-73…Б-87
     'apps.consalting.tasks',
     'apps.construction.tasks',
     'apps.integrations.tasks',
@@ -375,6 +376,12 @@ CONSALTING_FUNNEL_STRICT = False
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
+    # ТЗ 26.10 Б-75…Б-77: ящик «Чаты»
+    'inbox-sweep-webhooks': {'task': 'apps.inbox.tasks.sweep_webhook_events', 'schedule': crontab(minute='*/2')},
+    'inbox-sweep-outbound': {'task': 'apps.inbox.tasks.sweep_outbound', 'schedule': crontab(minute='*/2')},
+    'inbox-wake-snoozed': {'task': 'apps.inbox.tasks.wake_snoozed', 'schedule': crontab(minute='*/5')},
+    'inbox-alert-unanswered': {'task': 'apps.inbox.tasks.alert_unanswered', 'schedule': crontab(minute='*/15')},
+    'inbox-cleanup': {'task': 'apps.inbox.tasks.cleanup_old_data', 'schedule': crontab(hour=4, minute=10)},
     'tz26-print-jobs-purge': {  # ТЗ 26.10 Б-69: задания печати хранятся 7 дней
         'task': 'apps.main.tz26.pos_print.tasks.purge_print_jobs',
         'schedule': crontab(hour=3, minute=40),
