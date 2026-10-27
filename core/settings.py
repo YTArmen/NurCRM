@@ -358,6 +358,7 @@ CELERY_IMPORTS = (
     'apps.main.tz26.ai_stock.tasks',  # ТЗ 26.10 Б-65
     'apps.main.tz26.pos_print.tasks',  # ТЗ 26.10 Б-69
     'apps.inbox.tasks',  # ТЗ 26.10 Б-73…Б-87
+    'apps.main.tz26.staff.tasks',  # ТЗ 26.10 Б-62
     'apps.consalting.tasks',
     'apps.construction.tasks',
     'apps.integrations.tasks',
@@ -376,6 +377,7 @@ CONSALTING_FUNNEL_STRICT = False
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
+    'staff-task-reminders': {'task': 'apps.main.tz26.staff.tasks.send_due_task_reminders', 'schedule': crontab()},  # ТЗ 26.10 Б-62: напоминания по задачам
     # ТЗ 26.10 Б-75…Б-77: ящик «Чаты»
     'inbox-sweep-webhooks': {'task': 'apps.inbox.tasks.sweep_webhook_events', 'schedule': crontab(minute='*/2')},
     'inbox-sweep-outbound': {'task': 'apps.inbox.tasks.sweep_outbound', 'schedule': crontab(minute='*/2')},

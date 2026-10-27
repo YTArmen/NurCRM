@@ -38,6 +38,12 @@ EVENTS = (
     "supplier_debt_changed",
     "features_changed",
     "pos_request_changed",
+    # ТЗ 26.10 (Б-62, Б-69, Б-72, Б-60)
+    "task.assigned",
+    "task.reminder",
+    "print_job_created",
+    "scanner_scan",
+    "customer_order_ready",
 )
 
 
