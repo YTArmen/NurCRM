@@ -212,6 +212,12 @@ def process_telegram_update(settings_id: str, update_data: dict, enqueued_at: fl
             text=text if not is_voice else "[Голосовое сообщение]",
         )
 
+        # Ящик «Чаты» (ТЗ 26.10 Б-76): входящее покупателя пишем в диалог; в паузе после ответа человека бот молчит
+        if not is_owner:
+            from apps.inbox import bot_hooks
+            if bot_hooks.on_customer_message(settings, message):
+                return
+
         # ТЗ ч.15, п. 5: фото накладной от владельца (photo или document-картинка)
         image_part, image_mime = None, "image/jpeg"
         if message.get("photo"):
