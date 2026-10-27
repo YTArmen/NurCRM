@@ -41,6 +41,7 @@ from apps.main.models import (
 )
 from apps.main.pos_serializers import MoneyField, QtyField, _is_owner_like
 from apps.main.pos_utils import money, qty3
+from apps.main.tz26.pos_sync.services import return_origin_fields  # Б-67
 from apps.main.views import CompanyBranchRestrictedMixin, _filter_clients_visible_for_user
 from core.exceptions import ApiError
 
@@ -234,6 +235,7 @@ def _quick_result(sale: Sale) -> dict:
         "debt_amount": str(money(getattr(sale, "debt_remaining", ZERO) or ZERO)),
         "shift": str(sale.shift_id) if sale.shift_id else None,
         "client": str(sale.client_id) if sale.client_id else None,
+        "source": sale.source, "device_key": sale.device_key, "device_name": sale.device_name,  # Б-67
         "items": [_quick_item(it) for it in sale.items.all().order_by("id")],
     }
 
@@ -418,6 +420,8 @@ class PosQuickCheckoutAPIView(APIView):
         if existing:
             return Response({**_quick_result(existing), "replayed": True}, status=status.HTTP_200_OK)
 
+        from apps.main.tz26.pos_sync.services import resolve_origin  # Б-67
+        self._origin = resolve_origin(request)
         self._precheck_items(request.data)
         ser = QuickCheckoutSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
@@ -516,6 +520,7 @@ class PosQuickCheckoutAPIView(APIView):
                     idempotency_key=key,
                     bonus_redeemed=sale.bonus_redeemed,
                     discount_total=sale.discount_total,
+                    **self._origin,  # Б-67: source, device_key, device_name
                 )
                 if request.data.get("print_on"):  # ТЗ 26.10 Б-69: задание печати в той же транзакции
                     from apps.main.tz26.pos_print.services import create_print_job_from_checkout
@@ -1383,7 +1388,7 @@ class SaleReturnListAPIView(CompanyBranchRestrictedMixin, APIView):
         company = _company(request)
         qs = (
             SaleReturn.objects.filter(company=company)
-            .select_related("sale", "user", "sale__client")
+            .select_related("sale", "user", "sale__client", "origin")
             .prefetch_related("sale__items__product")
         )
         branch = self._auto_branch()
@@ -1474,6 +1479,7 @@ class SaleReturnListAPIView(CompanyBranchRestrictedMixin, APIView):
                 "cashier": str(r.user_id) if r.user_id else None,
                 "shift": str(r.shift_id) if r.shift_id else None,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
+                **return_origin_fields(r),  # Б-67
             })
         if page_meta is not None:
             return Response({**page_meta, "results": out})

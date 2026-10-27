@@ -4422,6 +4422,8 @@ class SaleReturnAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, AP
         invalidate_cache_pattern(f"products:list:{sale.company_id}:")
 
         sale.refresh_from_db()
+        from apps.main.tz26.pos_sync.services import record_return_origin
+        record_return_origin(request, sale)  # Б-67: с какого устройства возврат
         data = SaleDetailSerializer(sale, context={"request": request}).data
         data["debt_adjustment"] = debt_adj
         data["refund"] = _refund_summary(sale, debt_adj)
@@ -4724,7 +4726,7 @@ class SaleListOrderingFilter(filters.OrderingFilter):
             return terms
         mapped = [("-" if t.startswith("-") else "") + "sold_at" if t.lstrip("-") == "paid_at" else t for t in terms]
         if not any(t.lstrip("-") == "id" for t in mapped):
-            mapped.append("-id")
+            mapped.append("-id" if mapped[-1].startswith("-") else "id")  # Б-68: id в ту же сторону
         return mapped
 
 
@@ -4768,6 +4770,9 @@ class SaleListAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, gene
                 if timezone.is_naive(dt):
                     dt = timezone.make_aware(dt)
                 qs = qs.filter(**{lookup: dt})
+
+        from apps.main.tz26.pos_sync.sales_api import apply_sync_filters
+        qs = apply_sync_filters(qs, self.request)  # Б-67/Б-68: source, device_key, created_by, updated_after
 
         number = (self.request.query_params.get("number") or "").strip()
         if number:
@@ -4857,12 +4862,19 @@ class SaleListAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, gene
 
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
+        from apps.main.tz26.pos_sync.sales_api import etag_matches, sales_etag
+        etag = sales_etag(request, queryset)  # Б-68: ETag + If-None-Match -> 304
+        if etag_matches(request, etag):
+            return Response(status=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
         status_param = (request.query_params.get("status") or "").strip()
         total_amount = _aggregate_pos_sales_total_amount(queryset, status_filter=status_param)
 
         page = self.paginate_queryset(queryset)
         serializer = self.get_serializer(page, many=True)
-        return self.paginator.get_paginated_response(serializer.data, total_amount=total_amount)
+        response = self.paginator.get_paginated_response(serializer.data, total_amount=total_amount)
+        if etag:
+            response["ETag"] = etag
+        return response
 
 
 def _audit_sale_deleted(request, infos):

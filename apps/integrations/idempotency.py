@@ -27,7 +27,10 @@ IN_PROGRESS_TIMEOUT = timedelta(minutes=5)
 def _body_hash(request) -> str:
     data = getattr(request, "data", None)
     if isinstance(data, dict):
-        data = {k: v for k, v in data.items() if k != "idempotency_key"}
+        ignored = {"idempotency_key"}
+        if "/pos/checkout" in (getattr(request, "path", "") or ""):
+            ignored |= {"source", "device_key", "device_name"}  # Б-67: в сравнение тела не входят
+        data = {k: v for k, v in data.items() if k not in ignored}
     try:
         raw = json.dumps(data, sort_keys=True, default=str, ensure_ascii=False)
     except Exception:

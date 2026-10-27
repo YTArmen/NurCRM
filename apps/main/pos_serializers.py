@@ -895,10 +895,13 @@ class SaleListSerializer(serializers.ModelSerializer):
     debt_paid = serializers.SerializerMethodField(read_only=True)  # ТЗ Н-14
     prepayment = serializers.SerializerMethodField(read_only=True)  # ТЗ Н-14
     due_date = serializers.SerializerMethodField(read_only=True)  # ТЗ Н-14
+    created_by = serializers.SerializerMethodField(read_only=True)  # Б-67
+    sold_at = serializers.SerializerMethodField(read_only=True)  # Б-68
 
     class Meta:
         model = Sale
         fields = (
+            "source", "device_key", "device_name", "created_by", "sold_at",  # Б-67, Б-68
             "id",
             "number",
             "branch",
@@ -940,6 +943,15 @@ class SaleListSerializer(serializers.ModelSerializer):
             "prepayment",
             "due_date",
         )
+
+    def get_created_by(self, obj):
+        from apps.main.tz26.pos_sync.services import user_brief
+        return user_brief(obj.user)
+
+    def get_sold_at(self, obj):
+        # Время продажи: у досланной офлайн-продажи created_at = paid_at = время на кассе (received_at - приём сервером)
+        val = obj.paid_at or obj.created_at
+        return serializers.DateTimeField().to_representation(val) if val else None
 
     def get_debt_paid(self, obj):
         """ТЗ Н-14: сколько долга уже погашено = debt_initial − debt_remaining."""
@@ -1172,10 +1184,12 @@ class SaleDetailSerializer(serializers.ModelSerializer):
     debt_amount = serializers.SerializerMethodField(read_only=True)
     refunded_total = serializers.SerializerMethodField(read_only=True)  # ТЗ Н-07
     refundable_total = serializers.SerializerMethodField(read_only=True)  # ТЗ Н-07
+    created_by = serializers.SerializerMethodField(read_only=True)  # Б-67
 
     class Meta:
         model = Sale
         fields = (
+            "source", "device_key", "device_name", "created_by",  # Б-67
             "id",
             "number",
             "branch",
@@ -1215,6 +1229,10 @@ class SaleDetailSerializer(serializers.ModelSerializer):
             "refundable_total",
         )
         read_only_fields = fields
+
+    def get_created_by(self, obj):
+        from apps.main.tz26.pos_sync.services import user_brief
+        return user_brief(obj.user)
 
     def get_refunded_total(self, obj):
         return _sale_refunded_total(obj)
