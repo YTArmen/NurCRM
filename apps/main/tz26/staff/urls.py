@@ -1,1 +1,11 @@
-urlpatterns = []
+from django.urls import path
+
+from . import tasks_api
+
+urlpatterns = [
+    path("tasks/", tasks_api.StaffTaskListCreateView.as_view(), name="staff-task-list-create"),
+    path("tasks/summary/", tasks_api.StaffTaskSummaryView.as_view(), name="staff-task-summary"),
+    path("tasks/<uuid:pk>/", tasks_api.StaffTaskDetailView.as_view(), name="staff-task-detail"),
+    path("tasks/<uuid:pk>/files/", tasks_api.StaffTaskFilesView.as_view(), name="staff-task-files"),
+    path("tasks/<uuid:pk>/files/<uuid:file_id>/", tasks_api.StaffTaskFilesView.as_view(), name="staff-task-file"),
+]
