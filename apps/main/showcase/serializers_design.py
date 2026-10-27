@@ -359,6 +359,8 @@ class ShowcaseOrderCreateItemSerializer(serializers.Serializer):
     qty = serializers.DecimalField(
         max_digits=12, decimal_places=3, min_value=Decimal("0.001"), max_value=Decimal("100000")
     )
+    # ТЗ 26.10 Б-53 п.8: единица продажи (id из sale_units); qty — в ней, резерв — в базовых
+    sale_unit = serializers.IntegerField(required=False, allow_null=True, default=None)
 
 
 class ShowcaseOrderCustomerSerializer(serializers.Serializer):

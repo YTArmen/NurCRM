@@ -445,3 +445,42 @@ def pick_line_unit(it, product, pkg, unit_map, seen, idx):
         raise _line_error("sale_unit_conflict", idx, "Товар уже есть в чеке в другой единице.", http=409)
     seen[product.id] = unit.id
     return unit
+
+
+# ---------------------------------------------------------------- Б-53 п.7, п.8: витрина
+
+def product_allows_fraction(product, unit=None) -> bool:
+    """Можно ли заказывать дробное количество штучного товара на витрине (Б-52): задан шаг/знаки или единица."""
+    if unit is not None:
+        return True
+    if getattr(product, "quantity_step", None) is not None:
+        return True
+    dec = getattr(product, "quantity_decimals", None)
+    return dec is not None and int(dec) > 0
+
+
+def order_line_unit(product, item, idx, variant_obj):
+    """Единица продажи строки заказа витрины (или None). ShowcaseFieldError — как у соседних проверок."""
+    from apps.main.showcase.design_schema import ShowcaseFieldError
+
+    uid = item.get("sale_unit")
+    if uid in (None, ""):
+        return None
+    from apps.main.models import ProductSaleUnit
+
+    unit = ProductSaleUnit.objects.filter(pk=uid, product_id=product.id, for_sale=True).first()
+    if unit is None:
+        raise ShowcaseFieldError(f"items[{idx}].sale_unit", f"Единица продажи {uid} не найдена для товара «{product.name}».",
+                                 "sale_unit_not_found", extra={"index": idx})
+    if variant_obj is not None:
+        raise ShowcaseFieldError(f"items[{idx}].sale_unit", "Единица продажи недоступна для товара с размерами/цветами.",
+                                 "sale_unit_not_allowed", extra={"index": idx})
+    return unit
+
+
+def to_base_line(unit, qty, unit_price):
+    """Строка заказа витрины хранится и резервируется в базовых единицах: (qty x factor, цена/factor, подпись)."""
+    factor = Decimal(str(unit.factor))
+    base_qty = q3(qty * factor)
+    base_price = (Decimal(str(unit_price)) / factor).quantize(Q2, rounding=ROUND_HALF_UP)
+    return base_qty, base_price, f" ({_fmt(qty, 3).rstrip('0').rstrip('.')} x {unit.name})"
