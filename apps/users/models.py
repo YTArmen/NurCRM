@@ -1220,3 +1220,26 @@ class EmployeeAccessCode(models.Model):
             models.UniqueConstraint(fields=["employee", "action"], name="uniq_employee_access_code_action"),
         ]
         indexes = [models.Index(fields=["company", "action"], name="ix_empcode_company_action")]
+
+
+class ClientVersionSeen(models.Model):
+    """
+    Какие версии касс и мобилок ходят в API компании (единое ТЗ 26.10.2026, Б-01).
+    Пишет core.middleware по заголовку X-NurMarket-Client не чаще раза в час на пару компания+клиент.
+    По журналу решают, когда снимать переходный режим (флаг api_strict_2026_10, Б-02).
+    """
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="client_versions")
+    client = models.CharField(max_length=40)  # «kassa/1.17.61», «mobile/1.18.5»; без заголовка — «none»
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField()
+    hits = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        verbose_name = "Версия клиента API"
+        verbose_name_plural = "Версии клиентов API"
+        constraints = [models.UniqueConstraint(fields=["company", "client"], name="uniq_company_client_version")]
+        indexes = [models.Index(fields=["last_seen_at"])]
+
+    def __str__(self):
+        return f"{self.company_id}: {self.client}"

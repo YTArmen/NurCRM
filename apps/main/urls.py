@@ -5,6 +5,7 @@ from .views import *
 from .purchase_orders import PurchaseOrderListCreateAPIView, PurchaseOrderDetailAPIView
 from .price_check import ProductCatalogVersionView, ProductPriceCheckView
 from .change_views import ChangesFeedView  # ТЗ Н-31
+from core.capabilities import CapabilitiesAPIView, ClientVersionsReportAPIView  # единое ТЗ Б-01
 from .pos_requests import (PosRequestAcceptView, PosRequestCancelView, PosRequestDeclineView,
                            PosRequestListCreateView)
 from .pos_views import *
@@ -184,6 +185,8 @@ urlpatterns = [
     path('pos/requests/<uuid:pk>/decline/', PosRequestDeclineView.as_view(), name='pos-request-decline'),
     path('pos/requests/<uuid:pk>/cancel/', PosRequestCancelView.as_view(), name='pos-request-cancel'),
     path('changes/', ChangesFeedView.as_view(), name='changes-feed'),  # ТЗ Н-31
+    path('capabilities/', CapabilitiesAPIView.as_view(), name='api-capabilities'),  # Б-01
+    path('client-versions/', ClientVersionsReportAPIView.as_view(), name='api-client-versions'),  # Б-01
     path('products/catalog-version/', ProductCatalogVersionView.as_view(), name='product-catalog-version'),
     path('products/scale-export/', WeightProductsScaleExportAPIView.as_view(), name='product-scale-export'),
     path('products/create-by-barcode/', ProductCreateByBarcodeAPIView.as_view(), name='product-create-by-barcode'),
