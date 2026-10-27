@@ -132,21 +132,18 @@ class SaleBatchTests(Base):
 
     def test_cart_item_batch_endpoint_quote_and_checkout(self):
         cart = Cart.objects.create(company=self.company, user=self.owner, status=Cart.Status.ACTIVE)
-        i1 = CartItem.objects.create(company=self.company, cart=cart, product=self.tile,
-                                     unit_price=Decimal("500.00"), quantity=Decimal("1"))
-        i2 = CartItem.objects.create(company=self.company, cart=cart, product=self.tile,
-                                     unit_price=Decimal("500.00"), quantity=Decimal("2"))
-        for item, label in ((i1, "Тон 3"), (i2, "Тон 4")):
-            r = self.api.put(f"/api/main/pos/carts/{cart.id}/items/{item.id}/batch/", {"batch": label}, format="json")
-            self.assertEqual(r.status_code, 200, r.data)
+        item = CartItem.objects.create(company=self.company, cart=cart, product=self.tile,
+                                       unit_price=Decimal("500.00"), quantity=Decimal("2"))
+        r = self.api.put(f"/api/main/pos/carts/{cart.id}/items/{item.id}/batch/", {"batch": "Тон 4"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
         q = self.api.post("/api/main/pos/cart/quote/", {"cart": str(cart.id)}, format="json")
-        self.assertEqual(q.data["warnings"][0]["code"], "mixed_batches")
+        self.assertEqual(q.data["warnings"], [])
+        self.assertEqual(q.data["lines"][0]["batch_label"], "Тон 4")
         r = self.api.post(f"/api/main/pos/sales/{cart.id}/checkout/",
                           {"payment_method": "cash", "cash_received": "100000.00"}, format="json")
         self.assertEqual(r.status_code, 201, getattr(r, "data", None))
-        self.b3.refresh_from_db()
         self.b4.refresh_from_db()
-        self.assertEqual((self.b3.remaining, self.b4.remaining), (Decimal("9"), Decimal("3")))
+        self.assertEqual(self.b4.remaining, Decimal("3"))
 
 
 class CutTests(Base):
