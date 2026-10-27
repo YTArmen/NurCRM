@@ -1355,24 +1355,44 @@ def build_shift_report(shift: CashShift) -> dict:
     withdrawals = drawer.get(CashFlow.SourceKind.SHIFT_DRAWER_OUTFLOW) or z
     collections = drawer.get(CashFlow.SourceKind.SHIFT_DRAWER_COLLECTION) or z  # ТЗ Н-19: инкассация
     cash_sales_gross = (totals.get("drawer_cash_sales_net") or z) + own_returns_cash
+    # ТЗ Б-07: платежи поставщикам и выплаты зарплаты наличными из ящика — отдельными строками.
+    _out = {
+        r["source_kind"]: r["v"] or z
+        for r in shift.shift_flows.filter(
+            status=CashFlow.Status.APPROVED, request_kind__isnull=True, type=CashFlow.Type.EXPENSE,
+            source_kind__in=[
+                CashFlow.SourceKind.SUPPLIER_DEBT_PAYMENT, CashFlow.SourceKind.WAREHOUSE_PURCHASE,
+                CashFlow.SourceKind.PROCUREMENT_RECEIPT, CashFlow.SourceKind.SUPPLIER_PAYMENT,
+                CashFlow.SourceKind.SALARY_PAYOUT,
+            ],
+        ).values("source_kind").annotate(v=Sum("amount"))
+    }
+    supplier_cash = sum(
+        (v for k, v in _out.items() if k != CashFlow.SourceKind.SALARY_PAYOUT), z
+    )
+    salary_cash = _out.get(CashFlow.SourceKind.SALARY_PAYOUT) or z
     rows = [
         ("opening", shift.opening_cash or z),
-        ("cash_sales", cash_sales_gross),
+        ("cash_sales_excl_prepayments", cash_sales_gross),
         ("prepayments_cash", debt_prepay_cash),
         ("debt_payments_cash", debt_paid_cash),
         ("returns_cash", -own_returns_cash),
         ("deposits", deposits),
         ("withdrawals", -withdrawals),
     ]
+    if supplier_cash != z:
+        rows.append(("supplier_payments_cash", -supplier_cash))
+    if salary_cash != z:
+        rows.append(("salary_payouts_cash", -salary_cash))
     if collections != z:
         rows.append(("collections", -collections))
     # Прочие приходы/расходы ящика (не внесение/изъятие/долг) — чтобы сумма сходилась с expected_cash.
     other = (
         (totals.get("non_sale_income") or z) - (totals.get("expense_total") or z)
-        - debt_paid_cash - deposits + withdrawals + collections
+        - debt_paid_cash - deposits + withdrawals + collections + supplier_cash + salary_cash
     )
     if other != z:
-        rows.append(("other", other))
+        rows.append(("other_cash", other))
     rows.append(("expected_cash", expected))
 
     return {
@@ -1418,6 +1438,9 @@ def build_shift_report(shift: CashShift) -> dict:
         "debt_repaid_noncash": q2(debt_paid_noncash),
         "prepayment_total": q2(debt_prepay_cash + debt_prepay_noncash),
         "closing_cash": q2(counted) if counted is not None else None,
+        # Правило Б-07: cash_sales = cash_sales_excl_prepayments + prepayments_cash (оба — после возвратов).
+        # Строка раскладки с тем же кодом — брутто (возврат отдельной строкой returns_cash).
+        "cash_sales_excl_prepayments": q2((totals.get("cash_sales_total") or z) - debt_prepay_cash),
         "cash_in_drawer_breakdown": [{"code": c, "amount": q2(a)} for c, a in rows],
     }
 

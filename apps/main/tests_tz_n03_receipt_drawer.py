@@ -74,3 +74,14 @@ class ReceiptFromShiftDrawerTests(TestCase):
         res = self.post({"shift": str(self.shift.id)})
         self.assertIn(res.status_code, (403, 400), res.data)
         self.assertFalse(CashFlow.objects.filter(source_kind=CashFlow.SourceKind.PROCUREMENT_RECEIPT).exists())
+
+    def test_codes_and_bad_cashbox(self):
+        # Б-05: коды shift_closed / cashbox_not_found, а не общий 400.
+        self.shift.status = CashShift.Status.CLOSED
+        self.shift.save(update_fields=["status"])
+        res = self.post({"shift": str(self.shift.id)})
+        self.assertEqual(res.data.get("code"), "shift_closed", res.data)
+        res = self.post({"cashbox": str(uuid.uuid4())})
+        self.assertEqual(res.status_code, 400, res.data)
+        self.assertEqual(res.data.get("code"), "cashbox_not_found", res.data)
+        self.assertFalse(CashFlow.objects.filter(source_kind=CashFlow.SourceKind.PROCUREMENT_RECEIPT).exists())

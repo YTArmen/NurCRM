@@ -43,5 +43,10 @@ class RevenuePrepaymentTests(TestCase):
         self.assertEqual(cards["credit_sales_total"], "3.00")
         methods = {m["method"]: m for m in r.data["charts"]["payment_methods"]}
         self.assertEqual(methods["cash"]["total"], "11.00")
-        self.assertNotIn("debt", methods)
-        self.assertEqual(sum(Decimal(m["total"]) for m in methods.values()), Decimal("11.00"))
+        # ТЗ Б-03: amount рядом с total; отдельный элемент debt, в сумму выручки не входит.
+        self.assertEqual(methods["cash"]["amount"], "11.00")
+        self.assertEqual(methods["cash"]["count"], 2)
+        self.assertEqual(methods["debt"]["amount"], "3.00")
+        self.assertEqual(methods["debt"]["count"], 1)
+        self.assertEqual(
+            sum(Decimal(m["amount"]) for k, m in methods.items() if k != "debt"), Decimal("11.00"))

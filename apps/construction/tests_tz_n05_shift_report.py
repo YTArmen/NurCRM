@@ -77,11 +77,29 @@ class ShiftReportN05Tests(TestCase):
         by = {r["code"]: D(r["amount"]) for r in rows}
         # Предоплата — ровно в одной строке раскладки
         self.assertEqual(by["prepayments_cash"], D("1.00"))
-        self.assertEqual(by["cash_sales"], D("5.00"))
+        self.assertEqual(by["cash_sales_excl_prepayments"], D("5.00"))
         self.assertEqual(by["returns_cash"], D("-1.00"))
         # Сумма строк (кроме последней) = expected_cash, который считает сама смена
         self.assertEqual(sum(D(r["amount"]) for r in rows[:-1]), self.shift.calc_live_totals(refresh=True)["expected_cash"])
         self.assertEqual(rows[-1]["amount"], rep["expected_cash"])
+        # Б-07: cash_sales (как был) = cash_sales_excl_prepayments + prepayments_cash
+        self.assertEqual(rep["cash_sales_excl_prepayments"], "4.00")  # 5 - возврат 1
+        self.assertEqual(D(rep["cash_sales"]), D(rep["cash_sales_excl_prepayments"]) + by["prepayments_cash"])
+        self.assertNotIn("cash_sales", by)
+
+    def test_supplier_and_salary_rows(self):
+        self._paid_cash_sale(10)
+        for kind, amt in ((CashFlow.SourceKind.PROCUREMENT_RECEIPT, "3.00"), (CashFlow.SourceKind.SALARY_PAYOUT, "2.00")):
+            create_auto_cashflow(company=self.company, branch=None, cashbox=self.cashbox, user=self.owner,
+                                 shift=self.shift, type=CashFlow.Type.EXPENSE, amount=D(amt), source_kind=kind,
+                                 source_id=str(uuid.uuid4()), affects_shift_drawer=True)
+        rep = build_shift_report(self.shift)
+        rows = rep["cash_in_drawer_breakdown"]
+        by = {r["code"]: D(r["amount"]) for r in rows}
+        self.assertEqual(by["supplier_payments_cash"], D("-3.00"))
+        self.assertEqual(by["salary_payouts_cash"], D("-2.00"))
+        self.assertNotIn("other_cash", by)
+        self.assertEqual(sum(D(r["amount"]) for r in rows[:-1]), D(rep["expected_cash"]))
 
     def test_closed_shift_closing_cash(self):
         self._paid_cash_sale(2)
