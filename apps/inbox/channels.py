@@ -60,6 +60,8 @@ def validate_settings(data, provider, current=None) -> dict:
             raise ValueError
     except (TypeError, ValueError):
         raise ApiError("invalid", "ai_pause_minutes: число 0…1440.", fields={"settings.ai_pause_minutes": ["Недопустимое значение"]})
+    from . import ai as ai_svc
+    ai_svc.validate_ai_settings(out)
     if provider == Channel.Provider.UNOFFICIAL and out["ai_mode"] == "auto":
         raise ApiError("channel_not_allowed",
                        "На неофициальном канале ИИ в режиме auto запрещён: аккаунт могут заблокировать.",
@@ -140,6 +142,9 @@ def serialize(channel) -> dict:
     health = {k: h.get(k) for k in ("last_inbound_at", "last_outbound_at", "last_error", "last_error_at")}
     health["quality_rating"] = h.get("quality_rating")
     health["messaging_tier"] = h.get("messaging_tier")
+    for k in ("display_name_status", "token_expires_at", "coexistence"):
+        if h.get(k) is not None:
+            health[k] = h[k]
     ext = channel.external or {}
     external = {k: ext[k] for k in EXTERNAL_KEYS if ext.get(k) is not None}
     return {
@@ -152,6 +157,7 @@ def serialize(channel) -> dict:
         "external": external,
         "health": health,
         "settings": {**DEFAULT_SETTINGS, **(channel.settings or {})},
+        "ai_warning": _ai_warning(channel),
         **sec.secret_flags(channel),
         "unofficial": is_unofficial(channel),
         "risk_accepted_at": channel.risk_accepted_at.isoformat() if channel.risk_accepted_at else None,
@@ -269,3 +275,8 @@ def install_webhook(channel) -> dict:
         return {"ok": True}
     except telegram.TelegramError as exc:
         return {"ok": False, "detail": str(exc)}
+
+
+def _ai_warning(channel):
+    from . import ai as ai_svc
+    return ai_svc.key_warning(channel)

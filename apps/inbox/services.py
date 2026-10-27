@@ -147,6 +147,12 @@ def ingest_inbound(channel, external_id, *, message_external_id="", text="", kin
         raise
     touch_health(channel.id, inbound=True)
     emit(conv, "inbox_message_created", message=msg.id, direction="in", new_conversation=conv_created)
+    if (channel.settings or {}).get("ai_mode") == "auto" and not channel.bot_settings_id and msg.text:
+        try:
+            from .tasks_ext import ai_auto_reply
+            ai_auto_reply.delay(conv.id, msg.id)
+        except Exception:
+            logger.exception("inbox: не удалось поставить автоответ ИИ в очередь")
     try:
         from . import push
         push.notify_new_inbound(conv, msg)
@@ -309,10 +315,17 @@ def create_outgoing(conv, user, data, idempotency_key=""):
             return prev, True
     text = str(data.get("text") or "").strip()
     channel, contact = conv.channel, conv.contact
-    if kind in ("file", "template"):
-        raise ApiError("kind_not_supported", "Этот тип сообщения для канала пока не поддержан.",
-                       data={"kind": kind, "channel_kind": channel.kind})
-    if not text:
+    if data.get("quick_reply_id") and kind == "text":
+        from . import quick as quick_svc
+        text = quick_svc.render_for_send(conv, data["quick_reply_id"], text).strip()
+    attachments, template = [], None
+    if kind == "file":
+        from . import actions
+        attachments = [actions.file_attachment(conv, data.get("media_id"))]
+    elif kind == "template":
+        from . import templates as tpl_svc
+        template, text = tpl_svc.prepare_template_message(conv, data.get("template"))
+    elif not text:
         raise ApiError("invalid", "Пустой текст.", fields={"text": ["Обязательное поле"]})
     now = timezone.now()
     human_agent = False
@@ -323,7 +336,7 @@ def create_outgoing(conv, user, data, idempotency_key=""):
             raise ApiError("contact_blocked", "Покупатель заблокировал бота или контакт заблокирован.")
         if not contact.consent_service:
             raise ApiError("consent_required", "Покупатель отказался от сообщений (СТОП). Пока он не напишет снова, отправка невозможна.")
-        if channel.kind in WINDOW_24H_KINDS:
+        if channel.kind in WINDOW_24H_KINDS and kind != "template":
             expires = conv.window_expires_at
             if not expires or expires <= now:
                 if channel.kind == "instagram" and conv.last_inbound_at and now - conv.last_inbound_at <= IG_HUMAN_AGENT_WINDOW:
@@ -341,6 +354,7 @@ def create_outgoing(conv, user, data, idempotency_key=""):
             msg = Message.objects.create(
                 conversation=conv, channel=channel, company_id=conv.company_id, direction="out", sender="user",
                 sender_user=user, kind=kind, text=text, reply_to=reply_to, human_agent=human_agent,
+                attachments=attachments, template=template,
                 status="sent" if kind == "note" else "queued", idempotency_key=idempotency_key,
                 idempotency_hash=body_hash if idempotency_key else "",
             )
@@ -365,6 +379,9 @@ def create_outgoing(conv, user, data, idempotency_key=""):
     emit(conv, "inbox_message_created", message=msg.id, direction="out", sender="user")
     if kind != "note":
         transaction.on_commit(lambda: enqueue_send(msg.id))
+    if data.get("ai_run_id"):
+        from . import ai as ai_svc
+        ai_svc.mark_sent(data["ai_run_id"], conv, msg, user)
     return msg, False
 
 

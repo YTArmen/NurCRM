@@ -71,4 +71,10 @@ def process_event(event) -> str:
     channel = event.channel
     if channel.kind.startswith("telegram"):
         return process_telegram(channel, event.payload or {})
+    if channel.kind in ("whatsapp_cloud", "whatsapp_bsp") and channel.provider == "meta":
+        from . import meta_channels
+        return meta_channels.process_whatsapp(channel, event.payload or {})
+    if channel.kind == "instagram":
+        from . import meta_channels
+        return meta_channels.process_instagram(channel, event.payload or {})
     return "provider_not_supported"

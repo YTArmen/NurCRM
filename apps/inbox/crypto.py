@@ -12,7 +12,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from django.conf import settings
 
-SECRET_FIELDS = ("token", "api_key", "access_token", "app_secret")
+SECRET_FIELDS = ("token", "api_key", "access_token", "app_secret", "pin")
 PREFIX = "v1:"
 
 

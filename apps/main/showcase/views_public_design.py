@@ -588,6 +588,11 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
         except Exception:
             pass
 
+        try:  # Б-80: заказ из чата (source=whatsapp|instagram|web_chat + conversation_id) — ссылка в диалоге
+            from apps.inbox.actions import link_public_order
+            link_public_order(order, request.data)
+        except Exception:
+            pass
         return Response(_order_response(order, whatsapp_url), status=status.HTTP_201_CREATED)
 
 

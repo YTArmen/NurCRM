@@ -313,3 +313,7 @@ class OwnerAlert(models.Model):
 
     class Meta:
         app_label = "inbox"
+
+
+# Модели этапа 2 (Б-78…Б-86) лежат в models_ext.py
+from .models_ext import *  # noqa: E402,F401,F403

@@ -36,6 +36,13 @@ def send_outbound(message_id):
     if msg is None or msg.status != "queued" or msg.direction != "out" or msg.kind == "note":
         return "skipped"
     channel, contact, conv = msg.channel, msg.conversation.contact, msg.conversation
+    if channel.kind == "web_widget":  # посетитель сам забирает сообщения (long-poll): отправлять некуда
+        msg.sent_at = timezone.now()
+        msg.save(update_fields=["sent_at"])
+        services._set_status(msg, "sent")
+        return "sent"
+    if channel.kind in ("whatsapp_cloud", "whatsapp_bsp", "instagram"):
+        return _send_meta(msg, channel, contact, conv)
     if not channel.kind.startswith("telegram"):
         return _fail(msg, "channel_error", "Отправка в этот вид канала пока не поддержана.")
     token = crypto.channel_token(channel)
@@ -52,7 +59,10 @@ def send_outbound(message_id):
         except ValueError:
             reply_id = None
     try:
-        res = telegram.send_message(token, contact.external_id, msg.text, reply_to_message_id=reply_id)
+        if msg.kind == "file":
+            res = _send_telegram_file(token, contact, msg)
+        else:
+            res = telegram.send_message(token, contact.external_id, msg.text, reply_to_message_id=reply_id)
     except telegram.TelegramError as exc:
         return _on_error(msg, contact, exc)
     now = timezone.now()
@@ -64,6 +74,52 @@ def send_outbound(message_id):
     touch_health(channel.id, outbound=True)
     services.emit(conv, "inbox_message_status", message=msg.id, message_status="sent")
     return "sent"
+
+
+def _send_meta(msg, channel, contact, conv):
+    """WhatsApp (Cloud API / 360dialog) и Instagram: повторы как у Telegram; отозванный токен → канал в error."""
+    from . import meta_api, senders
+    try:
+        if channel.kind == "instagram":
+            ext = senders.send_instagram(msg, contact)
+        else:
+            ext = senders.send_whatsapp(msg, contact)
+    except meta_api.MetaError as exc:
+        if exc.code == 190 or exc.status == 401:  # токен отозван/истёк
+            from .models import Channel as Ch
+            Ch.objects.filter(pk=channel.pk).update(status="error")
+            from . import ai
+            ai.notify_owner(channel.company_id, "⚠️ Доступ канала в «Чатах» отозван или истёк. Подключите канал заново.")
+            return _fail(msg, "channel_error", str(exc))
+        if exc.retry_after:
+            services.enqueue_send(msg.id, countdown=int(exc.retry_after))
+            return "retry_after"
+        if exc.permanent:
+            return _fail(msg, "channel_error", str(exc))
+        msg.attempts += 1
+        msg.save(update_fields=["attempts"])
+        if msg.attempts > len(services.RETRY_DELAYS):
+            return _fail(msg, "channel_error", str(exc))
+        services.enqueue_send(msg.id, countdown=services.RETRY_DELAYS[msg.attempts - 1])
+        return "retry"
+    msg.external_message_id, msg.sent_at = ext or "", timezone.now()
+    msg.save(update_fields=["external_message_id", "sent_at"])
+    services._set_status(msg, "sent")
+    services._apply_pending(channel, msg)
+    touch_health(channel.id, outbound=True)
+    services.emit(conv, "inbox_message_status", message=msg.id, message_status="sent")
+    return "sent"
+
+
+def _send_telegram_file(token, contact, msg):
+    from apps.main.models import MainMedia
+    att = (msg.attachments or [{}])[0]
+    media = MainMedia.objects.filter(pk=att.get("media_id"), company_id=msg.company_id).first()
+    if media is None:
+        raise telegram.TelegramError("Файл не найден", code=404, permanent=True)
+    with media.file.open("rb") as fh:
+        content = fh.read()
+    return telegram.send_document(token, contact.external_id, att.get("name") or "file", content, msg.text)
 
 
 def _on_error(msg, contact, exc):
@@ -207,3 +263,7 @@ def cleanup_old_data():
     att = Message.objects.filter(created_at__lt=now - timedelta(days=90)).exclude(attachments=[]).update(attachments=[])
     ev = WebhookEvent.objects.filter(received_at__lt=now - timedelta(days=30)).exclude(payload={}).update(payload={})
     return {"messages": deleted, "attachments": att, "webhook_payloads": ev}
+
+
+# задачи этапа 2 (Б-78…Б-86) — в tasks_ext.py; импорт нужен, чтобы воркер их зарегистрировал
+from . import tasks_ext  # noqa: E402,F401
