@@ -517,6 +517,9 @@ class PosQuickCheckoutAPIView(APIView):
                     bonus_redeemed=sale.bonus_redeemed,
                     discount_total=sale.discount_total,
                 )
+                if request.data.get("print_on"):  # ТЗ 26.10 Б-69: задание печати в той же транзакции
+                    from apps.main.tz26.pos_print.services import create_print_job_from_checkout
+                    create_print_job_from_checkout(sale, request.data.get("print_on"), request)
                 if offline_at:
                     _backdate_offline_sale(sale, offline_at)
         except IntegrityError:
