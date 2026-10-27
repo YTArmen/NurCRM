@@ -113,6 +113,32 @@ class ClientDebtLimit(models.Model):
         verbose_name_plural = "Лимиты долга клиентов"
 
 
+class CompanyDebtLimits(models.Model):
+    """
+    Общий лимит долга компании (ТЗ 26.10, Б-14 п. 3): один на все кассы магазина.
+    Пустое поле — без этого лимита. Дневные лимиты считаются по долговым чекам за сутки в часовом поясе филиала.
+    applies_to: all — всем; cashiers — только кассирам (владелец и администратор без лимитов).
+    """
+
+    class AppliesTo(models.TextChoices):
+        ALL = "all", "Всем"
+        CASHIERS = "cashiers", "Только кассирам"
+
+    company = models.OneToOneField(Company, on_delete=models.CASCADE, related_name="debt_limits_row")
+    max_sales_per_day = models.PositiveIntegerField(null=True, blank=True)
+    max_amount_per_day = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    max_debt_per_client = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    applies_to = models.CharField(max_length=16, choices=AppliesTo.choices, default=AppliesTo.ALL)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Общий лимит долга компании"
+        verbose_name_plural = "Общие лимиты долга компаний"
+
+
 class SalePackLine(models.Model):
     """
     Строка чека, проданная упаковкой (ТЗ веб-кассы, п. 3). Саму строку SaleItem в apps.main менять
