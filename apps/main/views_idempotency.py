@@ -41,7 +41,7 @@ class IdempotencyLookupAPIView(APIView):
         company_id = getattr(request.user, "company_id", None)
         key = (key or "").strip()
         if not company_id or not key:
-            return Response({"code": "not_found", "found": False}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"code": "idempotency_key_not_found", "found": False}, status=status.HTTP_404_NOT_FOUND)
 
         rec = IdempotencyRecord.objects.filter(company_id=company_id, key=key).first()
         if rec is not None:
@@ -89,6 +89,6 @@ class IdempotencyLookupAPIView(APIView):
             ))
 
         return Response(
-            {"code": "not_found", "found": False, "detail": f"Ключ не найден (журнал хранится {TTL.days} дней)."},
+            {"code": "idempotency_key_not_found", "found": False, "detail": f"Ключ не найден (журнал хранится {TTL.days} дней)."},
             status=status.HTTP_404_NOT_FOUND,
         )
