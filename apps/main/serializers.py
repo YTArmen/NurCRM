@@ -1685,7 +1685,8 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
                 sorted(instance.variants.all(), key=lambda v: (v.sort_order, v.size, v.color)), many=True,
                 context={"product": instance},
             ).data
-        return data
+        from apps.main.tz26.hw_catalog.services import extend_representation  # ТЗ 26.10 Б-57/58/59
+        return extend_representation(self, instance, data)
 
     # ==== CREATE / UPDATE ====
 
@@ -1825,6 +1826,8 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
                 alternate_raw if alternate_raw is not None else [],
             )
 
+        from apps.main.tz26.hw_catalog.services import apply_input  # ТЗ 26.10 Б-57/58/59
+        apply_input(self, product)
         return product
 
     @transaction.atomic
@@ -2040,6 +2043,8 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
                 alternate_raw if alternate_raw is not None else [],
             )
 
+        from apps.main.tz26.hw_catalog.services import apply_input  # ТЗ 26.10 Б-57/58/59
+        apply_input(self, instance)
         return instance
 # ===========================
 # Review / Notification

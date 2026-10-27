@@ -52,6 +52,8 @@ class ProductInventorySessionListCreateAPIView(CompanyBranchRestrictedMixin, gen
         branch = self._auto_branch()
         note = ser.validated_data.get("note") or ""
         rows = ser.validated_data["items"]
+        from apps.main.tz26.hw_catalog.services import check_location_prefix  # ТЗ 26.10 Б-58: ревизия ряда
+        location_info = check_location_prefix(self, request, rows)
 
         for row in rows:
             pid = row["product_id"]
@@ -78,7 +80,7 @@ class ProductInventorySessionListCreateAPIView(CompanyBranchRestrictedMixin, gen
 
         session.refresh_from_db()
         out = ProductInventorySessionReadSerializer(session, context=self.get_serializer_context())
-        return Response(out.data, status=status.HTTP_201_CREATED)
+        return Response({**out.data, **location_info}, status=status.HTTP_201_CREATED)
 
 
 class ProductInventorySessionRetrieveAPIView(CompanyBranchRestrictedMixin, generics.RetrieveAPIView):
