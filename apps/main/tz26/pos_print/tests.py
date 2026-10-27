@@ -160,3 +160,93 @@ class PrintJobTests(PrintBase):
             job = PrintJob.objects.create(company=self.company, sale=sale, target_device_key=DEV_A)
             services._emit_created(job, actor_id=self.owner.pk)
         self.assertEqual(rc.call_args[0][1], "print_job_created")
+
+
+class HeldCartTests(PrintBase):
+    def create(self, key=None, **extra):
+        body = {"cashbox": str(self.cashbox.id), "label": "Стол 3", "from_device_key": DEV_A,
+                "items": [{"product": str(self.product.id), "qty": "2", "price": "123.45"}]}
+        body.update(extra)
+        return self.api.post(API + "held-carts/", body, format="json", HTTP_IDEMPOTENCY_KEY=key or "h" * 20)
+
+    def test_create_replay_list_take_close(self):
+        r = self.create()
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["number"], 1)
+        hid = r.data["id"]
+        left = timezone.datetime.fromisoformat(r.data["expires_at"]) - timezone.now()
+        self.assertTrue(timedelta(hours=23, minutes=55) < left <= timedelta(hours=24))
+        self.create()  # повтор тем же ключом
+        self.assertEqual(HeldCart.objects.count(), 1)
+        self.assertEqual(self.create(key="no-key-different-1").data["number"], 2)
+        self.assertEqual(self.api.post(API + "held-carts/", {}, format="json").data["code"],
+                         "idempotency_key_required")
+        r = self.api.get(API + f"held-carts/?cashbox={self.cashbox.id}&status=open")
+        self.assertEqual(r.data["count"], 2)
+        self.assertEqual(r.data["results"][0]["items"][0]["price"], "123.45")  # цены не пересчитаны
+        # два take: один 200, второй 409
+        t1 = self.api.post(API + f"held-carts/{hid}/take/", {"device_key": DEV_A}, format="json")
+        t2 = self.api.post(API + f"held-carts/{hid}/take/", {"device_key": DEV_B}, format="json")
+        self.assertEqual((t1.status_code, t2.status_code), (200, 409))
+        self.assertEqual(t2.data["code"], "already_taken")
+        # close
+        sale = self.sale()
+        c = self.api.post(API + f"held-carts/{hid}/close/", {"sale": str(sale.id)}, format="json")
+        self.assertEqual((c.status_code, c.data["status"]), (200, "closed"))
+        self.assertEqual(self.api.post(API + f"held-carts/{hid}/close/", {"sale": str(sale.id)}, format="json").status_code, 200)
+        r = self.api.get(API + f"held-carts/?cashbox={self.cashbox.id}&status=open")
+        self.assertEqual([x["number"] for x in r.data["results"]], [2])
+
+    def test_expired_not_listed_and_not_takable(self):
+        hid = self.create().data["id"]
+        HeldCart.objects.filter(pk=hid).update(expires_at=timezone.now() - timedelta(minutes=1))
+        self.assertEqual(self.api.get(API + "held-carts/?status=open").data["count"], 0)
+        r = self.api.post(API + f"held-carts/{hid}/take/", {"device_key": DEV_A}, format="json")
+        self.assertEqual((r.status_code, r.data["code"]), (409, "expired"))
+
+    def test_validation_and_foreign_company(self):
+        self.assertEqual(self.create(key="v" * 20, items=[]).status_code, 400)
+        self.assertEqual(self.create(key="w" * 20, cashbox=str(uuid.uuid4())).status_code, 400)
+        hid = self.create().data["id"]
+        api = self.other_api()
+        self.assertEqual(api.post(API + f"held-carts/{hid}/take/", {"device_key": DEV_A}, format="json").status_code, 404)
+        self.assertEqual(api.get(API + "held-carts/").data["count"], 0)
+
+
+class ScannerSessionTests(PrintBase):
+    def open(self):
+        r = self.api.post(API + "scanner-sessions/", {"cashbox": str(self.cashbox.id)}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        return r.data
+
+    def test_open_and_30_scans_without_duplicates(self):
+        s = self.open()
+        self.assertEqual(len(s["code"]), 6)
+        self.assertTrue(s["code"].isdigit())
+        left = timezone.datetime.fromisoformat(s["expires_at"]) - timezone.now()
+        self.assertTrue(timedelta(hours=7, minutes=55) < left <= timedelta(hours=8))
+        for i in range(1, 31):
+            r = self.api.post(API + f"scanner-sessions/{s['code']}/scan/",
+                              {"barcode": f"46000{i:03d}", "seq": i}, format="json")
+            self.assertEqual(r.status_code, 201, r.data)
+        dup = self.api.post(API + f"scanner-sessions/{s['code']}/scan/", {"barcode": "46000005", "seq": 5}, format="json")
+        self.assertEqual((dup.status_code, dup.data["duplicate"]), (200, True))
+        ev = self.api.get(API + f"scanner-sessions/{s['id']}/events/")
+        self.assertEqual([e["seq"] for e in ev.data["events"]], list(range(1, 31)))
+        ev = self.api.get(API + f"scanner-sessions/{s['id']}/events/?after_seq=25")
+        self.assertEqual([e["seq"] for e in ev.data["events"]], [26, 27, 28, 29, 30])
+        self.assertEqual(ScannerEvent.objects.count(), 30)
+
+    def test_foreign_company_403_and_expired_410(self):
+        s = self.open()
+        other = self.other_api()
+        r = other.post(API + f"scanner-sessions/{s['code']}/scan/", {"barcode": "1", "seq": 1}, format="json")
+        self.assertEqual(r.status_code, 403)
+        self.assertEqual(other.get(API + f"scanner-sessions/{s['id']}/events/").status_code, 403)
+        ScannerSession.objects.filter(pk=s["id"]).update(expires_at=timezone.now() - timedelta(seconds=1))
+        r = self.api.post(API + f"scanner-sessions/{s['code']}/scan/", {"barcode": "1", "seq": 1}, format="json")
+        self.assertEqual(r.status_code, 410)
+
+    def test_bad_cashbox(self):
+        r = self.api.post(API + "scanner-sessions/", {"cashbox": str(uuid.uuid4())}, format="json")
+        self.assertEqual(r.status_code, 400)
