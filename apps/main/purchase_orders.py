@@ -225,3 +225,6 @@ def apply_receipt_to_order(order, receipt_items):
     elif any(ln.received_qty > 0 for ln in lines):
         order.status = PurchaseOrder.Status.PARTIAL
     order.save(update_fields=["status", "updated_at"])
+    # ТЗ 26.10 Б-60: приход по заказу поставщику → строки заказов покупателей «готовы»
+    from apps.main.tz26.cust_orders.services import on_supplier_order_received
+    on_supplier_order_received(order)
