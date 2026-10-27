@@ -52,6 +52,9 @@ apps_includes = [
     path('main/', include('apps.possync.urls')),
     path('construction/', include('apps.possync.urls_construction')),
     path('main/', include('apps.main.urls')),
+    path('users/', include('apps.main.tz26.users_urls')),  # ТЗ 26.10 Б-70: устройства компании
+    path('main/inbox/', include('apps.inbox.urls')),  # ТЗ 26.10 Б-73…Б-87: ящик «Чаты»
+    path('inbox/', include('apps.inbox.public_urls')),  # вебхуки ящика (без входа)
     path('users/', include('apps.users.urls')),
     path('platform-admin/', include('apps.users.platform_admin_urls')),
     path('construction/', include('apps.construction.urls')),
@@ -75,6 +78,7 @@ apps_includes = [
 
 # API-роуты
 api_urlpatterns = [
+    path("api/public/", include("apps.main.tz26.public_urls")),  # ТЗ 26.10 Б-54 и др.: публичные адреса
     path("api/media-proxy/", media_proxy, name="media-proxy"),
     path("api/version/", ClientVersionView.as_view(), name="client-version"),
     path("api/public/receipts/<str:token>/", PublicReceiptAPIView.as_view(), name="public-receipt"),  # ТЗ Н-32

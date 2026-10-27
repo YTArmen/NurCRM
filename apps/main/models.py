@@ -227,6 +227,15 @@ class Task(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # --- ТЗ 26.10 Б-62 задача (каркас tz26; логика — в apps/main/tz26/) ---
+    priority = models.CharField(max_length=10, default="normal", db_default="normal")  # low|normal|high
+    remind_at = models.DateTimeField(null=True, blank=True)
+    reminded_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_tasks")
+    completed_at = models.DateTimeField(null=True, blank=True)
+    report = models.TextField(blank=True, default="", db_default="")
+    source = models.CharField(max_length=20, blank=True, default="", db_default="")  # web|pos|mobile|voice_ai|telegram
+
     class Meta:
         verbose_name = 'Задача'
         verbose_name_plural = 'Задачи'
@@ -930,6 +939,13 @@ class Product(models.Model):
 
     created_at = models.DateTimeField("Создан", auto_now_add=True)
     updated_at = models.DateTimeField("Обновлён", auto_now=True)
+
+    # --- ТЗ 26.10 Б-52, Б-57 товар (каркас tz26; логика — в apps/main/tz26/) ---
+    unit_code = models.CharField("Единица (код)", max_length=8, blank=True, default="", db_default="")
+    quantity_step = models.DecimalField("Шаг количества", max_digits=12, decimal_places=3, null=True, blank=True)
+    min_sale_quantity = models.DecimalField("Минимум продажи", max_digits=12, decimal_places=3, null=True, blank=True)
+    quantity_decimals = models.PositiveSmallIntegerField("Знаков в количестве", null=True, blank=True)
+    attributes = models.JSONField("Атрибуты", default=list, blank=True)
 
     objects = ProductQuerySet.as_manager()
 
@@ -2156,6 +2172,12 @@ class CartItem(models.Model):
         verbose_name="Оптовая позиция",
     )
 
+    # --- ТЗ 26.10 Б-53, Б-55 строка корзины (каркас tz26; логика — в apps/main/tz26/) ---
+    sale_unit = models.ForeignKey("main.ProductSaleUnit", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    base_quantity = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
+    price_source = models.CharField(max_length=40, blank=True, default="", db_default="")
+    base_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+
     class Meta:
         constraints = [
             models.UniqueConstraint(
@@ -2372,6 +2394,13 @@ class Sale(models.Model):
     )
 
     client = models.ForeignKey("main.Client", on_delete=models.SET_NULL, null=True, blank=True, related_name="sale")
+    # --- ТЗ 26.10 Б-56, Б-67, Б-80 продажа (каркас tz26; логика — в apps/main/tz26/) ---
+    client_object = models.ForeignKey("main.ClientObject", on_delete=models.SET_NULL, null=True, blank=True, related_name="sales")
+    source = models.CharField("Источник", max_length=20, blank=True, default="", db_default="", db_index=True)
+    device_key = models.CharField("Устройство", max_length=64, blank=True, default="", db_default="", db_index=True)
+    device_name = models.CharField(max_length=64, blank=True, default="", db_default="")
+    conversation_id = models.UUIDField(null=True, blank=True)
+
 
     # Консультант и комиссия от выручки
     consultant = models.ForeignKey(
@@ -3035,6 +3064,12 @@ class SaleItem(models.Model):
     )
 
 
+    # --- ТЗ 26.10 Б-53, Б-55 строка продажи (каркас tz26; логика — в apps/main/tz26/) ---
+    sale_unit = models.ForeignKey("main.ProductSaleUnit", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    base_quantity = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
+    price_source = models.CharField(max_length=40, blank=True, default="", db_default="")
+    base_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+
     class Meta:
         indexes = [
             models.Index(fields=["company", "sale"]),
@@ -3653,6 +3688,14 @@ class Client(models.Model):
 
     created_at = models.DateTimeField("Создано", auto_now_add=True)
     updated_at = models.DateTimeField("Обновлено", auto_now=True)
+
+    # --- ТЗ 26.10 Б-55, Б-56, Б-74 клиент (каркас tz26; логика — в apps/main/tz26/) ---
+    price_level = models.ForeignKey("main.PriceLevel", on_delete=models.SET_NULL, null=True, blank=True, related_name="clients")
+    credit_limit = models.DecimalField("Лимит долга", max_digits=12, decimal_places=2, null=True, blank=True)
+    default_due_days = models.PositiveIntegerField("Срок долга по умолчанию, дней", null=True, blank=True)
+    client_kind = models.CharField(max_length=10, blank=True, default="", db_default="")  # person|foreman|team|company
+    instagram_username = models.CharField(max_length=64, blank=True, default="", db_default="")
+    whatsapp_phone = models.CharField(max_length=32, blank=True, default="", db_default="")
 
     class Meta:
         verbose_name = "Клиент"
@@ -8364,3 +8407,7 @@ from apps.main.telegram_bot.models import (
     TelegramMessageLog,
 )
 
+
+
+# ТЗ 26.10 (Б-52…Б-87): модели новых разделов лежат в apps/main/tz26/*/models.py
+from apps.main.tz26.models import *  # noqa: E402,F401,F403

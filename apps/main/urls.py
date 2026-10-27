@@ -140,6 +140,7 @@ from apps.main.client_documents import (
 from apps.main.pos_bulk import CartClearAPIView, SaleItemsBulkAPIView  # ТЗ Н-15
 
 urlpatterns = [
+    path("", include("apps.main.tz26.urls")),  # ТЗ 26.10 Б-52…Б-72: новые адреса (выше старых, чтобы tasks/summary/ и т.п. не съел старый маршрут)
     # ТЗ «Админка»: журнал действий (тот же, что construction/audit-log/) и корзина удалённого
     path("audit-log/", AuditLogView.as_view(), name="main-audit-log"),
     path("trash/", TrashListView.as_view(), name="main-trash"),

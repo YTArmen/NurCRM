@@ -134,6 +134,7 @@ INSTALLED_APPS = [
     'apps.integrations',
     'apps.support',
     'apps.clientapp',
+    'apps.inbox',  # ТЗ 26.10 Б-73…Б-87
     # 'apps.crm',
 ]
 
