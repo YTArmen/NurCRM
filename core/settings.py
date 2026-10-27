@@ -355,6 +355,7 @@ CELERY_IMPORTS = (
     'apps.main.telegram_bot.tasks',
     'apps.main.recommendations_tasks',
     'apps.main.rentals_tasks',
+    'apps.main.tz26.ai_stock.tasks',  # ТЗ 26.10 Б-65
     'apps.consalting.tasks',
     'apps.construction.tasks',
     'apps.integrations.tasks',
@@ -373,6 +374,10 @@ CONSALTING_FUNNEL_STRICT = False
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
+    'tz26-ai-actions-purge': {  # ТЗ 26.10 Б-65: журнал действий ИИ хранится 180 дней
+        'task': 'apps.main.tz26.ai_stock.tasks.purge_ai_actions',
+        'schedule': crontab(hour=3, minute=30),
+    },
     'support-daily-digest': {
         'task': 'apps.support.tasks.send_daily_support_digest',
         'schedule': crontab(hour=9, minute=0),
