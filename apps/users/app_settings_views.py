@@ -339,6 +339,8 @@ def _client_ip(request):
     return fwd or request.META.get("REMOTE_ADDR") or None
 
 
+from core.api_compat import is_strict  # noqa: E402
+
 KEY_ATTEMPTS_PER_HOUR = 10
 
 
@@ -375,7 +377,12 @@ class CompanyFeatureActivateAPIView(APIView):
         recent = FeatureKeyAttempt.objects.filter(created_at__gte=since)
         by_company = recent.filter(company=company).count()
         by_ip = recent.filter(ip=ip).count() if ip else 0
+        # Б-02/Б-36: старый клиент (без флага api_strict_2026_10) ждёт прежний 400 key_used, новый — 409/429
+        strict = is_strict(request, company)
         if max(by_company, by_ip) >= KEY_ATTEMPTS_PER_HOUR:
+            if not strict:
+                return Response({"detail": "Слишком много неверных ключей. Попробуйте через час.", "code": "key_used"},
+                                status=status.HTTP_400_BAD_REQUEST)
             resp = Response(
                 {"detail": "Слишком много неверных ключей. Попробуйте через час.", "code": "too_many_attempts"},
                 status=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -390,6 +397,9 @@ class CompanyFeatureActivateAPIView(APIView):
                 return Response({"detail": "Ключ не найден.", "code": "invalid_key"}, status=status.HTTP_400_BAD_REQUEST)
             if key.used_by_company_id and key.used_by_company_id != company.id:
                 FeatureKeyAttempt.objects.create(company=company, ip=ip)
+                if not strict:
+                    return Response({"detail": "Ключ уже использован другой компанией.", "code": "key_used"},
+                                    status=status.HTTP_400_BAD_REQUEST)
                 return Response({"detail": "Ключ уже использован другой компанией.", "code": "key_already_used"},
                                 status=status.HTTP_409_CONFLICT)
 

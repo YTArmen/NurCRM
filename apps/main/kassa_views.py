@@ -42,6 +42,7 @@ from apps.main.models import (
 from apps.main.pos_serializers import MoneyField, QtyField, _is_owner_like
 from apps.main.pos_utils import money, qty3
 from apps.main.views import CompanyBranchRestrictedMixin, _filter_clients_visible_for_user
+from core.api_compat import is_new_client, is_strict, parse_client
 from core.exceptions import ApiError
 
 Q2 = Decimal("0.01")
@@ -418,8 +419,9 @@ class PosQuickCheckoutAPIView(APIView):
         if existing:
             return Response({**_quick_result(existing), "replayed": True}, status=status.HTTP_200_OK)
 
-        self._precheck_items(request.data)
-        ser = QuickCheckoutSerializer(data=request.data)
+        self._neg_discount = ZERO
+        payload = self._precheck_items(request.data, strict=is_strict(request, company))
+        ser = QuickCheckoutSerializer(data=payload)
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
         user = request.user
@@ -560,28 +562,49 @@ class PosQuickCheckoutAPIView(APIView):
 
     # --- ТЗ Н-15 ---
 
-    def _precheck_items(self, raw):
-        """Ограничение на число позиций и общее правило для custom-строк с отрицательной ценой."""
+    def _precheck_items(self, raw, strict=True):
+        """
+        Ограничение на число позиций и общее правило для custom-строк с отрицательной ценой.
+        Б-02: старый клиент (флаг api_strict_2026_10 выключен) — «Расход» с минусом проводим
+        как скидку на чек на эту сумму; строка в чек не попадает. Возвращает данные для сериализатора.
+        """
         items = raw.get("items") if hasattr(raw, "get") else None
         if not isinstance(items, list):
-            return
+            return raw
         if len(items) > MAX_CHECKOUT_ITEMS:
             raise ApiError(
                 "too_many_items", f"В чеке не больше {MAX_CHECKOUT_ITEMS} позиций.",
                 top={"limit": MAX_CHECKOUT_ITEMS, "count": len(items),
                      "errors": [{"index": None, "code": "too_many_items", "detail": f"Не больше {MAX_CHECKOUT_ITEMS} позиций."}]},
             )
+        kept, neg_sum, had_neg = [], ZERO, False
         for idx, it in enumerate(items):
             if isinstance(it, dict) and it.get("custom"):
                 try:
-                    neg = Decimal(str(it.get("price"))) < 0
+                    price = Decimal(str(it.get("price")))
+                    neg = price < 0
                 except Exception:  # noqa: BLE001 — остальное проверит сериализатор
                     neg = False
                 if neg:
-                    raise _line_error(
-                        "negative_price", idx,
-                        "Цена своей позиции не может быть отрицательной. Для уменьшения суммы используйте скидку.",
-                    )
+                    if strict:
+                        raise _line_error(
+                            "negative_price", idx,
+                            "Цена своей позиции не может быть отрицательной. Для уменьшения суммы используйте скидку.",
+                        )
+                    try:
+                        qty = Decimal(str(it.get("qty") or it.get("quantity") or "1"))
+                    except Exception:  # noqa: BLE001
+                        qty = Decimal("1")
+                    neg_sum += money(-price * qty)
+                    had_neg = True
+                    continue
+            kept.append(it)
+        if not had_neg:
+            return raw
+        self._neg_discount = neg_sum
+        payload = raw.copy() if hasattr(raw, "copy") else dict(raw)
+        payload["items"] = kept
+        return payload
 
     def _orig_index(self, pos, item):
         """Индекс строки в теле запроса (после слияния упаковок позиции в списке могут сдвинуться)."""
@@ -610,6 +633,10 @@ class PosQuickCheckoutAPIView(APIView):
     def _check_expected_total(self, cart, data):
         expected = data.get("expected_total")
         if expected is None:
+            return
+        # Б-02: мобилка < 1.18.5 сверку итога не ждёт — не применяем
+        req = getattr(self, "request", None)
+        if req is not None and parse_client(req)[0] == "mobile" and not is_new_client(req):
             return
         cart.recalc()
         server_total = money(cart.total or ZERO)
@@ -789,7 +816,7 @@ class PosQuickCheckoutAPIView(APIView):
         elif total > 0 and limit_discounts and _order_discount_over_limit(cart, total, max_dp):
             raise ValidationError({"_discount_limit": True})
 
-        combined = money(total + bonus)
+        combined = money(total + bonus + (getattr(self, "_neg_discount", None) or ZERO))
         if combined > 0:
             cart.order_discount_percent = None
             cart.order_discount_total = combined

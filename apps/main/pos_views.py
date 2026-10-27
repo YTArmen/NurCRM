@@ -5453,16 +5453,26 @@ class SaleAddCustomItemAPIView(MarketCashierOnlyMixin, APIView):
             return Response({"name": "Название не может быть пустым."}, status=400)
 
         price = _q2(ser.validated_data["price"])
-        if price < 0:
-            # ТЗ Н-15: то же правило, что у pos/checkout/ — отрицательная цена своей позиции не принимается
-            # (раньше строка молча обнулялась в итоге чека). Уменьшать сумму — скидкой.
+        negative_expense = price < 0
+        if negative_expense:
+            # ТЗ Н-15 / Б-02: новый клиент (или флаг api_strict_2026_10) — 400; старая касса — «Расход»
+            # проводим как скидку на чек на эту сумму (сумма на сервере = сумме в кассе).
+            from core.api_compat import is_strict
             from core.exceptions import ApiError
 
-            msg = "Цена своей позиции не может быть отрицательной. Для уменьшения суммы используйте скидку."
-            raise ApiError("negative_price", msg, fields={"price": [msg]}, top={"price": msg})
+            if is_strict(request, cart.company):
+                msg = "Цена своей позиции не может быть отрицательной. Для уменьшения суммы используйте скидку."
+                raise ApiError("negative_price", msg, fields={"price": [msg]}, top={"price": msg})
         qty = _to_decimal(ser.validated_data.get("quantity", "1.000"), default=Decimal("1.000"))
         qty = qty3(qty)
 
+        if negative_expense:
+            extra = _q2(-price * qty)
+            cart.order_discount_percent = None
+            cart.order_discount_total = _q2((cart.order_discount_total or Decimal("0")) + extra)
+            cart.save(update_fields=["order_discount_total", "order_discount_percent", "updated_at"])
+            cart.recalc()
+            return Response(SaleCartSerializer(cart).data, status=status.HTTP_201_CREATED)
 
         item = CartItem.objects.filter(
             cart=cart,

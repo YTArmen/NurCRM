@@ -57,7 +57,7 @@ class IdempotencyLookupTests(TestCase):
         self.assertEqual(look.data["response"]["total"], "5.00")
         miss = self.api.get("/api/main/idempotency/nope-123/")
         self.assertEqual(miss.status_code, 404)
-        self.assertEqual(miss.data["code"], "not_found")
+        self.assertEqual(miss.data["code"], "idempotency_key_not_found")
 
     def test_other_company_does_not_see_key(self):
         Sale.objects.create(company=self.company, cashbox=self.cashbox, user=self.owner, status=Sale.Status.PAID,
