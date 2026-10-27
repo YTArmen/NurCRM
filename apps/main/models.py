@@ -5467,6 +5467,9 @@ class MarketSaleEmployeePayProfile(models.Model):
         PER_ITEM = "per_item", "За проданный товар"
         SALARY_PLUS_PER_ITEM = "salary_plus_per_item", "Оклад + за проданный товар"
         PERCENT_PLUS_PER_ITEM = "percent_plus_per_item", "Процент + за проданный товар"
+        # ТЗ 26.10 Б-63: ставка за каждую закрытую смену
+        PER_SHIFT = "per_shift", "За смену"
+        PER_SHIFT_PLUS_PERCENT = "per_shift_plus_percent", "За смену + процент"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(
@@ -5518,6 +5521,15 @@ class MarketSaleEmployeePayProfile(models.Model):
         validators=[MinValueValidator(Decimal("0"))],
         help_text="Сом за единицу; весовой товар — 1 за строку чека. Если > 0, добавляется к любой схеме.",
     )
+    # ТЗ 26.10 Б-63: сменная ставка (схемы per_shift, per_shift_plus_percent), сом за закрытую смену
+    per_shift_amount = models.DecimalField(
+        "Ставка за смену",
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0"),
+        db_default=Decimal("0"),
+        validators=[MinValueValidator(Decimal("0"))],
+    )
 
     class Meta:
         verbose_name = "Зарплата продавца (маркет)"
@@ -5547,6 +5559,11 @@ class MarketSaleEmployeePayProfile(models.Model):
             raise ValidationError({"branch": "Филиал другой компании."})
         if self.sales_percent > Decimal("100"):
             raise ValidationError({"sales_percent": "Не больше 100%."})
+        if self.pay_scheme in (self.PayScheme.PER_SHIFT, self.PayScheme.PER_SHIFT_PLUS_PERCENT):
+            if (self.per_shift_amount or Decimal("0")) <= 0:
+                raise ValidationError({"per_shift_amount": "Для сменной схемы укажите ставку за смену больше 0."})
+            if self.pay_scheme == self.PayScheme.PER_SHIFT_PLUS_PERCENT and (self.sales_percent or Decimal("0")) <= 0:
+                raise ValidationError({"sales_percent": "Для схемы «За смену + процент» укажите процент больше 0."})
         if self.pay_scheme == self.PayScheme.SALARY:
             if (self.monthly_base_salary or Decimal("0")) <= 0:
                 raise ValidationError({"monthly_base_salary": "Для схемы «Оклад» укажите оклад больше 0."})
@@ -6782,6 +6799,7 @@ class MarketSalaryPayout(models.Model):
         ADVANCE = "advance", "Аванс"
         BONUS = "bonus", "Премия"
         DEDUCTION = "deduction", "Удержание"
+        FINE = "fine", "Штраф"  # ТЗ 26.10 Б-63: запись начисления, денег не двигает (как и bonus)
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(
@@ -6795,6 +6813,8 @@ class MarketSalaryPayout(models.Model):
     amount = models.DecimalField("Сумма", max_digits=12, decimal_places=2)
     period_from = models.DateField("Период с", null=True, blank=True)
     period_to = models.DateField("Период по", null=True, blank=True)
+    # ТЗ 26.10 Б-63: дата штрафа/премии (для fine/bonus); у остальных пусто
+    date = models.DateField("Дата записи", null=True, blank=True)
     method = models.CharField("Способ", max_length=32, blank=True, default="", db_default="")
     cashbox = models.ForeignKey(
         "construction.Cashbox", on_delete=models.SET_NULL, null=True, blank=True,
