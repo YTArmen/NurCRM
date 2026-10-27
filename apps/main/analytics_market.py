@@ -4055,6 +4055,10 @@ class AnalyticsView(APIView):
         User = get_user_model()
         users_by_id = {u.id: u for u in User.objects.filter(id__in=all_user_ids)}
 
+        # ТЗ 26.10 Б-63: закрытые смены сотрудников (сменная ставка, часы)
+        from apps.main.tz26.staff.salary import per_shift_bonus_for, shift_stats_bulk
+        _shift_stats = shift_stats_bulk(company, all_user_ids, period.start, period.end)
+
         rows = []
         for uid in all_user_ids:
             prof = effective_profiles.get(uid)
@@ -4102,7 +4106,7 @@ class AnalyticsView(APIView):
 
             PS = MarketSaleEmployeePayProfile.PayScheme
             pct = (sales_percent or Z_MONEY) / Decimal("100")
-            if pay_scheme in (PS.PERCENT, PS.SALARY_PLUS_PERCENT, PS.PERCENT_PLUS_PER_ITEM):
+            if pay_scheme in (PS.PERCENT, PS.SALARY_PLUS_PERCENT, PS.PERCENT_PLUS_PER_ITEM, PS.PER_SHIFT_PLUS_PERCENT):
                 cashier_bonus = (employee_sales_period * pct).quantize(Decimal("0.01"))
             else:
                 cashier_bonus = Z_MONEY
@@ -4119,7 +4123,11 @@ class AnalyticsView(APIView):
             )
 
             has_base = pay_scheme in (PS.SALARY, PS.SALARY_PLUS_PERCENT, PS.SALARY_PLUS_PER_ITEM)
-            total_pay = ((base_part if has_base else Z_MONEY) + percent_bonus + per_item_bonus).quantize(Decimal("0.01"))
+            shifts_n, shifts_hours = _shift_stats.get(uid, (0, Z_MONEY))
+            per_shift_bonus = per_shift_bonus_for(prof, shifts_n)
+            total_pay = (
+                (base_part if has_base else Z_MONEY) + percent_bonus + per_item_bonus + per_shift_bonus
+            ).quantize(Decimal("0.01"))
 
             rows.append(
                 {
@@ -4140,6 +4148,10 @@ class AnalyticsView(APIView):
                     "per_item_amount": str(_money(per_item_amount)),
                     "items_sold_period": (f"{items_sold_period:f}".rstrip("0").rstrip(".") if "." in f"{items_sold_period:f}" else f"{items_sold_period:f}"),
                     "per_item_bonus": str(_money(per_item_bonus)),
+                    "per_shift_amount": str(_money((prof.per_shift_amount if prof else Z_MONEY) or Z_MONEY)),
+                    "per_shift_bonus": str(_money(per_shift_bonus)),
+                    "shifts": shifts_n,
+                    "hours": str(_money(shifts_hours)),
                     "total": str(_money(total_pay)),
                     "sales_count": cashier_sales_count,
                     "cashier_sales_count": cashier_sales_count,
@@ -4149,26 +4161,10 @@ class AnalyticsView(APIView):
                 }
             )
 
-        # ТЗ Н-18: начислено / выплачено / аванс / премия / удержания / остаток по сотруднику
-        from apps.main.market_salary_views import salary_payout_totals
+        # ТЗ Н-18 / Б-63: начислено / выплачено / аванс / премия / штрафы / остаток по сотруднику
+        from apps.main.tz26.staff.salary import apply_payouts
 
-        _pay = salary_payout_totals(company, period.start, period.end)
-        _tot_paid = Z_MONEY
-        _tot_left = Z_MONEY
-        for r in rows:
-            pt = _pay.get(r["user_id"]) or {}
-            accrued = Decimal(r["total"])
-            paid = pt.get("salary", Z_MONEY)
-            adv = pt.get("advance", Z_MONEY)
-            bon = pt.get("bonus", Z_MONEY)
-            ded = pt.get("deduction", Z_MONEY)
-            left = accrued + bon - ded - paid - adv
-            r.update({
-                "accrued": str(_money(accrued)), "paid": str(_money(paid)), "advance": str(_money(adv)),
-                "bonus": str(_money(bon)), "deductions": str(_money(ded)), "left": str(_money(left)),
-            })
-            _tot_paid += paid + adv
-            _tot_left += left
+        _tot_paid, _tot_left = apply_payouts(company, rows, period.start, period.end)
 
         rows.sort(key=lambda r: r["employee_label"].lower())
 

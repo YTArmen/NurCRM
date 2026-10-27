@@ -4498,6 +4498,7 @@ class MarketSaleEmployeePayProfileSerializer(CompanyBranchReadOnlyMixin, seriali
             "monthly_base_salary",
             "sales_percent",
             "per_item_amount",
+            "per_shift_amount",  # ТЗ 26.10 Б-63
         ]
         read_only_fields = ["id", "company"]
 
@@ -4565,6 +4566,14 @@ class MarketSaleEmployeePayProfileSerializer(CompanyBranchReadOnlyMixin, seriali
         if scheme == PS.SALARY_PLUS_PER_ITEM and base <= 0:
             raise serializers.ValidationError({"monthly_base_salary": "Укажите оклад больше 0."})
         if scheme == PS.PERCENT_PLUS_PER_ITEM and pct <= 0:
+            raise serializers.ValidationError({"sales_percent": "Укажите процент больше 0."})
+        # ТЗ 26.10 Б-63: сменные схемы
+        per_shift = data.get("per_shift_amount")
+        if per_shift is None and self.instance:
+            per_shift = self.instance.per_shift_amount
+        if scheme in (PS.PER_SHIFT, PS.PER_SHIFT_PLUS_PERCENT) and (per_shift or Decimal("0")) <= 0:
+            raise serializers.ValidationError({"per_shift_amount": "Укажите ставку за смену больше 0."})
+        if scheme == PS.PER_SHIFT_PLUS_PERCENT and pct <= 0:
             raise serializers.ValidationError({"sales_percent": "Укажите процент больше 0."})
         return data
 

@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import tasks_api
+from . import salary_views, tasks_api
 
 urlpatterns = [
     path("tasks/", tasks_api.StaffTaskListCreateView.as_view(), name="staff-task-list-create"),
@@ -8,4 +8,5 @@ urlpatterns = [
     path("tasks/<uuid:pk>/", tasks_api.StaffTaskDetailView.as_view(), name="staff-task-detail"),
     path("tasks/<uuid:pk>/files/", tasks_api.StaffTaskFilesView.as_view(), name="staff-task-files"),
     path("tasks/<uuid:pk>/files/<uuid:file_id>/", tasks_api.StaffTaskFilesView.as_view(), name="staff-task-file"),
+    path("market-salary/statement/", salary_views.MarketSalaryStatementView.as_view(), name="market-salary-statement"),
 ]
