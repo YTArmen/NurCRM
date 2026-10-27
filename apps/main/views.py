@@ -1287,7 +1287,8 @@ class ProductListView(CompanyBranchRestrictedMixin, generics.ListAPIView):
     serializer_class = ProductSerializer
     pagination_class = ProductListPageNumberPagination
     filter_backends = [ProductBarcodeAwareSearchFilter, filters.OrderingFilter]
-    search_fields = ["name", "barcode", "article", "alternate_barcodes__barcode", "alternate_barcodes__name"]
+    search_fields = ["name", "barcode", "article", "alternate_barcodes__barcode", "alternate_barcodes__name",
+                     "attr_index__value"]  # ТЗ 26.10 Б-57: поиск и по значениям атрибутов
     ordering_fields = ["created_at", "updated_at", "price", "quantity"]
     # По умолчанию — по монотонному seq: детерминированный порядок «сначала новые»
     # без переупорядочивания строк с одинаковым created_at (fallback ниже — тоже -seq).
@@ -1323,6 +1324,8 @@ class ProductListView(CompanyBranchRestrictedMixin, generics.ListAPIView):
         if self._include_variants():
             qs = qs.prefetch_related("variants")
         qs = _filter_products_company_only(self, qs)
+        from apps.main.tz26.hw_catalog.services import apply_catalog_filters  # ТЗ 26.10 Б-57/58: attr.*, location_prefix
+        qs = apply_catalog_filters(self, qs)
         since = self._updated_since()
         if since is not None:
             qs = qs.filter(updated_at__gte=since)
@@ -1674,6 +1677,9 @@ class ProductCreateByBarcodeAPIView(CompanyBranchRestrictedMixin, generics.Creat
             stock=_parse_bool_like(data.get("stock", False)),
             **parse_upsell_fields(data),
         )
+
+        from apps.main.tz26.hw_catalog.services import apply_request_data  # ТЗ 26.10 Б-57/58/59
+        apply_request_data(self, request, data, product)
 
         # characteristics
         chars_data = data.get("characteristics")
@@ -2158,6 +2164,9 @@ class ProductCreateManualAPIView(CompanyBranchRestrictedMixin, generics.CreateAP
         if price_provided:
             setattr(product, "_manual_price", True)
         product.save()
+
+        from apps.main.tz26.hw_catalog.services import apply_request_data  # ТЗ 26.10 Б-57/58/59
+        apply_request_data(self, request, data, product)
 
         # characteristics
         chars_data = data.get("characteristics")

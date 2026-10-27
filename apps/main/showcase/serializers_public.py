@@ -120,6 +120,11 @@ class PublicProductSerializer(serializers.ModelSerializer):
             "packages",
         ]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        from apps.main.tz26.hw_catalog.services import extend_public  # ТЗ 26.10 Б-57/59: attributes, related
+        return extend_public(self, instance, data, with_related=not isinstance(self, PublicProductListSerializer))
+
     def get_size_chart(self, obj):
         from apps.main.showcase.size_charts import public_size_chart
 

@@ -153,6 +153,7 @@ class _CatalogMixin(ShowcaseErrorMixin):
         catalog = self.get_catalog()
         ctx["new_badge_days"] = catalog.new_badge_days
         ctx["showcase_company"] = self.get_company()
+        ctx["showcase_catalog"] = catalog  # ТЗ 26.10 Б-59: видимость сопутствующих товаров
         return ctx
 
 
@@ -275,6 +276,8 @@ class PublicCompanyShowcaseAPIView(_CatalogMixin, generics.ListAPIView):
             qs = qs.filter(sc_pinned=True)
         if self.apply_variant_filters:
             qs = filter_by_variants(qs, self.request.query_params)
+            from apps.main.tz26.hw_catalog.services import apply_attr_filters  # ТЗ 26.10 Б-57: ?attr.<key>=
+            qs = apply_attr_filters(qs, self.request.query_params)
         return qs
 
 
@@ -343,7 +346,9 @@ class PublicCompanyShowcaseFacetsAPIView(PublicCompanyShowcaseAPIView):
             prices.append(_final(base, v["product__discount_percent"]))
         for row in qs.order_by().exclude(pk__in=with_variants).values_list("price", "discount_percent"):
             prices.append(_final(*row))
+        from apps.main.tz26.hw_catalog.services import attribute_facets, lang_of  # ТЗ 26.10 Б-57
         return Response({
+            "attributes": attribute_facets(self.get_company(), pids, lang_of(request)),
             "sizes": [{"value": k, "count": len(ids)} for k, ids in sorted(sizes.items(), key=lambda kv: size_sort_key(kv[0]))],
             "colors": [
                 {"name": c["name"], "hex": c["hex"], "count": len(c["p"])}
