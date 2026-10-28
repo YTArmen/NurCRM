@@ -79,6 +79,7 @@ class PosCheckoutBatchAPIView(APIView):
             raise ValidationError({"items": f"Не больше {self.MAX_ITEMS} продаж за запрос."})
 
         view = PosQuickCheckoutAPIView()
+        view.request = request  # ТЗ 26.10: крючки строк (шаг Б-52, цены Б-55) видят заголовок клиента
         results = []
         for raw in items:
             key = str((raw or {}).get("idempotency_key") or "").strip() if isinstance(raw, dict) else ""

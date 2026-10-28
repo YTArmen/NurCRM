@@ -791,7 +791,7 @@ class PosQuickCheckoutAPIView(APIView):
             if pkg is None and not offline:  # ТЗ 26.10 Б-52: шаг и минимум (под флагом hardware_2026_11)
                 from apps.main.tz26.hw_units.services import check_line_quantity
 
-                check_line_quantity(self.request, cart.company, product, qty, sale_unit=unit, index=idx)
+                check_line_quantity(getattr(self, "request", None), cart.company, product, qty, sale_unit=unit, index=idx)
             default_price = _q2(variant.effective_price) if variant else _q2(default_unit_price_for_package(product, pkg))
             if unit is not None:  # ТЗ 26.10 Б-53: цена единицы продажи
                 default_price = effective_unit_price(product, unit, wholesale=bool(getattr(cart, "is_wholesale", False)))
