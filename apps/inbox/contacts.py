@@ -10,6 +10,7 @@ from apps.main.phone_utils import normalize_phone_e164
 from .models import Channel, ChannelContact
 
 STOP_WORDS = {"/stop", "стоп", "stop"}
+WIDGET_START = re.compile(r"^w_([A-Za-z0-9_-]{20,40})")
 START_LABEL = re.compile(r"^s_([0-9a-fA-F-]{32,36})")
 
 
@@ -71,6 +72,17 @@ def auto_link(contact, start_payload=""):
         if found:
             link(contact, found)
             return found
+    wm = WIDGET_START.match((start_payload or "").strip())
+    if wm:  # «Продолжить в Telegram» из чата витрины (Б-83 п. 5)
+        from .models import WidgetSession
+        ws = WidgetSession.objects.filter(link_token=wm.group(1)).select_related("contact").first()
+        if ws and ws.company_id == contact.company_id:
+            if ws.contact.client_id:
+                link(contact, ws.contact.client)
+                return ws.contact.client
+            if ws.contact.phone and not contact.phone:
+                contact.phone = ws.contact.phone
+                contact.save(update_fields=["phone"])
     kind = contact.channel.kind
     if kind.startswith("telegram"):
         found = list(clients.filter(telegram_chat_id=contact.external_id)[:3])

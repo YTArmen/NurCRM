@@ -175,6 +175,8 @@ class MessagesView(APIView):
             raise ApiError("invalid", "Idempotency-Key: 16–64 символа [A-Za-z0-9_-].", fields={"Idempotency-Key": ["Неверный формат"]})
         msg, replayed = services.create_outgoing(conv, request.user, data, key)
         body = {"message": ser.message_out(msg)}
+        if msg.template:
+            body["cost"] = {"category": msg.template.get("category")}
         if replayed:
             body["replayed"] = True
         return Response(body, status=status.HTTP_200_OK if replayed else status.HTTP_201_CREATED)

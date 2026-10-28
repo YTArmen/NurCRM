@@ -29,6 +29,10 @@ def _verify_telegram(channel, request, raw) -> bool:
 def _verify_meta(channel, request, raw) -> bool:
     header = request.META.get("HTTP_X_HUB_SIGNATURE_256", "")
     app_secret = crypto.get_secrets(channel).get("app_secret", "")
+    if not app_secret:  # каналы Embedded Signup / Instagram Login подписываются секретом приложения Meta
+        from . import meta_channels
+        app_secret = (meta_channels.instagram_app_secret() if channel.kind == "instagram"
+                      else meta_channels.meta_app_secret())
     if not (app_secret and header.startswith("sha256=")):
         return False
     expected = "sha256=" + hmac.new(app_secret.encode(), raw, hashlib.sha256).hexdigest()

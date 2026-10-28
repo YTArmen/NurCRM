@@ -32,10 +32,12 @@ class CapabilitiesView(APIView):
             "inbox": bool(company) and access.has(request.user, "can_view_inbox"),
             "kinds": kinds,
             "implemented_kinds": [k for k in ch_svc.IMPLEMENTED_KINDS],
-            "ai": False,  # ИИ-ответчик в ящике — этап 2 (Б-79)
+            "ai": True,
+            "whatsapp_embedded": _meta_on(),
+            "instagram_oauth": _ig_on(),
             "ai_allowed": ai,
-            "templates": False,
-            "widget": False,
+            "templates": True,
+            "widget": True,
             "permissions": access.perms_of(request.user),
         })
 
@@ -133,3 +135,13 @@ class ChannelCheckView(APIView):
             if not res["ok"]:
                 return Response({"ok": False, "status": c.status, "detail": res["detail"]})
         return Response(ch_svc.check(c))
+
+
+def _meta_on():
+    from . import meta_channels
+    return meta_channels.meta_enabled()
+
+
+def _ig_on():
+    from . import meta_channels
+    return meta_channels.instagram_enabled()
