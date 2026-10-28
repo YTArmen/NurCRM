@@ -524,3 +524,64 @@ class DealReversalTests(SalesBase):
         r = self.api.delete(f"/api/main/clients/{self.client_obj.id}/deals/{self.deal.id}/")
         self.assertEqual(r.status_code, 204)
         self.assertEqual(CashFlow.objects.filter(source_id=deal_id, type=CashFlow.Type.EXPENSE).count(), 0)
+
+
+class CompanyDebtLimitsTests(SalesBase):
+    """Б-14 п. 3: общий лимит долга компании."""
+
+    def test_patch_and_get(self):
+        r = self.api.patch("/api/main/debt-limits/", {"max_sales_per_day": 2, "max_amount_per_day": "500"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        r = self.api.get("/api/main/debt-limits/")
+        self.assertEqual(r.data["max_sales_per_day"], 2)
+        self.assertEqual(r.data["max_amount_per_day"], "500.00")
+        self.assertEqual(r.data["applies_to"], "all")
+        r = self.api.patch("/api/main/debt-limits/", {"applies_to": "x"}, format="json")
+        self.assertEqual(r.status_code, 400)
+
+    def test_daily_count_limit_across_cashiers(self):
+        self.open_shift()
+        self.api.patch("/api/main/debt-limits/", {"max_sales_per_day": 2}, format="json")
+        c = self.new_client()
+        self.assertEqual(self.debt_sale("l1", c, "100.00").status_code, 201)
+        self.assertEqual(self.debt_sale("l2", c, "100.00").status_code, 201)
+        r = self.debt_sale("l3", c, "100.00")
+        self.assertEqual(r.status_code, 400, r.data)
+        self.assertEqual(r.data["code"], "debt_daily_limit_exceeded")
+        self.assertEqual(Sale.objects.filter(company=self.company).count(), 2)
+        r = self.api.get("/api/main/debt-limits/usage/")
+        self.assertEqual(r.data["sales_count"], 2)
+        self.assertEqual(r.data["sales_left"], 0)
+
+    def test_daily_amount_and_client_limit(self):
+        self.open_shift()
+        self.api.patch("/api/main/debt-limits/", {"max_amount_per_day": "250", "max_debt_per_client": "400"}, format="json")
+        c = self.new_client()
+        self.assertEqual(self.debt_sale("a1", c, "200.00").status_code, 201)
+        r = self.debt_sale("a2", c, "100.00")
+        self.assertEqual(r.data["code"], "debt_daily_limit_exceeded")
+        self.api.patch("/api/main/debt-limits/", {"max_amount_per_day": None}, format="json")
+        r = self.debt_sale("a3", c, "300.00")
+        self.assertEqual(r.data["code"], "debt_client_limit_exceeded")
+
+    def test_cashier_cannot_patch(self):
+        from django.contrib.auth import get_user_model
+
+        u = get_user_model().objects.create_user(email="k@t.kg", password="x", role="employee", company=self.company)
+        api = type(self.api)()
+        api.force_authenticate(u)
+        r = api.patch("/api/main/debt-limits/", {"max_sales_per_day": 1}, format="json")
+        self.assertEqual(r.status_code, 403, r.data)
+        self.assertEqual(api.get("/api/main/debt-limits/").status_code, 200)
+
+    def test_offline_not_rejected_gives_warning(self):
+        from django.utils import timezone
+
+        self.open_shift()
+        self.api.patch("/api/main/debt-limits/", {"max_sales_per_day": 1}, format="json")
+        c = self.new_client()
+        self.assertEqual(self.debt_sale("o1", c, "100.00").status_code, 201)
+        at = (timezone.now() - timezone.timedelta(minutes=5)).isoformat()
+        r = self.debt_sale("o2", c, "100.00", offline=True, offline_created_at=at)
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertTrue(any(w["code"] == "debt_daily_limit_exceeded" for w in r.data.get("warnings", [])), r.data)

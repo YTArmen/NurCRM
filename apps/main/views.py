@@ -4077,6 +4077,30 @@ class ClientDealInstallmentUpdateAPIView(APIView, CompanyBranchRestrictedMixin):
         return Response(ClientDealSerializer(fresh, context={"request": request}).data, status=status.HTTP_200_OK)
 
 
+def _supplier_expense_cashflow(request, company, force_strict=False, **kwargs):
+    """
+    ТЗ Б-18 п. 3 / Б-02: расход при оплате сделки поставщика.
+    Кассы нет: новый клиент (или флаг api_strict_2026_10) получает 400 cashbox_unresolvable, платёж откатывается
+    (исключение уходит наружу из atomic-вью); старый клиент — как раньше: оплата проходит без расхода.
+    """
+    from rest_framework.exceptions import ValidationError as _DRFValidationError
+
+    from apps.construction.auto_cashflow import create_auto_cashflow
+    from core.api_compat import is_strict
+
+    strict = force_strict or is_strict(request, company)
+    try:
+        with transaction.atomic():
+            return create_auto_cashflow(company=company, **kwargs)
+    except _DRFValidationError as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        code = detail.get("code")
+        code = getattr(code, "code", None) or str(code) if code is not None else None
+        if strict or code != "cashbox_unresolvable":
+            raise
+        return None
+
+
 # ===== PAY (создаём DealPayment + обновляем installment) =====
 
 @read_only_guard("can_edit_clients")
@@ -4207,8 +4231,8 @@ class ClientDealPayAPIView(APIView, CompanyBranchRestrictedMixin):
         if is_supplier:
             # ТЗ Н-03/Н-11: «из ящика смены» — расход из кассы этой смены, один.
             drawer_shift = _receipt_drawer_shift(request, deal.company) if (pm or "cash") == "cash" else None
-            create_auto_cashflow(
-                company=deal.company,
+            _supplier_expense_cashflow(
+                request, deal.company,
                 branch=deal.branch,
                 cashbox=drawer_shift.cashbox if drawer_shift else None,
                 cashbox_id=data.get("cashbox_id"),
@@ -4452,8 +4476,9 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
             if is_supplier:
                 # Долг поставщику - это РАСХОД (как в clients/{id}/deals/{deal}/pay/).
                 drawer_shift = _receipt_drawer_shift(request, deal.company) if (pm or "cash") == "cash" else None
-                _cf = create_auto_cashflow(
-                    company=deal.company,
+                _cf = _supplier_expense_cashflow(
+                    request, deal.company,
+                    force_strict=getattr(self, "force_strict", False),
                     branch=deal.branch,
                     cashbox=drawer_shift.cashbox if drawer_shift else None,
                     cashbox_id=data.get("cashbox_id"),
@@ -4518,6 +4543,8 @@ class SupplierDebtPayAPIView(ClientDealsPayAnyAPIView):
     → {paid, left, applied:[{deal, installment, amount}], cashflows:[{id, cashbox, shift, amount}],
        paid_by:{id, name}, replayed}
     """
+
+    force_strict = True  # новый адрес: расход обязателен, кассы нет → 400 cashbox_unresolvable (Б-18)
 
     @idempotent(body_key=True, replay_flag=True)
     @transaction.atomic
@@ -5381,11 +5408,11 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
         qp = request.query_params
 
         # 1. Валидация параметров (ТЗ Н-30: единый код invalid_param)
-        def _bad(field, detail):
-            return Response(
-                {"code": "invalid_param", "detail": detail, "field": field},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        def _bad(field, detail, allowed=None):
+            body = {"detail": detail, "code": "invalid_param", "field": field}  # Б-11: detail первым
+            if allowed is not None:
+                body["data"] = {"allowed": allowed}
+            return Response(body, status=status.HTTP_400_BAD_REQUEST)
 
         def _int_param(field, default):
             raw = qp.get(field, default)
@@ -5401,7 +5428,7 @@ class SupplierRecommendationsAPIView(CompanyBranchRestrictedMixin, APIView):
         if err:
             return err
         if analysis_days not in (7, 14, 30):
-            return _bad("analysis_days", "analysis_days должен быть 7, 14 или 30.")
+            return _bad("analysis_days", "analysis_days должен быть 7, 14 или 30.", allowed=[7, 14, 30])
         coverage_days, err = _int_param("coverage_days", "7")
         if err:
             return err

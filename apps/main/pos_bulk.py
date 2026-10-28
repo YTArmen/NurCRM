@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.main.kassa_views import MAX_CHECKOUT_ITEMS, _line_error
+from core.api_compat import is_strict
 from apps.main.models import Cart, CartItem, Product, ProductPackage, ProductVariant
 from apps.main.pos_utils import (
     cart_item_stock_consume_units,
@@ -94,6 +95,7 @@ class SaleItemsBulkAPIView(MarketCashierOnlyMixin, APIView):
             used[ci.product_id] += cart_item_stock_consume_units(ci)
 
         new_rows, added = [], []
+        neg_discount = Decimal("0")
         for idx, it in enumerate(raw):
             if not isinstance(it, dict):
                 raise _line_error("validation_error", idx, "Позиция должна быть объектом.")
@@ -107,8 +109,13 @@ class SaleItemsBulkAPIView(MarketCashierOnlyMixin, APIView):
                     raise _line_error("validation_error", idx, "Для своей позиции нужны name и price.")
                 price = _q2(_dec(price_raw, idx, "price"))
                 if price < 0:
-                    # то же правило, что в pos/checkout/: отрицательная цена своей позиции не принимается
-                    raise _line_error("negative_price", idx, "Цена своей позиции не может быть отрицательной.")
+                    # то же правило, что в pos/checkout/ (Б-02): новый клиент — 400, старая касса —
+                    # «Расход» проводится скидкой на чек
+                    if is_strict(request, cart.company):
+                        raise _line_error("negative_price", idx, "Цена своей позиции не может быть отрицательной.")
+                    neg_discount += _q2(-price * qty)
+                    added.append(("skip", None, None))
+                    continue
                 new_rows.append(CartItem(company_id=cid, branch_id=cart.branch_id, cart=cart, product=None,
                                          custom_name=name, unit_price=price, quantity=qty))
                 added.append(("new", len(new_rows) - 1, None))
@@ -193,11 +200,15 @@ class SaleItemsBulkAPIView(MarketCashierOnlyMixin, APIView):
                 list(touched.values()), ["quantity", "unit_price", "line_discount", "manual_discount"]
             )
         CartItem.objects.bulk_create(new_rows)
+        if neg_discount > 0:
+            cart.order_discount_percent = None
+            cart.order_discount_total = _q2((cart.order_discount_total or Decimal("0")) + neg_discount)
+            cart.save(update_fields=["order_discount_total", "order_discount_percent", "updated_at"])
         cart.recalc()
         resp = _cart_response(request, cart.id, status_code=status.HTTP_201_CREATED)
         if isinstance(resp.data, dict):
             resp.data["added_items"] = [
-                {"index": i, "id": str((new_rows[ref] if kind == "new" else target).id)}
+                {"index": i, "id": str((new_rows[ref] if kind == "new" else target).id) if kind != "skip" else None}
                 for i, (kind, ref, target) in enumerate(added)
             ]
         return resp

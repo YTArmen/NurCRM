@@ -98,7 +98,7 @@ def _first_message(fields: dict) -> str:
     return "Проверьте данные запроса."
 
 
-def api_exception_handler(exc, context):
+def _api_exception_handler(exc, context):
     # Ошибка правил модели (full_clean) — это ошибка данных, а не сбой сервера: 400, не 500.
     if isinstance(exc, DjangoValidationError):
         exc = exceptions.ValidationError(_django_validation_detail(exc))
@@ -149,4 +149,21 @@ def api_exception_handler(exc, context):
         wait = getattr(exc, "wait", None)
         if wait is not None and "Retry-After" not in response:
             response["Retry-After"] = str(int(wait) + 1)
+    return response
+
+
+_LEAD_KEYS = ("detail", "code", "data", "errors", "fields")
+
+
+def api_exception_handler(exc, context):
+    """
+    Единое ТЗ 26.10.2026, Б-11 / О1: `detail` — первым ключом, затем code, data, errors, fields.
+    Старые разборщики кассы показывают первое строковое поле ответа.
+    """
+    response = _api_exception_handler(exc, context)
+    if response is not None and isinstance(response.data, dict) and "detail" in response.data:
+        data = response.data
+        ordered = {k: data[k] for k in _LEAD_KEYS if k in data}
+        ordered.update((k, v) for k, v in data.items() if k not in ordered)
+        response.data = ordered
     return response

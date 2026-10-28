@@ -119,7 +119,13 @@ from django.http import JsonResponse
 
 def custom_handler404(request, exception=None):
     if request.path.startswith('/api/'):
-        return JsonResponse({"detail": "Запрашиваемый ресурс или страница не найдена (404).", "code": "not_found"}, status=404)
+        # Единое ТЗ 26.10.2026, Б-01 / О2: «адреса нет» (route_not_found) отличается от «объекта нет» (not_found).
+        from django.urls import Resolver404
+        if exception is None or isinstance(exception, Resolver404):
+            resp = JsonResponse({"detail": "Такого адреса API нет.", "code": "route_not_found"}, status=404)
+        else:
+            resp = JsonResponse({"detail": "Запрашиваемый ресурс не найден.", "code": "not_found"}, status=404)
+        return resp
     from django.views.defaults import page_not_found
     return page_not_found(request, exception)
 

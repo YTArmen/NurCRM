@@ -46,7 +46,7 @@ from core.exceptions import ApiError
 
 from apps.integrations.idempotency import _request_key, idempotent
 
-from .debt_limits import check_debt_limits, client_debt_payload
+from .debt_limits import check_company_debt_limits, check_debt_limits, client_debt_payload
 from .deletions import write_deletions
 from .schedule import apply_debt_schedule, schedule_payload
 from .packs import annotate_items, convert_pack_items, save_pack_lines
@@ -658,6 +658,8 @@ class PosQuickCheckoutGuardedAPIView(PosQuickCheckoutAPIView):
         apply_debt_schedule(sale, data)
         # Лимиты долга: клиент и кассир (внутри транзакции продажи, под блокировкой)
         check_debt_limits(request, sale, client, data)
+        # Общий лимит компании (Б-14): офлайн-досылка не отклоняется — уходит в warnings
+        self._warnings.extend(check_company_debt_limits(request, sale, client, offline=self._offline))
 
     def _enrich(self, request, data: dict) -> None:
         """ТЗ-28 §8.5: итоги смены, новые остатки и версия каталога прямо в ответе продажи."""
@@ -762,3 +764,102 @@ class ClientDetailWithDebtLimitAPIView(ClientRetrieveUpdateDestroyAPIView):
                     defaults={"company_id": client.company_id, "limit": new_limit, "updated_by": request.user},
                 )
         return self._with_limit(response)
+
+
+# ---- Общий лимит долга компании (ТЗ 26.10, Б-14 п. 3) ----
+
+def _limits_payload(lim) -> dict:
+    return {
+        "max_sales_per_day": lim.max_sales_per_day if lim else None,
+        "max_amount_per_day": str(money(lim.max_amount_per_day)) if lim and lim.max_amount_per_day is not None else None,
+        "max_debt_per_client": str(money(lim.max_debt_per_client)) if lim and lim.max_debt_per_client is not None else None,
+        "applies_to": lim.applies_to if lim else "all",
+    }
+
+
+class DebtLimitsAPIView(APIView):
+    """GET — любой сотрудник (кассе нужно знать лимит); PATCH — только владелец и администратор."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from .debt_limits import company_limits
+
+        return Response(_limits_payload(company_limits(_company(request).pk)))
+
+    def patch(self, request):
+        from .models import CompanyDebtLimits
+
+        if not _is_owner_like(request.user):
+            raise ApiError("permission_denied", "Нет доступа: лимиты долга меняет владелец.", status_code=403)
+        company = _company(request)
+        data = request.data
+        fields, errors = {}, {}
+        if "max_sales_per_day" in data:
+            v = data["max_sales_per_day"]
+            if v in (None, "", 0, "0"):
+                fields["max_sales_per_day"] = None
+            else:
+                try:
+                    n = int(v)
+                    if n < 0:
+                        raise ValueError
+                    fields["max_sales_per_day"] = n
+                except (TypeError, ValueError):
+                    errors["max_sales_per_day"] = ["Нужно целое число не меньше 0."]
+        for name in ("max_amount_per_day", "max_debt_per_client"):
+            if name in data:
+                v = data[name]
+                if v in (None, ""):
+                    fields[name] = None
+                    continue
+                try:
+                    d = money(Decimal(str(v)))
+                    if d < 0:
+                        raise InvalidOperation
+                    fields[name] = d if d > 0 else None
+                except (InvalidOperation, ValueError):
+                    errors[name] = ["Нужна сумма не меньше 0."]
+        if "applies_to" in data:
+            if data["applies_to"] not in ("all", "cashiers"):
+                errors["applies_to"] = ["Допустимо: all, cashiers."]
+            else:
+                fields["applies_to"] = data["applies_to"]
+        if errors:
+            raise ApiError("validation_error", "Неверные значения лимитов.", fields=errors)
+        lim, _ = CompanyDebtLimits.objects.get_or_create(company=company)
+        for k, v in fields.items():
+            setattr(lim, k, v)
+        lim.updated_by = request.user
+        lim.save()
+        return Response(_limits_payload(lim))
+
+
+class DebtLimitsUsageAPIView(APIView):
+    """GET debt-limits/usage/?date=YYYY-MM-DD — сколько долговых чеков и долга выдано за день."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from .debt_limits import company_limits, day_usage
+
+        company = _company(request)
+        day = None
+        raw = request.query_params.get("date")
+        if raw:
+            try:
+                day = datetime.strptime(raw, "%Y-%m-%d").date()
+            except ValueError:
+                raise ApiError("invalid_param", "date: формат ГГГГ-ММ-ДД.", data={"param": "date"})
+        lim = company_limits(company.pk)
+        cashiers_only = bool(lim and lim.applies_to == "cashiers")
+        count, total = day_usage(company.pk, day, cashiers_only=cashiers_only)
+        return Response({
+            "date": str(day) if day else None,
+            "sales_count": count,
+            "amount": str(total),
+            "limits": _limits_payload(lim),
+            "sales_left": max(0, lim.max_sales_per_day - count) if lim and lim.max_sales_per_day else None,
+            "amount_left": str(max(Decimal("0.00"), money(lim.max_amount_per_day - total)))
+            if lim and lim.max_amount_per_day is not None else None,
+        })

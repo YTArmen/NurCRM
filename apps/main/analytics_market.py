@@ -1159,6 +1159,7 @@ class AnalyticsView(APIView):
         top_products = []
         mixed_count = 0
         mixed_total = Z_MONEY
+        payment_breakdown = []
         returns_count = 0
         returns_amount = Z_MONEY
 
@@ -1425,6 +1426,7 @@ class AnalyticsView(APIView):
         # Себестоимость и прибыль выше считаются только по оплаченным чекам.
         prepayment_total = Z_MONEY
         credit_sales_total = Z_MONEY
+        credit_count = 0
         debt_repaid_total = Z_MONEY
         # ТЗ Н-20: при фильтре по категории предоплату чека целиком не добавляем (она не делится по строкам).
         if Sale is not None and _model_has_field(Sale, "debt_initial") and cat_ids is None:
@@ -1446,7 +1448,9 @@ class AnalyticsView(APIView):
                 prepay=Coalesce(Sum(prepay_expr), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
                 credit=Coalesce(Sum("debt_initial"), Value(Z_MONEY, output_field=MONEY_FIELD), output_field=MONEY_FIELD),
                 n=Count("id", filter=Q(paid_now__gt=0)),
+                n_credit=Count("id"),
             )
+            credit_count = dagg["n_credit"] or 0
             prepayment_total = _money(dagg["prepay"] or Z_MONEY)
             credit_sales_total = _money(dagg["credit"] or Z_MONEY)
             revenue = _money(revenue) + prepayment_total
@@ -1499,6 +1503,20 @@ class AnalyticsView(APIView):
                 debt_repaid_total = _money(_sum_by_category(cf_in, _cf_income_category()).get("debt_repayments", Z_MONEY))
             except Exception:
                 debt_repaid_total = Z_MONEY
+
+        # ТЗ Б-03 п. 3: у каждого способа есть `amount` (= `total`, старое имя оставлено для
+        # старых касс), плюс отдельный элемент {"method":"debt"} — выдано в долг.
+        # Сумма элементов без `debt` = cards.revenue.
+        for _p in payment_breakdown:
+            _p["amount"] = _p.get("total", "0.00")
+        if credit_sales_total > 0:
+            payment_breakdown.append({
+                "method": "debt",
+                "label": PAYMENT_METHOD_LABELS.get("debt", "В долг"),
+                "count": credit_count,
+                "total": str(_money(credit_sales_total)),
+                "amount": str(_money(credit_sales_total)),
+            })
 
         avg_check = _safe_div(_money(revenue), tx)
 

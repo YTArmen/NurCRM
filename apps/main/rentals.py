@@ -30,6 +30,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import permissions, serializers, status
 from rest_framework.exceptions import ValidationError
+from core.api_compat import is_strict
 from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -309,7 +310,12 @@ class RentalListCreateAPIView(APIView):
             page = paginator.paginate_queryset(qs, request)
         except Exception:
             raise ValidationError({"detail": "Некорректные limit/offset."})
-        return paginator.get_paginated_response([_payload(r, request.user) for r in page])
+        rows = [_payload(r, request.user) for r in page]
+        # ТЗ Б-02/Б-21: старая касса (без заголовка, флаг компании выключен) читает массив, как раньше;
+        # новый клиент или флаг api_strict_2026_10 — {count, next, previous, results}
+        if not is_strict(request, company):
+            return Response(rows)
+        return paginator.get_paginated_response(rows)
 
     def post(self, request):
         company = _company(request)
