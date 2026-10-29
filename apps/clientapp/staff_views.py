@@ -308,6 +308,7 @@ def _row_payload(row: AppShopSettings, branch=None):
         "longitude": str(row.longitude) if row.longitude is not None else None,
         "points_enabled": row.points_enabled,
         "points_percent": str(row.points_percent) if row.points_percent is not None else None,
+        "points_expire_days": row.points_expire_days,
         "geocode_status": row.geocode_status,
         "geocoded_at": row.geocoded_at.isoformat() if row.geocoded_at else None,
         "hidden_by_admin": row.hidden_by_admin,
@@ -333,6 +334,19 @@ def _apply_row(row: AppShopSettings, data: dict, is_branch: bool):
         row.points_enabled = None if (v is None and is_branch) else bool(v)
     if "points_percent" in data:
         row.points_percent = _dec(data["points_percent"], "points_percent", Decimal("0"), Decimal("100"))
+    if "points_expire_days" in data and not is_branch:
+        # ТЗ 29.10 Б-99: null/пусто = бонусы не сгорают
+        v = data["points_expire_days"]
+        if v in (None, ""):
+            row.points_expire_days = None
+        else:
+            try:
+                n = int(str(v))
+            except ValueError:
+                raise ValidationError({"points_expire_days": ["Ожидается целое число дней."]})
+            if not 1 <= n <= 3650:
+                raise ValidationError({"points_expire_days": ["Допустимо от 1 до 3650 дней."]})
+            row.points_expire_days = n
     coords_given = "latitude" in data or "longitude" in data
     if coords_given:
         lat = _dec(data.get("latitude"), "latitude", Decimal("-90"), Decimal("90"))
