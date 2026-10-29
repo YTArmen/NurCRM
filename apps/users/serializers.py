@@ -1265,11 +1265,12 @@ class CompanySerializer(serializers.ModelSerializer):
             "scale_barcode_layout",
             "scale_barcode_amount_unit",
             "max_discount_percent",
+            "finance_closed_until",
             "appointment_work_start",
             "appointment_work_end",
             "market_sphere",
         ]
-        extra_kwargs = {"cashier_password": {"write_only": True}}
+        extra_kwargs = {"cashier_password": {"write_only": True}, "finance_closed_until": {"read_only": True}}
 
     def validate_inn(self, value):
         # QA B24: ИНН компании — как у контрагента: пусто или 14 цифр.
@@ -1435,6 +1436,7 @@ class CompanyUpdateSerializer(serializers.ModelSerializer):
             "scale_barcode_amount_unit",
             "appointment_work_start",
             "appointment_work_end",
+            "finance_closed_until",  # ТЗ 29.10 Б-100
             "market_sphere",
             "market_spheres",
         ]

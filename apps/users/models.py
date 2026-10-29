@@ -290,6 +290,8 @@ class Company(models.Model):
         null=True,
         help_text="Время начала рабочего дня для календаря записей (формат HH:MM)",
     )
+    # ТЗ 29.10 Б-100: «финансы закрыты по» — инвесторы и стартовые расходы с датой <= этой только чтение
+    finance_closed_until = models.DateField("Финансы закрыты по", null=True, blank=True)
     appointment_work_end = models.CharField(
         "Конец рабочего дня для записей",
         max_length=5,

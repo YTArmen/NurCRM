@@ -7,7 +7,7 @@ from django.db import transaction
 from django.db.models import Min, Sum
 from django.utils import timezone
 from rest_framework import generics, permissions, serializers
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -19,6 +19,28 @@ MAX_MONTHS = 60
 
 def _q(v):
     return Decimal(str(v or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+class PeriodClosed(APIException):
+    status_code = 409
+
+    def __init__(self, closed_until):
+        super().__init__({"detail": f"Период до {closed_until.strftime('%d.%m.%Y')} закрыт. Изменения запрещены.",
+                          "code": "period_closed", "closed_until": closed_until.isoformat()})
+
+
+def ensure_finance_open(company, *dates):
+    """ТЗ 29.10 Б-100: Company.finance_closed_until — запись инвесторов/стартовых расходов с датой <= этой даты → 409."""
+    closed = getattr(company, "finance_closed_until", None)
+    if closed is None:
+        return
+    for d in dates:
+        if d is None:
+            continue
+        if isinstance(d, datetime):
+            d = timezone.localtime(d).date() if timezone.is_aware(d) else d.date()
+        if d <= closed:
+            raise PeriodClosed(closed)
 
 
 class OwnerOnly(permissions.BasePermission):
@@ -229,6 +251,7 @@ class PayoutListCreateView(generics.ListCreateAPIView):
     @transaction.atomic
     def perform_create(self, serializer):
         company = _company(self.request.user)
+        ensure_finance_open(company, serializer.validated_data["month"])
         obj = serializer.save(company=company, marked_by=self.request.user)
         self.request._aid = obj.pk
         _audit(self.request, company, "create", "investor_payout", obj.investor.name,
@@ -244,6 +267,7 @@ class PayoutDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_update(self, serializer):
         i = serializer.instance
+        ensure_finance_open(i.company, i.month, serializer.validated_data.get("month"))
         before = {"accrued": str(i.accrued), "tax": str(i.tax), "paid": str(i.paid)}
         obj = serializer.save(marked_by=self.request.user)
         self.request._aid = obj.pk
@@ -251,6 +275,7 @@ class PayoutDetailView(generics.RetrieveUpdateDestroyAPIView):
                after={"accrued": str(obj.accrued), "tax": str(obj.tax), "paid": str(obj.paid)})
 
     def perform_destroy(self, instance):
+        ensure_finance_open(instance.company, instance.month)
         self.request._aid = instance.pk
         _audit(self.request, instance.company, "delete", "investor_payout", instance.investor.name,
                before={"accrued": str(instance.accrued), "paid": str(instance.paid)})
