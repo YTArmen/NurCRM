@@ -55,6 +55,10 @@ class OriginTests(SyncBase):
         self.assertEqual(r.data["source"], "web")
 
     def test_invalid_values_400(self):
+        # горячая правка 29.10: 400 на неверные значения — только для новых клиентов (флаг компании)
+        from apps.users.models import CompanyAddon
+        CompanyAddon.objects.get_or_create(company=self.company, code="api_strict_2026_10", defaults={"active": True})
+        self.user.company.__dict__.pop("_nm_flags", None) if hasattr(self, "user") else None
         for extra in ({"source": "fax"}, {"device_key": "short"}, {"device_key": "bad key!!"}, {"device_name": "x" * 65}):
             r = self.co(**extra)
             self.assertEqual(r.status_code, 400, (extra, getattr(r, "data", None)))

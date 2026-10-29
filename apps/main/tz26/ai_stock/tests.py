@@ -147,7 +147,7 @@ class StockHealthTests(Base):
                                      unit_price=p.price, quantity=Decimal(qty))
 
     def get(self, user=None, **params):
-        return self.client_for(user or self.owner).get(self.URL, params)
+        return self.client_for(user or self.owner).get(self.URL, params, HTTP_X_NURMARKET_CLIENT="kassa/1.17.61")
 
     def by_name(self, r):
         return {x["name"]: x for x in r.data["results"]}
@@ -197,6 +197,8 @@ class StockHealthTests(Base):
 
     def test_purchase_fields_need_rights(self):
         self.product("А")
+        from apps.users.models import CompanyAddon  # горячая правка 29.10: строгие права — по флагу компании
+        CompanyAddon.objects.get_or_create(company=self.company, code="api_strict_2026_10", defaults={"active": True})
         self.assertEqual(self.get(user=self.cashier).status_code, 403)  # нет can_view_analytics
         x = self.get(user=self.analyst).data["results"][0]
         self.assertNotIn("stock_value_purchase", x)

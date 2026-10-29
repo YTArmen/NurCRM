@@ -52,9 +52,9 @@ class NegativePriceCompatTests(CheckoutBase):
         r = self.api.post(f"/api/main/pos/carts/{cart}/custom-item/", {"name": "Расход", "price": "-10.00"}, format="json")
         self.assertEqual(r.status_code, 201, r.data)
         c = Cart.objects.get(pk=cart)
-        self.assertEqual(c.discount_total, Decimal("10.00"))
+        # горячая правка 29.10: старая касса — «Расход» отдельной строкой с минусом, как до 29.10
         self.assertEqual(c.total, Decimal("90.00"))
-        self.assertEqual(c.items.count(), 1)
+        self.assertEqual(c.items.count(), 2)
 
     def test_bulk_old_client_discount(self):
         self.open_shift()
@@ -76,3 +76,15 @@ class NegativePriceCompatTests(CheckoutBase):
                           HTTP_X_NURMARKET_CLIENT="mobile/1.18.5")
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.data["code"], "total_mismatch")
+
+
+class NegativeLineTotalTests(NegativePriceCompatTests):
+    """Горячая правка 29.10: строка «Расход» с минусом уменьшает итог чека (раньше минус возвращался «скидкой»)."""
+
+    def test_negative_line_reduces_total(self):
+        self.open_shift()
+        cart = self.api.post("/api/main/pos/sales/start/", {}, format="json").data["id"]
+        self.api.post(f"/api/main/pos/sales/{cart}/add-item/", {"product_id": str(self.product.id), "quantity": "1"}, format="json")
+        self.api.post(f"/api/main/pos/carts/{cart}/custom-item/", {"name": "Расход", "price": "-10.00"}, format="json")
+        c = Cart.objects.get(pk=cart)
+        self.assertEqual((c.subtotal, c.discount_total, c.total), (Decimal("90.00"), Decimal("0.00"), Decimal("90.00")))

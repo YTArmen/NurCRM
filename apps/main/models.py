@@ -2096,7 +2096,9 @@ class Cart(models.Model):
         for item in items:
             base = cart_line_base(item, amount_step)
             disc = Decimal(str(item.line_discount or 0))
-            disc = min(max(disc, Decimal("0")), base)
+            # 29.10: у строки «Расход» с минусом base < 0 — скидка не может быть отрицательной,
+            # иначе минус строки возвращался «скидкой» и итог чека не уменьшался (разница с кассой).
+            disc = min(max(disc, Decimal("0")), max(base, Decimal("0")))
             subtotal_raw += base
             line_discount_raw += disc
 

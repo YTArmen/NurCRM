@@ -161,6 +161,13 @@ class CashierStillWorks(N16Base):
 
 
 class RestrictionsTests(N16Base):
+    # горячая правка 29.10: строгие права Н-16 действуют для новых клиентов — тесты идут с заголовком новой кассы
+    @staticmethod
+    def api_for(user):
+        api = N16Base.api_for(user)
+        api.defaults["HTTP_X_NURMARKET_CLIENT"] = "kassa/1.17.61"
+        return api
+
     def setUp(self):
         super().setUp()
         self.other = User.objects.create_user(
