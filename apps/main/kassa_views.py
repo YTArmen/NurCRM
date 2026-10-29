@@ -23,7 +23,9 @@ from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.construction.models import CashFlow, CashShift
+from django.core.exceptions import ValidationError as DjangoValidationError
+from apps.construction.models import CashFlow, CashShift, Cashbox
+from apps.users.models import Branch
 from apps.main.models import (
     Cart,
     CartItem,
@@ -1001,7 +1003,7 @@ class PosQuickCheckoutAPIView(APIView):
 # Бонусы
 # ======================================================================
 
-def change_bonus(*, client, delta, reason, sale=None, user=None, note="", idempotency_key=None):
+def change_bonus(*, client, delta, reason, sale=None, user=None, note="", idempotency_key=None, branch=None, cashbox=None):
     """Меняет баланс бонусов клиента под блокировкой строки. Баланс не уходит в минус."""
     delta = money(Decimal(str(delta)))
     with transaction.atomic():
@@ -1021,7 +1023,24 @@ def change_bonus(*, client, delta, reason, sale=None, user=None, note="", idempo
             note=note[:255],
             idempotency_key=idempotency_key,
             user=user if getattr(user, "is_authenticated", False) else None,
+            # ТЗ 29.10 Б-99: филиал/касса — явно, иначе из чека
+            branch_id=getattr(branch, "pk", branch) or (sale.branch_id if sale is not None else None),
+            cashbox_id=getattr(cashbox, "pk", cashbox) or (sale.cashbox_id if sale is not None else None),
         )
+
+
+def _bonus_scope(model, raw, company_id):
+    """ТЗ 29.10 Б-99: необязательные branch/cashbox в POST …/bonus/ — только своей компании, иначе 400."""
+    if not raw:
+        return None
+    try:
+        obj = model.objects.filter(pk=raw).first()
+    except (ValueError, DjangoValidationError):
+        obj = None
+    cid = getattr(obj, "company_id", None) or getattr(getattr(obj, "branch", None), "company_id", None)
+    if obj is None or (cid is not None and cid != company_id):
+        raise ValidationError({model.__name__.lower(): "Не найдено."})
+    return obj
 
 
 class BonusChangeSerializer(serializers.Serializer):
@@ -1050,6 +1069,8 @@ def _bonus_tx_payload(tx):
         "sale": str(tx.sale_id) if tx.sale_id else None,
         "note": tx.note,
         "user": str(tx.user_id) if tx.user_id else None,
+        "branch": str(tx.branch_id) if tx.branch_id else None,  # ТЗ 29.10 Б-99
+        "cashbox": str(tx.cashbox_id) if tx.cashbox_id else None,
         "created_at": tx.created_at.isoformat() if tx.created_at else None,
     }
 
@@ -1092,6 +1113,8 @@ class ClientBonusAPIView(_ClientScopedMixin, APIView):
                 user=request.user,
                 note=data.get("note") or "",
                 idempotency_key=key,
+                branch=_bonus_scope(Branch, request.data.get("branch"), client.company_id),
+                cashbox=_bonus_scope(Cashbox, request.data.get("cashbox"), client.company_id),
             )
         except IntegrityError:
             prior = ClientBonusTransaction.objects.get(company_id=client.company_id, idempotency_key=key)
@@ -1109,7 +1132,10 @@ class ClientBonusHistoryAPIView(_ClientScopedMixin, APIView):
 
     def get(self, request, pk, *args, **kwargs):
         client = self._client(request, pk)
-        txs = ClientBonusTransaction.objects.filter(client=client).order_by("-created_at")[:500]
+        txs = ClientBonusTransaction.objects.filter(client=client)
+        # ТЗ 29.10 Б-99: фильтры reason, date_from/date_to (дни по Бишкеку)
+        from apps.main.tz1029_bonus import apply_bonus_filters
+        txs = apply_bonus_filters(txs, request.query_params).order_by("-created_at")[:500]
         return Response(
             {"bonus_balance": str(client.bonus_balance), "results": [_bonus_tx_payload(t) for t in txs]}
         )

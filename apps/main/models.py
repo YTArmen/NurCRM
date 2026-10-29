@@ -408,6 +408,8 @@ class GlobalProduct(models.Model):
     brand = models.ForeignKey(GlobalBrand, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
     category = models.ForeignKey(GlobalCategory, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
     created_at = models.DateTimeField(auto_now_add=True)
+    # ТЗ 29.10 Б-97: для выгрузки справочника пачками (?since=)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True, db_index=True)
 
     class Meta:
         verbose_name = "Глобальный товар"
@@ -6948,6 +6950,7 @@ class ClientBonusTransaction(models.Model):
         EARN = "earn", "Начисление"
         REDEEM = "redeem", "Списание"
         MANUAL = "manual", "Ручная корректировка"
+        EXPIRE = "expire", "Сгорание"  # ТЗ 29.10 Б-99: срока бонусов в настройках пока нет, значение зарезервировано
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="bonus_transactions")
@@ -6964,10 +6967,17 @@ class ClientBonusTransaction(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # ТЗ 29.10 Б-99: где начислили/списали
+    branch = models.ForeignKey(
+        Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    cashbox = models.ForeignKey(
+        "construction.Cashbox", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
 
     class Meta:
         ordering = ("-created_at",)
-        indexes = [models.Index(fields=["client", "created_at"])]
+        indexes = [models.Index(fields=["client", "created_at"]), models.Index(fields=["company", "created_at"])]
         constraints = [
             models.UniqueConstraint(
                 fields=["company", "idempotency_key"],
@@ -8462,3 +8472,68 @@ from apps.main.telegram_bot.models import (
 
 # ТЗ 26.10 (Б-52…Б-87): модели новых разделов лежат в apps/main/tz26/*/models.py
 from apps.main.tz26.models import *  # noqa: E402,F401,F403
+
+
+# ==========================
+# ТЗ 29.10 Б-98: отметки тестировщиков мобилки
+# ==========================
+class AppTestCheck(models.Model):
+    """Отметка «проверено/проблема» по пункту чек-листа на устройстве. Ключ (company, version, item_id, device_id)."""
+
+    STATUS_CHOICES = (("ok", "Проверено"), ("issue", "Проблема"))
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="app_test_checks")
+    version = models.CharField(max_length=32)
+    item_id = models.CharField(max_length=128)
+    device_id = models.CharField(max_length=8)
+    name = models.CharField(max_length=128, blank=True, default="")
+    status = models.CharField(max_length=8, choices=STATUS_CHOICES)
+    comment = models.TextField(blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["company", "version", "item_id", "device_id"], name="uniq_app_test_check"),
+        ]
+        indexes = [models.Index(fields=["company", "version"])]
+
+
+# ==========================
+# ТЗ 29.10 Б-100: инвесторы и выплаты
+# ==========================
+class Investor(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="investors")
+    name = models.CharField(max_length=255)
+    phone = models.CharField(max_length=32, blank=True, default="")
+    amount = models.DecimalField(max_digits=14, decimal_places=2, default=0, verbose_name="Вложение")
+    date = models.DateField(null=True, blank=True, verbose_name="Дата вложения")
+    terms = models.JSONField(default=dict, blank=True, verbose_name="Условия (например {\"percent\": 20})")
+    version = models.PositiveIntegerField(default=1)
+    effective_from = models.DateField(null=True, blank=True, verbose_name="Действует с")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("name", "created_at")
+
+
+class InvestorPayout(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="investor_payouts")
+    investor = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="payouts")
+    month = models.DateField(verbose_name="Месяц (первое число)")
+    accrued = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    paid = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    paid_date = models.DateField(null=True, blank=True)
+    marked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-month", "-created_at")
+        indexes = [models.Index(fields=["company", "month"])]

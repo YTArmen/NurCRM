@@ -130,6 +130,10 @@ class PublicProductSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+        # ТЗ 29.10 Ф-3: ключи category/category_title всегда есть (нет категории -> null и "").
+        if "category" in self.fields:
+            data["category"] = data.get("category") or None
+            data["category_title"] = data.get("category_title") or ""
         from apps.main.tz26.hw_catalog.services import extend_public  # ТЗ 26.10 Б-57/59: attributes, related
         return extend_public(self, instance, data, with_related=not isinstance(self, PublicProductListSerializer))
 
