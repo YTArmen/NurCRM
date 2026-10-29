@@ -8463,3 +8463,28 @@ from apps.main.telegram_bot.models import (
 
 # ТЗ 26.10 (Б-52…Б-87): модели новых разделов лежат в apps/main/tz26/*/models.py
 from apps.main.tz26.models import *  # noqa: E402,F401,F403
+
+
+# ==========================
+# ТЗ 29.10 Б-98: отметки тестировщиков мобилки
+# ==========================
+class AppTestCheck(models.Model):
+    """Отметка «проверено/проблема» по пункту чек-листа на устройстве. Ключ (company, version, item_id, device_id)."""
+
+    STATUS_CHOICES = (("ok", "Проверено"), ("issue", "Проблема"))
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="app_test_checks")
+    version = models.CharField(max_length=32)
+    item_id = models.CharField(max_length=128)
+    device_id = models.CharField(max_length=8)
+    name = models.CharField(max_length=128, blank=True, default="")
+    status = models.CharField(max_length=8, choices=STATUS_CHOICES)
+    comment = models.TextField(blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["company", "version", "item_id", "device_id"], name="uniq_app_test_check"),
+        ]
+        indexes = [models.Index(fields=["company", "version"])]

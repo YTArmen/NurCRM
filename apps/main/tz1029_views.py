@@ -61,3 +61,75 @@ class GlobalProductExportView(APIView):
             "next": pager.get_next_link(),
             "results": results,
         })
+
+
+# ----------------------------------------------------------------------
+# Б-98. main/app-tests/checks/
+# ----------------------------------------------------------------------
+import re
+
+from .models import AppTestCheck
+
+_DEVICE_RE = re.compile(r"^[A-Za-z0-9]{8}$")
+
+
+class AppTestChecksView(APIView):
+    """ТЗ 29.10 Б-98. POST — поставить/снять отметку, GET ?version= — сводка. Любой сотрудник компании."""
+
+    permission_classes = [IsAuthenticated]
+
+    def _company(self, request):
+        c = company_of(request.user)
+        if c is None:
+            raise ValidationError({"detail": "Пользователь не привязан к компании."})
+        return c
+
+    def get(self, request):
+        company = self._company(request)
+        version = (request.query_params.get("version") or "").strip()
+        if not version:
+            raise ValidationError({"version": "Укажите version."})
+        out = {}
+        for c in AppTestCheck.objects.filter(company=company, version=version).order_by("item_id", "updated_at"):
+            row = out.setdefault(c.item_id, {"ok_count": 0, "issue_count": 0, "devices": []})
+            row["ok_count" if c.status == "ok" else "issue_count"] += 1
+            row["devices"].append({
+                "device_id": c.device_id, "name": c.name, "status": c.status,
+                "ts": c.updated_at.isoformat(), "comment": c.comment,
+            })
+        return Response(out)
+
+    def post(self, request):
+        company = self._company(request)
+        d = request.data
+        version = str(d.get("version") or "").strip()
+        item_id = str(d.get("item_id") or "").strip()
+        device_id = str(d.get("device_id") or "").strip()
+        status_ = str(d.get("status") or "").strip()
+        errors = {}
+        if not version or len(version) > 32:
+            errors["version"] = "Обязательное поле, до 32 символов."
+        if not item_id or len(item_id) > 128:
+            errors["item_id"] = "Обязательное поле, до 128 символов."
+        if not _DEVICE_RE.match(device_id):
+            errors["device_id"] = "Ровно 8 символов (латиница и цифры)."
+        if status_ not in ("ok", "issue", "none"):
+            errors["status"] = "Допустимо: ok, issue, none."
+        if errors:
+            raise ValidationError(errors)
+        key = dict(company=company, version=version, item_id=item_id, device_id=device_id)
+        if status_ == "none":
+            AppTestCheck.objects.filter(**key).delete()
+            return Response({"item_id": item_id, "device_id": device_id, "status": "none"})
+        obj, _ = AppTestCheck.objects.update_or_create(
+            **key,
+            defaults={
+                "status": status_,
+                "comment": str(d.get("comment") or "")[:2000],
+                "name": str(d.get("name") or "")[:128],
+            },
+        )
+        return Response({
+            "item_id": item_id, "device_id": device_id, "status": obj.status,
+            "ts": obj.updated_at.isoformat(), "comment": obj.comment,
+        })

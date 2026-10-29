@@ -3,7 +3,7 @@ from django.urls import path, include
 from apps.main.mass_incoming_views import ProductMassIncomingAPIView
 from .views import *
 from .purchase_orders import PurchaseOrderListCreateAPIView, PurchaseOrderDetailAPIView
-from .tz1029_views import GlobalProductExportView
+from .tz1029_views import AppTestChecksView, GlobalProductExportView
 from .price_check import ProductCatalogVersionView, ProductPriceCheckView
 from .change_views import ChangesFeedView  # ТЗ Н-31
 from core.capabilities import CapabilitiesAPIView, ClientVersionsReportAPIView  # единое ТЗ Б-01
@@ -672,6 +672,7 @@ urlpatterns = [
     path("voice/calls/", VoiceCallAPIView.as_view(), name="voice-calls"),
     path("bot/notify-owner/", BotNotifyOwnerView.as_view(), name="bot-notify-owner"),  # ТЗ Н-23
     path("global-products/export/", GlobalProductExportView.as_view(), name="global-products-export"),  # ТЗ 29.10 Б-97
+    path("app-tests/checks/", AppTestChecksView.as_view(), name="app-tests-checks"),  # ТЗ 29.10 Б-98
     path("telegram-bot/", include("apps.main.telegram_bot.urls")),
     path("telegram/", include("apps.main.telegram_bot.urls")),
 ]
