@@ -336,6 +336,7 @@ class ShowcaseOrderSerializer(serializers.ModelSerializer):
             "comment",
             "total",
             "source",
+            "telegram_chat_id",
             "sale",
             "stock_reserved",
             "pickup_code",  # ТЗ Н-33
@@ -343,7 +344,7 @@ class ShowcaseOrderSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "number", "total", "sale", "stock_reserved", "created_at", "updated_at"]
+        read_only_fields = ["id", "number", "total", "sale", "stock_reserved", "telegram_chat_id", "created_at", "updated_at"]
         extra_kwargs = {"pickup_code": {"required": False}}
 
     def validate_pickup_code(self, value):
@@ -384,7 +385,10 @@ class ShowcaseOrderCreateSerializer(serializers.Serializer):
     )
     delivery = ShowcaseOrderDeliverySerializer(required=False, default=dict)
     comment = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
-    source = serializers.CharField(required=False, default="showcase", allow_blank=True, max_length=32)
+    # ТЗ Б-22: источник заказа; для telegram_bot — ещё telegram_chat_id
+    source = serializers.ChoiceField(
+        choices=["showcase", "telegram_bot", "voice_ai", "whatsapp"], required=False, default="showcase", allow_blank=True)
+    telegram_chat_id = serializers.RegexField(r"^-?\d{1,20}$", required=False, allow_blank=True, default="")
 
 
 class ShowcaseStockRequestSerializer(serializers.ModelSerializer):

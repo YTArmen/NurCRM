@@ -76,6 +76,8 @@ class PublicN26Tests(TestCase):
         ProductVariant.objects.filter(pk=self.v48w.pk).update(sort_order=-1)
         d = self.get(f"{self.nike.id}/")
         self.assertEqual(d["variants"][0]["size"], "48")
+        # ТЗ витрины одежды 26.10: sizes тоже по sort_order
+        self.assertEqual(d["sizes"], ["48", "M", "44", "46"])
 
     def test_list_fields(self):
         rows = {r["name"]: r for r in self.get()["results"]}

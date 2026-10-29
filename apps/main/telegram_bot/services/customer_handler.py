@@ -543,6 +543,7 @@ def create_order_from_ai_json(company, settings, order_data: dict, chat_id: str)
                 customer_phone=phone,
                 delivery_type=ShowcaseOrder.DeliveryType.PICKUP,
                 source="telegram",
+                telegram_chat_id=str(chat_id),
                 comment=f"[Telegram-бот chat_id={chat_id}] {comment}".strip(),
                 total=total_amount,
             )
@@ -574,23 +575,12 @@ def create_order_from_ai_json(company, settings, order_data: dict, chat_id: str)
             telegram_api.send_message(settings.token, settings.owner_chat_id, alert)
         return None, "Не удалось оформить заказ автоматически. Менеджер свяжется с вами в ближайшее время."
 
-    # 3. Оповещение владельца: «Джинсы мужские — 32, синий × 1»
-    if settings.owner_chat_id:
-        items_summary = "\n".join(
-            f"  • {html.escape(d['product_name'])} × {format_qty(d['qty'])} = {d['total']} сом"
-            for d in items_to_create
-        )
-        owner_msg = (
-            f"🛒 <b>Новый заказ из бота №{order.number}!</b>\n"
-            f"👤 Покупатель: {html.escape(name)} ({html.escape(phone)})\n"
-            f"💰 Сумма: <b>{order.total} сом</b>\n"
-            f"📦 Товары:\n{items_summary}\n"
-            f"📍 Тип: Самовывоз"
-        )
-        try:
-            telegram_api.send_message(settings.token, settings.owner_chat_id, owner_msg, parse_mode="HTML")
-        except Exception as exc:
-            logger.warning("Owner order notification failed: %s", exc)
+    # 3. Оповещение владельца / группы заказов (ТЗ Б-22)
+    try:
+        from apps.main.telegram_bot.services import order_notify
+        order_notify.notify_new_order(order.id)
+    except Exception as exc:
+        logger.warning("Order notification failed: %s", exc)
 
     reply_for_customer = (
         f"✅ <b>Ваш заказ №{order.number} успешно оформлен!</b>\n"

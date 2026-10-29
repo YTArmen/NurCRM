@@ -7864,6 +7864,8 @@ class ShowcaseOrder(models.Model):
     delivery_fee = models.DecimalField("Стоимость доставки", max_digits=14, decimal_places=2, default=Decimal("0.00"))
     source = models.CharField("Источник", max_length=32, default="showcase", blank=True, db_index=True)
     idempotency_key = models.CharField(max_length=128, null=True, blank=True, db_index=True)
+    # ТЗ Б-22: для source=telegram_bot — чат покупателя в Telegram
+    telegram_chat_id = models.CharField("Telegram chat id покупателя", max_length=64, blank=True, default="", db_default="")
     # Остаток зарезервирован (списан) при создании заказа; снимается при отмене
     # или при выдаче через кассу (sale), т.к. продажа на кассе списывает сама.
     stock_reserved = models.BooleanField("Остаток зарезервирован", default=False)

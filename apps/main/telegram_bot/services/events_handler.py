@@ -158,11 +158,8 @@ def handle_internal_event(company_id, event: str, data: dict) -> None:
         elif event == "stock.low":
             send_low_stock_notification(company_id, data)
 
-        elif event == "order.created":
-            # Если заказ создан из Telegram, он уже уведомил владельца при создании.
-            # Для остальных заказов витрины отправляем уведомление владельцу:
-            if not str(data.get("comment") or "").startswith("[Telegram-бот"):
-                send_showcase_order_notification(company_id, data)
+        # order.created: уведомление о заказе витрины шлёт order_notify (ТЗ Б-22) — с кнопками,
+        # флагами суммы/телефона и не больше одного на заказ и чат. Старое сообщение здесь давало дубль.
 
     except Exception as exc:
         logger.error("handle_internal_event failed for %s (%s): %s", event, company_id, exc)

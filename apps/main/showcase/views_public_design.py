@@ -24,6 +24,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.integrations.events import emit_event
+from core.api_compat import is_strict
 from apps.main.models import (
     Product,
     ProductCategory,
@@ -313,10 +314,10 @@ def _rate_limited(key: str, limit: int, window: int) -> bool:
 
 
 def _order_rate() -> tuple:
-    return tuple(getattr(settings, "SHOWCASE_ORDER_RATE", (10, 600)))
+    return tuple(getattr(settings, "SHOWCASE_ORDER_RATE", (10, 3600)))  # Б-34: 10 заказов в час с одного IP / номера
 
 
-def _price_lines(company, items_input, catalog: svc.PublicCatalog):
+def _price_lines(company, items_input, catalog: svc.PublicCatalog, strict: bool = True):
     """Позиции заказа/корзины с ценой и акцией как в кассе."""
     product_ids = [str(item["product"]) for item in items_input]
     products = {
@@ -353,6 +354,7 @@ def _price_lines(company, items_input, catalog: svc.PublicCatalog):
                     f"items[{idx}].variant", f"Вариант {vid} не найден для товара {prod.name}.",
                     "variant_not_found", extra={"index": idx})
         elif list(prod.variants.all()):
+            # variant_required — для всех клиентов, как было на сервере и до Б-02 (меняем только 409 → 400)
             raise ShowcaseFieldError(
                 f"items[{idx}].variant", f"Выберите размер и цвет для товара «{prod.name}».",
                 "variant_required", extra={"index": idx})
@@ -371,7 +373,8 @@ def _price_lines(company, items_input, catalog: svc.PublicCatalog):
                 raise ShowcaseFieldError(
                     f"items[{idx}].variant",
                     f"Недостаточно остатка «{name_with_variant(prod.name, variant_obj)}»: доступно {have:g}.",
-                    "variant_out_of_stock", status_code=status.HTTP_409_CONFLICT,
+                    "variant_out_of_stock" if strict else "not_enough_stock",
+                    status_code=status.HTTP_409_CONFLICT if strict else status.HTTP_400_BAD_REQUEST,
                     extra={"index": idx, "available": int(have) if have == have.to_integral_value() else str(have)})
         unit_price = variant_prices(variant_obj, prod)[0] if variant_obj is not None else Decimal(str(prod.price or 0))
         name_suffix = ""
@@ -428,8 +431,8 @@ def _whatsapp_url(company, cart: dict, order, lines) -> Optional[str]:
     return f"https://wa.me/{phone}?text={quote(chr(10).join(rows))}"
 
 
-def _order_response(order, whatsapp_url=None) -> dict:
-    return {
+def _order_response(order, whatsapp_url=None, replayed=False) -> dict:
+    data = {
         "id": str(order.id),
         "number": order.number,
         "status": order.status,
@@ -440,6 +443,9 @@ def _order_response(order, whatsapp_url=None) -> dict:
         "whatsapp_url": whatsapp_url,
         "created_at": order.created_at.isoformat(),
     }
+    if replayed:
+        data["replayed"] = True  # Б-34: повтор «Оформить» тем же ключом — тот же заказ
+    return data
 
 
 class PublicCompanyShowcaseCartQuoteAPIView(PublicAPIView):
@@ -452,7 +458,7 @@ class PublicCompanyShowcaseCartQuoteAPIView(PublicAPIView):
         ser.is_valid(raise_exception=True)
         catalog = svc.get_public_catalog(company)
         cart = svc.published_document(company)["cart"]
-        lines, items_total = _price_lines(company, ser.validated_data["items"], catalog)
+        lines, items_total = _price_lines(company, ser.validated_data["items"], catalog, strict=is_strict(request, company))
         dtype = ((request.data.get("delivery") or {}).get("type")) if isinstance(request.data.get("delivery"), dict) else "pickup"
         fee = _delivery_fee(cart, dtype or "pickup", items_total)
         min_total = cart.get("min_order_total")
@@ -483,7 +489,7 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
             existing = ShowcaseOrder.objects.filter(company=company, idempotency_key=idempotency_key).first()
             if existing:
                 lines = [{"product_name": it.product_name, "qty": it.qty, "total": it.total} for it in existing.items.all()]
-                return Response(_order_response(existing, _whatsapp_url(company, cart, existing, lines)), status=status.HTTP_200_OK)
+                return Response(_order_response(existing, _whatsapp_url(company, cart, existing, lines), replayed=True), status=status.HTTP_200_OK)
 
         # Защита от спама: скрытое поле-ловушка + лимит заказов с одного IP / номера.
         if isinstance(request.data, dict) and (request.data.get("website") or request.data.get("hp")):
@@ -525,7 +531,7 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
             raise ShowcaseFieldError("delivery.address", "Укажите адрес доставки.", "required")
 
         catalog = svc.get_public_catalog(company)
-        lines, items_total = _price_lines(company, data["items"], catalog)
+        lines, items_total = _price_lines(company, data["items"], catalog, strict=is_strict(request, company))
         min_total = cart.get("min_order_total")
         if min_total is not None and items_total < Decimal(str(min_total)):
             raise ShowcaseFieldError("items", f"Минимальная сумма заказа — {min_total} сом.", "min_order_total")
@@ -545,6 +551,7 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
                 delivery_type=dtype,
                 delivery_address=address,
                 source=data.get("source") or "showcase",
+                telegram_chat_id=(data.get("telegram_chat_id") or "") if data.get("source") == "telegram_bot" else "",
                 comment=data.get("comment", ""),
                 total=total,
                 delivery_fee=fee,
@@ -563,9 +570,16 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
                 reserve_stock(lines)
             except InsufficientStock as exc:
                 # гонка: остаток разобрали между проверкой и резервом
-                raise ShowcaseFieldError("items", str(exc), "variant_out_of_stock", status_code=status.HTTP_409_CONFLICT)
+                if is_strict(request, company):
+                    raise ShowcaseFieldError("items", str(exc), "variant_out_of_stock", status_code=status.HTTP_409_CONFLICT)
+                raise ShowcaseFieldError("items", str(exc), "not_enough_stock")
             order.stock_reserved = True
             order.save(update_fields=["stock_reserved"])
+
+        # ТЗ Б-22: сообщение владельцу / в группу заказов (после коммита, не больше одного на заказ)
+        from apps.main.telegram_bot.services import order_notify
+
+        order_notify.notify_after_commit(order.id)
 
         whatsapp_url = _whatsapp_url(company, cart, order, lines)
         webhook_data = {

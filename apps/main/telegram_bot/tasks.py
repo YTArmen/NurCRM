@@ -497,3 +497,19 @@ def queue_probe(enqueued_at: float):
     if latency > QUEUE_ALERT_SECONDS:
         _queue_alert(f"⚠ Очередь ботов: задача ждала {latency:.0f} с (порог {QUEUE_ALERT_SECONDS} с).")
     return round(latency, 3)
+
+
+@shared_task(name="apps.main.telegram_bot.tasks.send_order_notification")
+def send_order_notification(order_id: str):
+    """ТЗ Б-22: уведомление о новом заказе витрины."""
+    from apps.main.telegram_bot.services import order_notify
+
+    order_notify.notify_new_order(order_id)
+
+
+@shared_task(name="apps.main.telegram_bot.tasks.retry_order_notification")
+def retry_order_notification(order_id: str, attempt: int):
+    """Повтор после ошибки отправки: через 1, 5, 30 минут."""
+    from apps.main.telegram_bot.services import order_notify
+
+    order_notify.notify_new_order(order_id, attempt=int(attempt))

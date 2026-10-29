@@ -310,9 +310,10 @@ class PublicProductSerializer(serializers.ModelSerializer):
         return rows
 
     def get_sizes(self, obj: Product):
-        vs = self._variants_data(obj)
-        sizes = {v["size"] for v in vs if v["size"]}
-        return sorted(sizes, key=size_sort_key)
+        # ТЗ витрины одежды 26.10: размеры по sort_order (варианты уже отсортированы variant_sort_key:
+        # ручной sort_order, затем порядок размеров); без sort_order — size_sort_key.
+        seen = dict.fromkeys(v["size"] for v in self._variants_data(obj) if v["size"])
+        return list(seen)
 
     def get_has_variants(self, obj: Product) -> bool:
         return bool(self._variants_data(obj))

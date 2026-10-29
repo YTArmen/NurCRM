@@ -1,8 +1,9 @@
 """
 Совместимость со старыми кассами (единое ТЗ бэкенду 26.10.2026, Б-01 и Б-02).
 
-Касса и мобилка шлют `X-NurMarket-Client: kassa|owner|mobile/<версия>`. «Новый» клиент —
-kassa/owner ≥ 1.17.61, mobile ≥ 1.18.5. Запрос без заголовка (старая касса, сайт) — «старый».
+Касса и мобилка шлют `X-NurMarket-Client: kassa|owner|mobile/<версия>`, новый сайт витрины — `site/<версия>`.
+«Новый» клиент — kassa/owner ≥ 1.17.61, mobile ≥ 1.18.5, site ≥ 1.0. Запрос без заголовка (старая касса,
+старый сайт market.nurcrm.kg) — «старый».
 
 Меняющее поведение (шаг 3 ТЗ) включается так:
 
@@ -24,8 +25,8 @@ STRICT_FLAG = "api_strict_2026_10"
 HARDWARE_FLAG = "hardware_2026_11"
 COMPANY_FLAGS = (STRICT_FLAG, HARDWARE_FLAG)
 
-MIN_NEW = {"kassa": (1, 17, 61), "owner": (1, 17, 61), "mobile": (1, 18, 5)}
-_CLIENT_RE = re.compile(r"^\s*(kassa|owner|mobile)/(\d+(?:\.\d+){0,3})\b", re.I)
+MIN_NEW = {"kassa": (1, 17, 61), "owner": (1, 17, 61), "mobile": (1, 18, 5), "site": (1, 0, 0)}
+_CLIENT_RE = re.compile(r"^\s*(kassa|owner|mobile|site)/(\d+(?:\.\d+){0,3})\b", re.I)
 
 
 def parse_client(request):

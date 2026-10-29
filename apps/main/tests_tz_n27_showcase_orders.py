@@ -48,8 +48,11 @@ class N27Base(TestCase):
             d["variant"] = str(variant.id)
         return d
 
-    def order(self, body, key=None):
+    def order(self, body, key=None, strict=True):
+        # Б-02: 409/variant_required — для нового клиента; без заголовка (старая касса, сайт) — 400 not_enough_stock
         kw = {"HTTP_IDEMPOTENCY_KEY": key} if key else {}
+        if strict:
+            kw["HTTP_X_NURMARKET_CLIENT"] = "mobile/1.18.5"
         return self.pub.post(PUB + "orders/", body, format="json", secure=True, **kw)
 
 
@@ -58,6 +61,33 @@ class OrderValidationTests(N27Base):
         r = self.order(self.body(self.item(self.nike, self.v46), self.item(self.nike)))
         self.assertEqual(r.status_code, 400, r.content)
         self.assertEqual((r.json()["code"], r.json()["index"]), ("variant_required", 1))
+
+    def test_old_client_gets_not_enough_stock(self):
+        # без размера — variant_required и у старого клиента (так было до Б-02)
+        r = self.order(self.body(self.item(self.nike)), strict=False)
+        self.assertEqual((r.status_code, r.json()["code"]), (400, "variant_required"))
+        r = self.order(self.body(self.item(self.nike, self.v46, "5")), strict=False)
+        self.assertEqual((r.status_code, r.json()["code"]), (400, "not_enough_stock"))
+        # флаг компании включает новое поведение и для сайта без заголовка
+        from apps.users.models import CompanyAddon
+        CompanyAddon.objects.create(company=self.company, code="api_strict_2026_10", active=True)
+        r = self.order(self.body(self.item(self.nike, self.v46, "5")), strict=False)
+        self.assertEqual((r.status_code, r.json()["code"]), (409, "variant_out_of_stock"))
+
+    def test_site_client_is_strict(self):
+        # новый сайт витрины (front-market) шлёт X-NurMarket-Client: site/<версия> — строгие ошибки без флага компании
+        r = self.pub.post(PUB + "orders/", self.body(self.item(self.nike, self.v46, "5")), format="json", secure=True, HTTP_X_NURMARKET_CLIENT="site/1.0")
+        self.assertEqual((r.status_code, r.json()["code"]), (409, "variant_out_of_stock"))
+        r = self.pub.post(PUB + "orders/", self.body(self.item(self.nike)), format="json", secure=True, HTTP_X_NURMARKET_CLIENT="site/1.0")
+        self.assertEqual((r.status_code, r.json()["code"]), (400, "variant_required"))
+
+    def test_rate_limit_10_per_hour_per_ip(self):
+        # товар без вариантов с запасом на все 11 заказов: проверяем только лимит
+        plain = Product.objects.create(company=self.company, name="Носки", price=Decimal("100"), quantity=Decimal("50"))
+        for i in range(10):
+            r = self.order(self.body(self.item(plain)))
+            self.assertEqual(r.status_code, 201, (i, r.content))
+        self.assertEqual(self.order(self.body(self.item(plain))).status_code, 429)
 
     def test_variant_mismatch(self):
         r = self.order(self.body(self.item(self.nike, self.va)))
@@ -75,9 +105,10 @@ class OrderValidationTests(N27Base):
 
     def test_quote_same_rules_and_variant_prices(self):
         url = PUB + "showcase/cart/quote/"
-        r = self.pub.post(url, {"items": [self.item(self.nike)]}, format="json", secure=True)
+        h = {"HTTP_X_NURMARKET_CLIENT": "mobile/1.18.5"}
+        r = self.pub.post(url, {"items": [self.item(self.nike)]}, format="json", secure=True, **h)
         self.assertEqual((r.status_code, r.json()["code"]), (400, "variant_required"))
-        r = self.pub.post(url, {"items": [self.item(self.nike, self.v46, "9")]}, format="json", secure=True)
+        r = self.pub.post(url, {"items": [self.item(self.nike, self.v46, "9")]}, format="json", secure=True, **h)
         self.assertEqual((r.status_code, r.json()["code"]), (409, "variant_out_of_stock"))
         r = self.pub.post(url, {"items": [self.item(self.nike, self.v48)]}, format="json", secure=True)
         self.assertEqual(r.status_code, 200, r.content)
@@ -91,6 +122,8 @@ class OrderReserveTests(N27Base):
         self.assertEqual(r1.status_code, 201, r1.content)
         r2 = self.order(body, key="k1")
         self.assertEqual(r2.status_code, 200)
+        self.assertTrue(r2.json().get("replayed"))
+        self.assertNotIn("replayed", r1.json())
         self.assertEqual(r1.json()["id"], r2.json()["id"])
         self.assertEqual(ShowcaseOrder.objects.count(), 1)
         for v in (self.v46, self.v48, self.v0):

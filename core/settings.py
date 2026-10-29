@@ -581,6 +581,7 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     'x-requested-with',
     'x-pos-device',
     'idempotency-key',
+    'x-nurmarket-client',  # Б-01: сайт витрины шлёт site/<версия> (заказ с вариантом, Б-34)
     'sentry-trace',
     'baggage',
     'cache-control',

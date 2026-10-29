@@ -36,6 +36,22 @@ class TelegramBotSettings(models.Model):
     # ТЗ Н-23 (2): владелец определяется по from.id Telegram, общий для всех касс компании
     owner_user_id = models.CharField("Telegram from.id владельца", max_length=64, blank=True, default="", db_default="")
 
+    # ТЗ Б-31/Б-22: «группа заказов» — куда слать уведомления о новых заказах
+    class OrdersRecipients(models.TextChoices):
+        OWNER = "owner", "Владельцу"
+        GROUP = "group", "В группу"
+        BOTH = "both", "Владельцу и в группу"
+
+    orders_chat_id = models.CharField("Chat ID группы заказов", max_length=64, blank=True, null=True, db_index=True)
+    orders_chat_title = models.CharField("Название группы заказов", max_length=255, blank=True, default="")
+    orders_chat_bound_at = models.DateTimeField("Группа заказов привязана", blank=True, null=True)
+    orders_recipients = models.CharField(
+        "Кому слать заказы", max_length=8, choices=OrdersRecipients.choices, default=OrdersRecipients.OWNER,
+    )
+    orders_show_amount = models.BooleanField("Показывать сумму заказа в Telegram", default=False)
+    orders_show_phone = models.BooleanField("Показывать телефон покупателя в Telegram", default=True)
+    orders_last_error = models.CharField("Последняя ошибка отправки заказа", max_length=255, blank=True, default="")
+
     shift_summary_enabled = models.BooleanField("Сводка при закрытии смены", default=True)
     commands_enabled = models.BooleanField("Команды владельца включены", default=True)
     ai_enabled = models.BooleanField("ИИ включён", default=True)
@@ -314,6 +330,7 @@ class TelegramBotAudit(models.Model):
         SCENARIO_UPDATE = "scenario_update", "Обновление сценария"
         SCENARIO_DELETE = "scenario_delete", "Удаление сценария"
         AI_ADVICE_APPLY = "ai_advice_apply", "Применение совета ИИ"
+        ORDER_NOTIFIED = "order_notified", "Уведомление о заказе"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(
@@ -417,3 +434,19 @@ class VoiceCall(models.Model):
                 condition=models.Q(idempotency_key__isnull=False),
             ),
         ]
+# ТЗ Б-22: журнал уведомлений о заказах витрины (не больше одного на заказ и чат)
+class TelegramOrderNotice(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="telegram_order_notices")
+    order = models.ForeignKey("main.ShowcaseOrder", on_delete=models.CASCADE, related_name="telegram_notices")
+    chat_id = models.CharField(max_length=64)
+    ok = models.BooleanField(default=False)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    gave_up = models.BooleanField("Не доставлено (повторы закончились)", default=False)
+    error = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "telegram_order_notices"
+        constraints = [models.UniqueConstraint(fields=["order", "chat_id"], name="uniq_tg_order_notice")]
