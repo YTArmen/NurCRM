@@ -559,6 +559,22 @@ class User(AbstractBaseUser, PermissionsMixin):
     avatar = models.URLField(blank=True, null=True, verbose_name="Аватар (URL)")
     phone_number = models.CharField(max_length=64, verbose_name="Номер телефона", blank=True, null=True)
     track_number = models.CharField(max_length=64, verbose_name="Номер машины", blank=True, null=True)
+    # ТЗ 29.10 Б-101: карточка сотрудника (все поля необязательные)
+    hired_at = models.DateField(null=True, blank=True, verbose_name="Принят")
+    fired_at = models.DateField(null=True, blank=True, verbose_name="Уволен")
+    birth_date = models.DateField(null=True, blank=True, verbose_name="Дата рождения")
+    address = models.CharField(max_length=255, null=True, blank=True, verbose_name="Адрес")
+    emergency_contact = models.CharField(max_length=255, null=True, blank=True, verbose_name="Контакт на случай ЧС")
+    comment = models.CharField(max_length=500, null=True, blank=True, verbose_name="Комментарий")
+    language = models.CharField(
+        max_length=2, null=True, blank=True,
+        choices=[("ru", "ru"), ("ky", "ky"), ("en", "en"), ("tr", "tr"), ("uz", "uz")],
+        verbose_name="Язык интерфейса",
+    )
+    default_cashbox = models.ForeignKey(
+        "construction.Cashbox", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+", verbose_name="Касса по умолчанию",
+    )
 
     company = models.ForeignKey(
         "Company",

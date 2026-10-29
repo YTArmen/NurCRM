@@ -146,6 +146,16 @@ def employee_limit_error(company) -> Optional[str]:
     return f"По тарифу можно не больше {limit} сотрудников вместе с владельцем. Чтобы добавить ещё, смените тариф или обратитесь в поддержку."
 
 
+def employee_limit_reached_body(company, detail=None) -> Dict[str, Any]:
+    """ТЗ 29.10 Б-101: тело 403 employee_limit_reached {limit, current}."""
+    return {
+        "detail": detail or employee_limit_error(company) or "Лимит сотрудников по тарифу исчерпан.",
+        "code": "employee_limit_reached",
+        "limit": employee_limit(company),
+        "current": company.employees.filter(is_active=True).count(),
+    }
+
+
 def get_company_limits(company, plan_code: Optional[str] = None) -> Dict[str, Any]:
     try:
         emp_used = company.employees.filter(is_active=True).count()
