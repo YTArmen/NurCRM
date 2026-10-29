@@ -116,7 +116,8 @@ class StartupPaybackAPIView(APIView):
             by_month.append({"month": m.strftime("%Y-%m"), "net": str(_q(net)), "cumulative": str(_q(cum))})
         invested = _q(invested)
         returned = _q(cum)
-        remaining = _q(max(invested - returned, Decimal("0")))
+        # Вложений нет — возвращать нечего (убыток месяцев не превращается в «осталось вернуть»).
+        remaining = _q(max(invested - returned, Decimal("0"))) if invested > 0 else Decimal("0.00")
         percent = float((returned / invested * 100).quantize(Decimal("0.01"))) if invested > 0 else 0.0
         # Прогноз: среднее за последние 3 полных месяца (текущий неполный не берём).
         cur = date(today.year, today.month, 1)
@@ -126,7 +127,7 @@ class StartupPaybackAPIView(APIView):
         forecast = None
         if remaining == 0 and invested > 0:
             months_to, forecast = 0.0, today.isoformat()
-        elif avg > 0:
+        elif avg > 0 and invested > 0:
             months_to = float((remaining / avg).quantize(Decimal("0.1")))
             forecast = (today + timedelta(days=round(months_to * 30.44))).isoformat()
         return Response({
