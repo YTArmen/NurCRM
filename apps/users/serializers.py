@@ -293,6 +293,55 @@ def _get_user_consulting_regions(user):
         return []
 
 
+# ТЗ 29.10 Б-101: новые поля карточки сотрудника
+EMPLOYEE_CARD_FIELDS = [
+    "is_active", "hired_at", "fired_at", "birth_date", "address", "emergency_contact",
+    "comment", "language", "default_cashbox",
+]
+
+
+def _check_phone_digits(value, current=None):
+    """Телефон: 7–15 цифр (допустимы +, пробелы, скобки, дефисы). Пустая строка очищает поле.
+    Проверяется только новое значение: у существующих сотрудников плохие телефоны не ломаем."""
+    if value is None:
+        return None
+    value = str(value).strip()
+    if value == "":
+        return None
+    if current is not None and value == str(current).strip():
+        return value
+    digits = re.sub(r"[\s()+\-.]", "", value)
+    if not digits.isdigit() or not 7 <= len(digits) <= 15:
+        raise serializers.ValidationError("Телефон: от 7 до 15 цифр.", code="phone_invalid")
+    return value
+
+
+class EmployeeFieldsMixin:
+    """Общая валидация полей сотрудника (создание и PATCH)."""
+
+    def validate_phone_number(self, value):
+        inst = getattr(self, "instance", None)
+        return _check_phone_digits(value, getattr(inst, "phone_number", None))
+
+    def validate_track_number(self, value):
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value or None
+
+    def validate_default_cashbox(self, value):
+        if value is None:
+            return None
+        inst = getattr(self, "instance", None)
+        company = getattr(inst, "company", None)
+        if company is None:
+            u = self.context["request"].user
+            company = getattr(u, "owned_company", None) or getattr(u, "company", None)
+        if company is None or value.company_id != company.id:
+            raise serializers.ValidationError("Касса не найдена в вашей компании.", code="cashbox_not_found")
+        return value
+
+
 class UserSerializer(serializers.ModelSerializer):
     can_view_showcase = serializers.SerializerMethodField()
 
@@ -402,8 +451,14 @@ class UserSerializer(serializers.ModelSerializer):
 
             "branch_ids", "primary_branch_id",
             "created_at", "updated_at",
+            *EMPLOYEE_CARD_FIELDS,  # ТЗ 29.10 Б-101
         ]
-        read_only_fields = ["id", "created_at", "updated_at", "company", "is_platform_admin"]
+        read_only_fields = [
+            "id", "created_at", "updated_at", "company", "is_platform_admin",
+            # в профиле сам сотрудник меняет только язык; остальное — карточка от владельца
+            "is_active", "hired_at", "fired_at", "birth_date", "address", "emergency_contact",
+            "comment", "default_cashbox",
+        ]
 
     def validate_email(self, value):
         value = (value or "").strip().lower()
@@ -565,7 +620,7 @@ class OwnerRegisterSerializer(serializers.ModelSerializer):
 # Employee create
 # ======================
 
-class EmployeeCreateSerializer(serializers.ModelSerializer):
+class EmployeeCreateSerializer(EmployeeFieldsMixin, serializers.ModelSerializer):
     email = serializers.EmailField(required=True)
     role_display = serializers.CharField(read_only=True)
 
@@ -596,12 +651,15 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
             "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend",
 
             "primary_branch", "branches",
+            *EMPLOYEE_CARD_FIELDS,  # ТЗ 29.10 Б-101
         ]
+        read_only_fields = ["is_active", "fired_at"]
 
     def validate_email(self, value):
         value = (value or "").strip().lower()
-        if User.objects.filter(email=value, is_active=True).exists():
-            raise serializers.ValidationError("Этот email уже используется.")
+        # ТЗ 29.10 Б-101: email уникален; уволенные (is_active=False) сохраняют email, поэтому проверяем всех
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("Этот email уже используется.", code="email_taken")
         return value
 
     def validate(self, data):
@@ -674,6 +732,11 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
             Company.objects.select_for_update().filter(pk=company.pk).first()
             limit_error = employee_limit_error(company)
             if limit_error:
+                # ТЗ 29.10 Б-101: новое поведение — 403 employee_limit_reached {limit, current}
+                from core.api_compat import is_strict
+                if is_strict(request, company):
+                    from apps.users.services_subscription import employee_limit_reached_body
+                    raise ConflictError(employee_limit_reached_body(company, limit_error), 403)
                 raise serializers.ValidationError({"detail": limit_error, "code": "employee_limit"})
 
         primary_branch_id = validated_data.pop("primary_branch", None)
@@ -704,6 +767,9 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
             consulting_region_codes=consulting_region_codes,
             company=company,
             is_active=True,
+            **{k: validated_data.get(k) for k in (
+                "hired_at", "birth_date", "address", "emergency_contact", "comment", "language", "default_cashbox",
+            )},
         )
         user.set_password(generated_password)
 
@@ -800,6 +866,39 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
 # Employee update
 # ======================
 
+class ConflictError(APIException):
+    """Ошибка с произвольным статусом и телом {detail, code, ...} (409 last_admin / open_shift)."""
+    status_code = 409
+
+    def __init__(self, body, status_code=409):
+        self.status_code = status_code
+        super().__init__(detail=body)
+        self.detail = body  # числа (limit/current) остаются числами, не строками
+
+
+def _check_dismissal_allowed(request, target_user):
+    """ТЗ 29.10 Б-101: 409 last_admin (последний владелец/админ) и open_shift (открытая смена).
+    Только для нового клиента / strict-компании; старые кассы ведут себя как раньше
+    (открытые смены закрываются автоматически)."""
+    from core.api_compat import is_strict
+
+    if not is_strict(request, target_user.company):
+        return
+    if target_user.role in ("owner", "admin"):
+        others = User.objects.filter(
+            company=target_user.company, is_active=True, deleted_at__isnull=True, role__in=("owner", "admin"),
+        ).exclude(pk=target_user.pk).exists()
+        if not others:
+            raise ConflictError({"detail": "Нельзя убрать последнего администратора компании.", "code": "last_admin"})
+    from apps.construction.models import CashShift
+    shift = CashShift.objects.filter(cashier_id=target_user.pk, status=CashShift.Status.OPEN).first()
+    if shift:
+        raise ConflictError({
+            "detail": "У сотрудника открыта смена. Сначала закройте её.", "code": "open_shift",
+            "shift": str(shift.pk),
+        })
+
+
 class FunnelGrantSerializer(serializers.Serializer):
     """Доступ сотрудника к воронке consalting: {funnel_id, can_manage_leads, can_manage_stages}."""
     funnel_id = serializers.UUIDField()
@@ -807,7 +906,7 @@ class FunnelGrantSerializer(serializers.Serializer):
     can_manage_stages = serializers.BooleanField(required=False, default=False)
 
 
-class EmployeeUpdateSerializer(serializers.ModelSerializer):
+class EmployeeUpdateSerializer(EmployeeFieldsMixin, serializers.ModelSerializer):
     role_display = serializers.CharField(read_only=True)
     branch_ids = serializers.ListField(
         child=serializers.UUIDField(),
@@ -839,6 +938,7 @@ class EmployeeUpdateSerializer(serializers.ModelSerializer):
             *READ_ONLY_FIELDS,
             "funnel_grants",
             "branch_ids",
+            *EMPLOYEE_CARD_FIELDS,  # ТЗ 29.10 Б-101
         ]
         read_only_fields = ["id"]
 
@@ -878,6 +978,24 @@ class EmployeeUpdateSerializer(serializers.ModelSerializer):
             company = target_user.company
             _validate_branch_ids_for_company(branch_ids, company)
 
+        # ТЗ 29.10 Б-101: мягкое увольнение / возврат сотрудника через is_active
+        if "is_active" in data and data["is_active"] != target_user.is_active:
+            if getattr(current_user, "role", None) == "supervisor":
+                raise ConflictError(
+                    {"detail": "Руководитель региона не может увольнять сотрудников.", "code": "permission_denied",
+                     "required": "can_edit_employees"}, 403)
+            if data["is_active"] is False:
+                if getattr(target_user, "role", None) == "owner" and not getattr(current_user, "is_superuser", False):
+                    raise serializers.ValidationError({"is_active": "Нельзя уволить владельца компании."})
+                _check_dismissal_allowed(request, target_user)
+            else:
+                from apps.users.services_subscription import employee_limit_error, employee_limit_reached_body
+                limit_error = employee_limit_error(target_user.company)
+                if limit_error:
+                    raise ConflictError(employee_limit_reached_body(target_user.company, limit_error), 403)
+                if getattr(target_user, "deleted_at", None):
+                    raise serializers.ValidationError({"is_active": "Удалённого сотрудника вернуть нельзя."})
+
         return data
 
     @transaction.atomic
@@ -885,6 +1003,14 @@ class EmployeeUpdateSerializer(serializers.ModelSerializer):
         branch_ids = validated_data.pop("branch_ids", None)
         funnel_grants = validated_data.pop("funnel_grants", None)
         consulting_region_codes = validated_data.pop("consulting_region_codes", None)
+
+        # ТЗ 29.10 Б-101: уволили — ставим дату увольнения и закрываем открытые смены; вернули — снимаем дату
+        if "is_active" in validated_data and validated_data["is_active"] != instance.is_active:
+            if validated_data["is_active"] is False:
+                instance._close_open_cash_shifts(by_user=self.context["request"].user)
+                validated_data.setdefault("fired_at", timezone.localdate())
+            else:
+                validated_data.setdefault("fired_at", None)
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
@@ -960,6 +1086,7 @@ class UserListSerializer(serializers.ModelSerializer):
             "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend",
             *READ_ONLY_FIELDS,
             "branch_ids", "primary_branch_id",
+            *EMPLOYEE_CARD_FIELDS,  # ТЗ 29.10 Б-101
         ]
 
     def to_representation(self, instance):

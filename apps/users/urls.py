@@ -7,6 +7,7 @@ from .views import (
     CustomTokenObtainPairView,
     CustomTokenRefreshView,
     EmployeeListAPIView,
+    EmployeeLiteAPIView,
     EmployeeCreateAPIView,
     CurrentUserAPIView,
     IndustryListAPIView,
@@ -82,6 +83,7 @@ urlpatterns = [
 
     # 👥 Работа с сотрудниками
     path('employees/', EmployeeListAPIView.as_view(), name='employee-list'),
+    path('employees/lite/', EmployeeLiteAPIView.as_view(), name='employee-lite'),
     path('employees/create/', EmployeeCreateAPIView.as_view(), name='employee-create'),
     path('employees/<uuid:pk>/', EmployeeDetailAPIView.as_view(), name='employee-detail'),
     path('employees/<uuid:pk>/delete/', EmployeeDestroyAPIView.as_view(), name='employee-delete'),

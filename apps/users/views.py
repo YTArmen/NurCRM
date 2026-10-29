@@ -10,7 +10,8 @@ import logging
 from rest_framework import generics, permissions, status
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from apps.users.permissions import read_only_guard
-from apps.users.permissions_flags import EmployeesListAccess  # ТЗ Н-16
+from apps.users.permissions_flags import EmployeesListAccess, denied  # ТЗ Н-16
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -56,6 +57,7 @@ from .serializers import (
     slug_format_error,
     slug_taken_by_other,
     UserUiPreferencesSerializer,
+    _check_dismissal_allowed,
 )
 from .permissions import IsCompanyOwner, IsCompanyOwnerOrAdmin, IsCompanyOwnerOrAdminOrSupervisor, IsPlatformAdmin
 
@@ -341,8 +343,39 @@ class CustomTokenRefreshView(TokenRefreshView):
 # employees
 # =========================
 
+class EmployeePagination(PageNumberPagination):
+    """ТЗ 29.10 Б-101: ?page_size=200 отдаёт до 200 сотрудников за запрос."""
+    page_size = 100
+    page_size_query_param = "page_size"
+    max_page_size = 500
+
+
+def _emit_employee_changed(request, employee, action, fields=None):
+    """ТЗ 29.10 Б-101: событие employee_changed в ленту main/changes/ (после коммита, без исключений)."""
+    try:
+        from apps.main.change_feed import record_change
+
+        record_change(
+            employee.company_id, "employee_changed", actor_id=getattr(request.user, "pk", None),
+            entity="employee", entity_id=employee.pk,
+            data={"action": action, "fields": sorted(fields or []), "is_active": employee.is_active},
+        )
+    except Exception:
+        logger.exception("employee_changed not recorded")
+
+
+class EmployeeWriteDeniedMixin:
+    """ТЗ 29.10 Б-101: отказ в правах на сотрудников — 403 permission_denied, required=can_edit_employees."""
+
+    def permission_denied(self, request, message=None, code=None):
+        if request.authenticators and not request.successful_authenticator:
+            return super().permission_denied(request, message, code)
+        raise denied("can_edit_employees", "Недостаточно прав для управления сотрудниками.")
+
+
 class EmployeeListAPIView(generics.ListAPIView):
     serializer_class = UserListSerializer
+    pagination_class = EmployeePagination
     permission_classes = [IsAuthenticated, EmployeesListAccess]  # ТЗ Н-16
 
     def get_queryset(self):
@@ -354,7 +387,13 @@ class EmployeeListAPIView(generics.ListAPIView):
         if not company:
             return User.objects.none()
 
-        base_qs = _employees_qs(company).filter(is_active=True, deleted_at__isnull=True)
+        base_qs = _employees_qs(company).filter(deleted_at__isnull=True)
+        # ТЗ 29.10 Б-101: ?is_active=all|true|false; по умолчанию — только активные, как раньше
+        flt = (self.request.query_params.get("is_active") or "true").strip().lower()
+        if flt in ("false", "0"):
+            base_qs = base_qs.filter(is_active=False)
+        elif flt != "all":
+            base_qs = base_qs.filter(is_active=True)
         if getattr(user, "is_consulting_salesperson", False):
             base_qs = base_qs.filter(id=user.id)
         elif getattr(user, "is_consulting_supervisor", False):
@@ -368,7 +407,23 @@ class EmployeeListAPIView(generics.ListAPIView):
                 ]
                 base_qs = base_qs.filter(id__in=matching_ids)
 
-        return _apply_branch_filter_to_users(self.request, company, base_qs)
+        return _apply_branch_filter_to_users(self.request, company, base_qs.order_by("first_name", "last_name", "id"))
+
+
+class EmployeeLiteAPIView(APIView):
+    """ТЗ 29.10 Б-101: GET users/employees/lite/ -> [{id, name, role}] только активные,
+    без телефонов и прав; доступен любому вошедшему сотруднику компании."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        company = _get_company(request.user)
+        if not company:
+            return Response([])
+        qs = company.employees.filter(is_active=True, deleted_at__isnull=True).order_by("first_name", "last_name", "id")
+        return Response([
+            {"id": str(u.pk), "name": u.get_full_name(), "role": u.role}
+            for u in qs.only("id", "first_name", "last_name", "email", "role")
+        ])
 
 
 class CurrentUserAPIView(generics.RetrieveUpdateAPIView):
@@ -386,18 +441,19 @@ class CurrentUserAPIView(generics.RetrieveUpdateAPIView):
 
 
 @read_only_guard("can_edit_employees")
-class EmployeeCreateAPIView(generics.CreateAPIView):
+class EmployeeCreateAPIView(EmployeeWriteDeniedMixin, generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = EmployeeCreateSerializer
     permission_classes = [IsAuthenticated, IsCompanyOwnerOrAdminOrSupervisor]
 
     def perform_create(self, serializer):
-        serializer.save()
+        obj = serializer.save()
+        _emit_employee_changed(self.request, obj, "created")
 
 
 # ✅ SOFT DELETE
 @read_only_guard("can_edit_employees")
-class EmployeeDestroyAPIView(generics.DestroyAPIView):
+class EmployeeDestroyAPIView(EmployeeWriteDeniedMixin, generics.DestroyAPIView):
     queryset = User.objects.all()
     serializer_class = UserListSerializer
     permission_classes = [IsAuthenticated, IsCompanyOwner]
@@ -425,12 +481,14 @@ class EmployeeDestroyAPIView(generics.DestroyAPIView):
         if getattr(employee, "deleted_at", None):
             return Response(status=status.HTTP_204_NO_CONTENT)
 
+        _check_dismissal_allowed(request, employee)  # ТЗ 29.10 Б-101: 409 last_admin / open_shift
         employee.soft_delete(by_user=request.user)
+        _emit_employee_changed(request, employee, "deleted")
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @read_only_guard("can_edit_employees")
-class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+class EmployeeDetailAPIView(EmployeeWriteDeniedMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = User.objects.all()
     serializer_class = EmployeeUpdateSerializer
     permission_classes = [IsAuthenticated, IsCompanyOwnerOrAdminOrSupervisor]
@@ -446,9 +504,11 @@ class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
 
         base_qs = (
             _employees_qs(company)
-            .filter(is_active=True, deleted_at__isnull=True)
+            .filter(deleted_at__isnull=True)
             .exclude(id=user.id)
         )
+        if self.request.method == "DELETE":
+            base_qs = base_qs.filter(is_active=True)
         if getattr(user, "is_consulting_supervisor", False):
             my_regions = user.get_consulting_region_codes()
             matching_ids = [
@@ -466,7 +526,14 @@ class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         from apps.construction.audit import log_request, user_rights
 
         before = user_rights(serializer.instance)
-        obj = serializer.save()
+        was_active = serializer.instance.is_active
+        changed = list(serializer.validated_data.keys())
+        with transaction.atomic():
+            obj = serializer.save()
+        action = "updated"
+        if "is_active" in changed and obj.is_active != was_active:
+            action = "restored" if obj.is_active else "dismissed"
+        _emit_employee_changed(self.request, obj, action, changed)
         try:
             log_request(self.request, "rights_change", "user", obj.pk,
                         (f"{obj.first_name} {obj.last_name}".strip() or obj.email),
@@ -489,7 +556,9 @@ class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         if getattr(employee, "deleted_at", None):
             return Response(status=status.HTTP_204_NO_CONTENT)
 
+        _check_dismissal_allowed(request, employee)  # ТЗ 29.10 Б-101: 409 last_admin / open_shift
         employee.soft_delete(by_user=request.user)
+        _emit_employee_changed(request, employee, "deleted")
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
