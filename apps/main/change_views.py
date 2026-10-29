@@ -3,6 +3,7 @@ import base64
 import hashlib
 import time
 
+from rest_framework.negotiation import BaseContentNegotiation
 from django.core.cache import cache
 from django.db.models import Q
 from rest_framework import permissions
@@ -118,3 +119,26 @@ class ChangesFeedView(CompanyBranchRestrictedMixin, APIView):
         resp["ETag"] = etag
         resp["Cache-Control"] = "private, no-cache"
         return resp
+
+
+class _AnyAccept(BaseContentNegotiation):
+    """Accept: text/event-stream не должен давать 406 — ответ формируем сами."""
+
+    def select_parser(self, request, parsers):
+        return parsers[0] if parsers else None
+
+    def select_renderer(self, request, renderers, format_suffix=None):
+        return renderers[0], renderers[0].media_type
+
+
+class EventsStreamView(APIView):
+    """ТЗ 29.10 Б-102: GET main/events/stream/ — не держит соединение, отсылает на WebSocket."""
+
+    content_negotiation_class = _AnyAccept
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        from apps.main.events_stream import events_stream_http
+
+        return events_stream_http(request)

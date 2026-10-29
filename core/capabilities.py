@@ -24,6 +24,7 @@ FEATURES = (
     "negative_custom_rejected", "client_documents", "bot_owner_server", "salary_payouts",
     "supplier_pay_debt", "access_codes", "changes_feed", "receipt_create_deal", "rentals_paged",
     "strict_permissions", "route_not_found", "client_header", "employee_limits", "support_constructor",
+    "events_stream",  # ТЗ 29.10 Б-102: WebSocket ws/main/events/ (SSE-адрес отвечает use_websocket)
 )
 
 

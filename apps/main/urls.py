@@ -4,7 +4,7 @@ from apps.main.mass_incoming_views import ProductMassIncomingAPIView
 from .views import *
 from .purchase_orders import PurchaseOrderListCreateAPIView, PurchaseOrderDetailAPIView
 from .price_check import ProductCatalogVersionView, ProductPriceCheckView
-from .change_views import ChangesFeedView  # ТЗ Н-31
+from .change_views import ChangesFeedView, EventsStreamView  # ТЗ Н-31
 from core.capabilities import CapabilitiesAPIView, ClientVersionsReportAPIView  # единое ТЗ Б-01
 from .variant_stock_diff import VariantStockDiffAPIView  # Б-02
 from .pos_requests import (PosRequestAcceptView, PosRequestCancelView, PosRequestDeclineView,
@@ -187,6 +187,7 @@ urlpatterns = [
     path('pos/requests/<uuid:pk>/accept/', PosRequestAcceptView.as_view(), name='pos-request-accept'),
     path('pos/requests/<uuid:pk>/decline/', PosRequestDeclineView.as_view(), name='pos-request-decline'),
     path('pos/requests/<uuid:pk>/cancel/', PosRequestCancelView.as_view(), name='pos-request-cancel'),
+    path('events/stream/', EventsStreamView.as_view(), name='events-stream'),  # ТЗ 29.10 Б-102
     path('changes/', ChangesFeedView.as_view(), name='changes-feed'),  # ТЗ Н-31
     path('capabilities/', CapabilitiesAPIView.as_view(), name='api-capabilities'),  # Б-01
     path('client-versions/', ClientVersionsReportAPIView.as_view(), name='api-client-versions'),  # Б-01

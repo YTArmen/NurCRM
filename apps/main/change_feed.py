@@ -19,6 +19,10 @@ logger = logging.getLogger("nurcrm.change_feed")
 
 # Новые типы (помимо старых событий вебхуков)
 NEW_EVENT_TYPES = (
+    "client_changed",  # ТЗ 29.10 Б-102
+    "bonus_changed",
+    "staff_changed",
+    "cash_moved",
     "debt_paid",
     "debt_created",
     "app_settings_changed",
@@ -176,11 +180,34 @@ def _debt_saved(sender, instance, created, **kw):
               entity="debt", entity_id=instance.pk, data={"debt": instance.pk})
 
 
+def _settings_key_versions(instance):
+    """{ключ: версия} из служебного _meta (ТЗ Н-17); секреты и служебные ключи не берём."""
+    st = instance.__dict__.get("settings") or {}
+    meta = (st.get("_meta") or {}) if isinstance(st, dict) else {}
+    out = {}
+    for k, v in (st.items() if isinstance(st, dict) else []):
+        if k.startswith("_") or k == "secrets" or k.startswith("secret_"):
+            continue
+        out[k] = (meta.get(k) or {}).get("version") if isinstance(meta.get(k), dict) else None
+    return out
+
+
+@receiver(post_init, sender="users.CompanyAppSettings")
+def _settings_snapshot(sender, instance, **kw):
+    instance._chg_kv = _settings_key_versions(instance)
+
+
 @receiver(post_save, sender="users.CompanyAppSettings")
 def _app_settings_saved(sender, instance, created, **kw):
+    # ТЗ 29.10 Б-102: keys[] — какие ключи изменились (только имена, без значений и секретов)
+    prev = getattr(instance, "_chg_kv", None) or {}
+    cur = _settings_key_versions(instance)
+    keys = sorted(k for k in cur if k not in prev or prev[k] != cur[k] or cur[k] is None)
+    keys += sorted(k for k in prev if k not in cur)
+    instance._chg_kv = cur
     _emit(instance.company_id, "app_settings_changed", branch_id=instance.branch_id,
           actor_id=instance.updated_by_id, entity="app_settings", entity_id=instance.app,
-          data={"app": instance.app, "version": instance.version})
+          data={"app": instance.app, "version": instance.version, "keys": keys[:100]})
 
 
 @receiver(post_save, sender="users.CompanyAddon")
@@ -311,3 +338,41 @@ def _supplier_receipt_saved(sender, instance, created, **kw):
         _emit(instance.company_id, "supplier_debt_changed", branch_id=instance.branch_id,
               actor_id=instance.created_by_id, entity="supplier", entity_id=instance.supplier_id,
               data={"supplier": instance.supplier_id, "receipt": instance.pk})
+
+
+# ---------------- ТЗ 29.10 Б-102: клиенты, бонусы, сотрудники, внесение/изъятие ----------------
+
+@receiver(post_save, sender="main.Client")
+@receiver(post_delete, sender="main.Client")
+def _client_changed(sender, instance, **kw):
+    if instance.company_id:
+        _emit(instance.company_id, "client_changed", branch_id=getattr(instance, "branch_id", None),
+              entity="client", entity_id=instance.pk, data={"client": instance.pk})
+
+
+@receiver(post_save, sender="main.ClientBonusTransaction")
+def _bonus_saved(sender, instance, created, **kw):
+    if created:
+        _emit(instance.company_id, "bonus_changed", actor_id=instance.user_id,
+              entity="client", entity_id=instance.client_id, data={"client": instance.client_id})
+
+
+@receiver(post_save, sender="users.User")
+@receiver(post_delete, sender="users.User")
+def _staff_changed(sender, instance, **kw):
+    # вход (last_login) — не изменение сотрудника
+    uf = kw.get("update_fields")
+    if uf is not None and set(uf) <= {"last_login"}:
+        return
+    cid = instance.__dict__.get("company_id")
+    if cid:
+        _emit(cid, "staff_changed", entity="user", entity_id=instance.pk, data={"user": instance.pk})
+
+
+@receiver(post_save, sender="construction.CashFlow")
+def _cash_moved(sender, instance, created, **kw):
+    if created and instance.source_kind in ("shift_drawer_inflow", "shift_drawer_outflow"):
+        _emit(instance.company_id, "cash_moved", branch_id=getattr(instance, "branch_id", None),
+              entity="cashbox", entity_id=instance.cashbox_id,
+              data={"cashbox": instance.cashbox_id,
+                    "state": "cash_in" if instance.source_kind == "shift_drawer_inflow" else "cash_out"})

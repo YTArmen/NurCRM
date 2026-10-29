@@ -2675,6 +2675,7 @@ class Sale(models.Model):
                 "payment_method": self.payment_method,
                 "payments": [{"method": p.method, "amount": p.amount} for p in lines],
                 "shift": self.shift_id,
+                "cashbox": self.cashbox_id,  # ТЗ 29.10 Б-102
                 "cashier": self.user_id,
                 "client": self.client_id,
                 "paid_at": self.paid_at,

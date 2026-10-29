@@ -28,6 +28,10 @@ EVENTS = (
     "order.created",
     # ТЗ Н-31: новые типы ленты изменений (apps.main.change_feed)
     "debt_paid",
+    "client_changed",  # ТЗ 29.10 Б-102
+    "bonus_changed",
+    "staff_changed",
+    "cash_moved",
     "debt_created",
     "app_settings_changed",
     "product_changed",
