@@ -4359,7 +4359,29 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
 
     @transaction.atomic
     def post(self, request, client_id, *args, **kwargs):
-        return self.pay(request, client_id, request.data)
+        from apps.main.services_debt import debt_receipt_info, normalize_debt_payment_method, pick_debt_method
+        raw = {k: request.data.get(k) for k in request.data.keys()}
+        # ТЗ 29.10 Б-13: способ оплаты — method или payment_method (разные → 400 field_conflict);
+        # смена и касса — shift/cashbox наравне с shift_id/cashbox_id
+        picked = pick_debt_method(raw)
+        if picked:
+            raw["payment_method"] = picked
+        for src, dst in (("shift", "shift_id"), ("cashbox", "cashbox_id")):
+            if raw.get(dst) in (None, "") and raw.get(src) not in (None, ""):
+                raw[dst] = raw[src]
+        resp = self.pay(request, client_id, raw)
+        if resp.status_code == 200 and isinstance(resp.data, dict):
+            # ТЗ 29.10 Б-13: дополняем ответ (прежние paid_total/deals остаются)
+            pm = normalize_debt_payment_method(picked)
+            resp.data.update({
+                "paid": resp.data.get("paid_total"),
+                "method": pm, "payment_method": pm,
+                "replayed": bool(getattr(self, "replayed", False)),
+                **debt_receipt_info(
+                    request.user, self.cashflows, self.payments_made or self.replay_payments
+                ),
+            })
+        return resp
 
     def pay(self, request, client_id, raw_data):
         """Распределяет оплату; распределение по сделкам кладёт в self.applied [(deal, amount)]."""
@@ -4367,6 +4389,7 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
         self.payments_made = []  # ТЗ Н-11/Н-13: созданные DealPayment (pay-supplier-debt, received_by)
         self.cashflows = []  # ТЗ Н-13: созданные движения — для shift/cashbox в ответе
         self.replay_payments = []  # ТЗ Н-13: при повторе — прежние DealPayment (кто и когда принял)
+        self.replayed = False
         inp = DealPayAnyInputSerializer(data=raw_data)
         inp.is_valid(raise_exception=True)
         data = inp.validated_data
@@ -4376,9 +4399,6 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
                 {"amount": "Сумма оплаты должна быть больше нуля.", "code": "amount_invalid"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        bad = self._validate_cashbox_and_shift(request, data)
-        if bad is not None:
-            return bad
 
         client_qs = self._filter_qs_company_branch(Client.objects.all())
         # ТЗ Н-31: запрос «на кассу» принимает кассир — ограничение по salesperson не применяем
@@ -4414,7 +4434,12 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
                 company=client.company, source_kind=_CF.SourceKind.DEBT_REPAYMENT,
                 source_id__in=[str(p.id) for p in self.replay_payments],
             ).order_by("created_at"))
+            self.replayed = True  # ТЗ 29.10 Б-13: повтор отвечаем без проверки смены (она могла закрыться)
             return Response({"paid_total": str(prior_operation.amount), "deals": self._serialize_deals(request, ordered)})
+
+        bad = self._validate_cashbox_and_shift(request, data)
+        if bad is not None:
+            return bad
 
         installments = list(
             DealInstallment.objects.select_for_update()
@@ -4439,6 +4464,30 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        from apps.main.services_debt import normalize_debt_payment_method
+        from core.api_compat import is_strict
+        from apps.construction.models import CashShift as _CS
+        pm0 = normalize_debt_payment_method(data.get("payment_method"))
+        is_supplier = client.type == Client.StatusClient.SUPPLIERS
+        # ТЗ 29.10 Б-13: без shift владелец принимает деньги «в руки» — они не попадают ни в одну смену
+        # (shift=NULL, касса — «Основная касса компании»). Запрос «на кассу» (pos_requests) и кассир
+        # идут как раньше: в свою открытую смену.
+        detached = (
+            not is_supplier
+            and not data.get("shift_id")
+            and not getattr(request, "_pos_request_accept", False)
+            and _is_owner_like(request.user)
+        )
+        if (
+            not is_supplier and not data.get("shift_id") and not detached and pm0 == "cash"
+            and not getattr(request, "_pos_request_accept", False)
+            and is_strict(request, client.company)
+            and not _CS.objects.filter(company=client.company, cashier=request.user, status=_CS.Status.OPEN).exists()
+        ):
+            return Response(
+                {"detail": "Смена не открыта. Откройте смену, чтобы принять наличные.", "code": "shift_required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         operation = ClientDebtBulkPayment.objects.create(
             company=client.company,
             client=client,
@@ -4520,6 +4569,7 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
                     source_business_operation_id="Оплата долга",
                     payment_method=pm,
                     affects_shift_drawer=(pm == "cash"),
+                    detached=detached,
                 )
                 if _cf:
                     self.cashflows.append(_cf)

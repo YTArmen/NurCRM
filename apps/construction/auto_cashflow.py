@@ -124,9 +124,12 @@ def resolve_cashbox(
         if cb:
             return cb
 
+    # ТЗ 29.10 Б-13: приход «вне смены» — ни смена, ни касса филиала не подставляются, берём «Основную кассу»
+    detached = bool(ctx.get("detached"))
+
     # 2. Open shift check
-    shift_obj = ctx.get("shift")
-    shift_id = ctx.get("shift_id")
+    shift_obj = None if detached else ctx.get("shift")
+    shift_id = None if detached else ctx.get("shift_id")
     if shift_obj and getattr(shift_obj, "cashbox", None) and getattr(shift_obj.cashbox, "is_active", True):
         return shift_obj.cashbox
     if shift_id:
@@ -134,7 +137,7 @@ def resolve_cashbox(
         if sh and sh.cashbox and sh.cashbox.is_active:
             return sh.cashbox
 
-    u = ctx.get("user") or user
+    u = None if detached else (ctx.get("user") or user)
     if u and getattr(u, "is_authenticated", False):
         sh_user_qs = CashShift.objects.filter(
             company=company,
@@ -151,7 +154,7 @@ def resolve_cashbox(
     # 3. POS operations: pos_sale, pos_prepayment, debt_repayment
     if source_kind in POS_SOURCE_KINDS or not source_kind:
         # 3a. Branch cashbox
-        b_id = ctx.get("branch_id")
+        b_id = None if detached else ctx.get("branch_id")
         if b_id:
             cb = (
                 Cashbox.objects.filter(company=company, branch_id=b_id, role=Cashbox.CashboxRole.POS_BRANCH, is_active=True)
@@ -338,6 +341,7 @@ def create_auto_cashflow(
     affects_shift_drawer: Optional[bool] = None,
     idempotency_key: Optional[str] = None,
     payment_method: Optional[str] = None,
+    detached: bool = False,
 ) -> Optional[CashFlow]:
     """
     Creates an auto-cashflow record within the transaction.
@@ -381,6 +385,8 @@ def create_auto_cashflow(
             raise DRFValidationError({"detail": "Касса находится в архиве.", "code": "cashbox_inactive"})
     else:
         ctx = dict(context or {})
+        if detached:
+            ctx["detached"] = True  # ТЗ 29.10 Б-13
         if cashbox_id:
             ctx["cashbox_id"] = cashbox_id
         if cashbox_role:
@@ -410,7 +416,10 @@ def create_auto_cashflow(
 
     # Shift & cashier logic
     actual_shift = None
-    if source_kind not in EXPENSE_VARIABLE_KINDS:
+    if detached:
+        # ТЗ 29.10 Б-13: деньги принял владелец «в руки» — ни в одну смену не попадают (shift=NULL)
+        pass
+    elif source_kind not in EXPENSE_VARIABLE_KINDS:
         actual_shift = shift
         if actual_shift is None and shift_id:
             actual_shift = CashShift.objects.filter(id=shift_id, company=company).first()

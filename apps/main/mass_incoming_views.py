@@ -3,6 +3,12 @@ POST /api/main/products/mass-incoming/ — «Провести приход» м�
 
 Одна транзакция: создаёт недостающие карточки (из глобальной базы или вручную),
 обновляет цены и прибавляет остаток к актуальному в базе. Любая ошибка — откат всего.
+
+ТЗ 29.10 Б-42: строка может нести `unit` (код или название единицы, применяется к товару) и
+`client_row_id` (возвращается в ответе). Ответ: items[{client_row_id, product_id, quantity, unit,
+purchase_price, price, price_changed}], errors[{index, client_row_id, code, detail}], replayed.
+Режим частичного успеха — только по явному `partial: true` в теле: ошибочная строка не откатывает
+пачку, а попадает в errors. Без флага вся пачка по-прежнему атомарна.
 """
 from decimal import Decimal, InvalidOperation
 
@@ -34,17 +40,47 @@ MAX_ITEMS = 500
 
 
 class MassIncomingError(Exception):
-    def __init__(self, http_status, detail, index=None):
+    def __init__(self, http_status, detail, index=None, code=None, client_row_id=None):
         super().__init__(detail)
         self.http_status = http_status
         self.detail = detail
         self.index = index
+        self.code = code or {404: "not_found", 409: "conflict"}.get(http_status, "validation_error")
+        self.client_row_id = client_row_id
+
+    def as_error(self):
+        return {"index": self.index, "client_row_id": self.client_row_id, "code": self.code, "detail": self.detail}
 
     def response(self):
-        body = {"detail": self.detail}
+        body = {"detail": self.detail, "code": self.code}
         if self.index is not None:
             body["index"] = self.index
+        body["errors"] = [self.as_error()]
         return Response(body, status=self.http_status)
+
+
+# ТЗ 29.10 Б-42: код единицы -> название, которое хранится в Product.unit (код — в Product.unit_code).
+UNIT_LABELS = {
+    "pcs": "шт.", "m": "м", "m2": "м²", "m3": "м³", "kg": "кг", "l": "л", "t": "т",
+    "pack": "упак.", "box": "кор.", "bag": "меш.", "roll": "рул.", "sheet": "лист", "set": "компл.", "pair": "пара",
+}
+# Частые написания (в нижнем регистре, без точки) -> код.
+UNIT_ALIASES = {
+    "шт": "pcs", "штука": "pcs", "штук": "pcs", "pc": "pcs", "piece": "pcs",
+    "м": "m", "метр": "m", "м2": "m2", "м²": "m2", "м3": "m3", "м³": "m3",
+    "кг": "kg", "килограмм": "kg", "kgs": "kg", "л": "l", "литр": "l", "т": "t", "тонна": "t",
+    "упак": "pack", "упаковка": "pack", "пачка": "pack", "пач": "pack",
+    "кор": "box", "коробка": "box", "меш": "bag", "мешок": "bag", "рул": "roll", "рулон": "roll",
+    "лист": "sheet", "компл": "set", "комплект": "set", "пара": "pair", "пар": "pair",
+}
+
+
+def resolve_unit(raw):
+    """Код единицы по коду или названию; None — неизвестная единица."""
+    key = str(raw or "").strip().lower().rstrip(".").strip()
+    if key in UNIT_LABELS:
+        return key
+    return UNIT_ALIASES.get(key)
 
 
 def _decimal(raw, field, index, *, required):
@@ -70,7 +106,7 @@ def _bool(raw):
 class ProductMassIncomingAPIView(CompanyBranchRestrictedMixin, APIView):
     permission_classes = [IsAuthenticated]
 
-    @idempotent
+    @idempotent(replay_flag=True)
     def post(self, request, *args, **kwargs):
         company = self._company()
         items = request.data.get("items") if isinstance(request.data, dict) else None
@@ -80,20 +116,36 @@ class ProductMassIncomingAPIView(CompanyBranchRestrictedMixin, APIView):
             return Response(
                 {"detail": f"Не больше {MAX_ITEMS} позиций за один приход."}, status=status.HTTP_400_BAD_REQUEST
             )
+        # ТЗ 29.10 Б-42: частичный успех — только по явному флагу, иначе вся пачка атомарна как раньше.
+        partial = _bool(request.data.get("partial"))
+        errors = []
         try:
-            parsed = [self._parse_item(i, raw) for i, raw in enumerate(items)]
-            self._check_duplicate_barcodes(parsed)
+            parsed = []
+            for i, raw in enumerate(items):
+                try:
+                    parsed.append(self._parse_item(i, raw))
+                except MassIncomingError as e:
+                    if not partial:
+                        raise
+                    errors.append(e.as_error())
+            dup_errors = self._check_duplicate_barcodes(parsed, partial)
+            errors.extend(dup_errors)
+            if dup_errors:
+                bad = {e["index"] for e in dup_errors}
+                parsed = [p for p in parsed if p["index"] not in bad]
             with transaction.atomic():
                 # Создание карточек по штрихкоду в компании — по очереди: в модели нет
                 # уникальности (company, barcode), это последняя защита от дублей при гонке.
                 if any(p["kind"] == "create" for p in parsed):
                     Company.objects.select_for_update().filter(pk=company.pk).first()
-                created, result = self._apply(company, parsed)
+                created, result, apply_errors = self._apply(company, parsed, partial)
+                errors.extend(apply_errors)
         except MassIncomingError as e:
             return e.response()
 
+        errors.sort(key=lambda e: e["index"] if e["index"] is not None else -1)
         return Response(
-            {"created": created, "items": result},
+            {"created": created, "items": result, "errors": errors, "replayed": False},
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 
@@ -102,11 +154,28 @@ class ProductMassIncomingAPIView(CompanyBranchRestrictedMixin, APIView):
     def _parse_item(self, index, raw):
         if not isinstance(raw, dict):
             raise MassIncomingError(400, f"Позиция {index + 1}: ожидается объект.", index)
+        crid = str(raw["client_row_id"]).strip() if raw.get("client_row_id") not in (None, "") else None
+        try:
+            return self._parse_row(index, raw, crid)
+        except MassIncomingError as e:
+            e.client_row_id = crid
+            raise
+
+    def _parse_row(self, index, raw, crid):
         quantity = _decimal(raw.get("quantity"), "quantity", index, required=True)
+        unit_code = None
+        if raw.get("unit") not in (None, ""):
+            unit_code = resolve_unit(raw.get("unit"))
+            if unit_code is None:
+                raise MassIncomingError(
+                    400, f"Позиция {index + 1}: неизвестная единица «{raw.get('unit')}».", index, code="unit_unknown"
+                )
         if raw.get("product_id"):
             return {
                 "kind": "add",
                 "index": index,
+                "client_row_id": crid,
+                "unit_code": unit_code,
                 "product_id": str(raw["product_id"]).strip(),
                 "quantity": quantity,
                 "price": _decimal(raw.get("price"), "price", index, required=False),
@@ -125,6 +194,8 @@ class ProductMassIncomingAPIView(CompanyBranchRestrictedMixin, APIView):
         return {
             "kind": "create",
             "index": index,
+            "client_row_id": crid,
+            "unit_code": unit_code,
             "barcode": barcode,
             "name": name,
             "quantity": quantity,
@@ -133,69 +204,111 @@ class ProductMassIncomingAPIView(CompanyBranchRestrictedMixin, APIView):
         }
 
     @staticmethod
-    def _check_duplicate_barcodes(parsed):
+    def _check_duplicate_barcodes(parsed, partial=False):
         seen = set()
+        errors = []
         for p in parsed:
             if p["kind"] != "create":
                 continue
             if p["barcode"] in seen:
-                raise MassIncomingError(
-                    400, f"Штрихкод {p['barcode']} указан в приходе дважды.", p["index"]
+                err = MassIncomingError(
+                    400, f"Штрихкод {p['barcode']} указан в приходе дважды.", p["index"],
+                    code="barcode_duplicate", client_row_id=p.get("client_row_id"),
                 )
+                if not partial:
+                    raise err
+                errors.append(err.as_error())
+                continue
             seen.add(p["barcode"])
+        return errors
 
     # --- применение ---
 
-    def _apply(self, company, parsed):
+    def _apply(self, company, parsed, partial=False):
         adds = [p for p in parsed if p["kind"] == "add"]
         products = {}
         if adds:
             ids = {p["product_id"] for p in adds}
             qs = _filter_products_company_only(self, Product.objects.all()).filter(id__in=ids)
             products = {str(p.id): p for p in qs.select_for_update()}
-            for p in adds:
-                if p["product_id"] not in products:
-                    raise MassIncomingError(404, f"Товар {p['product_id']} не найден", p["index"])
 
         created = []
         result = []
+        errors = []
         for p in parsed:
-            if p["kind"] == "add":
-                product = products[p["product_id"]]
-                product.quantity = Decimal(str(product.quantity or 0)) + p["quantity"]
-                fields = ["quantity", "updated_at"]
-                old_price = Decimal(str(product.price or 0))
-                if p.get("purchase_price") is not None:
-                    product.purchase_price = p["purchase_price"]
-                    fields.append("purchase_price")
-                if p["price"] is not None and p["price"] != product.price:
-                    product.price = p["price"]
-                    product.markup_percent = _calc_markup(product.purchase_price or Decimal("0"), p["price"])
-                    fields += ["price", "markup_percent"]
-                elif p.get("recalc_price") and Decimal(str(product.markup_percent or 0)) != Decimal("0"):
-                    # Б-06: пересчёт цены из закупки и наценки — только по явному флагу строки.
-                    product.price = _calc_price(
-                        Decimal(str(product.purchase_price or 0)), Decimal(str(product.markup_percent or 0))
-                    )
-                    fields.append("price")
-                elif p.get("purchase_price") is not None:
-                    # Закупка изменилась, цена продажи прежняя — пересчитываем только наценку.
-                    product.markup_percent = _calc_markup(
-                        Decimal(str(product.purchase_price or 0)), Decimal(str(product.price or 0))
-                    )
-                    fields.append("markup_percent")
-                product.save(update_fields=fields)
-                new_price = Decimal(str(product.price or 0))
-                if new_price.quantize(Decimal("0.01")) != old_price.quantize(Decimal("0.01")):
-                    admin_audit.log_request(
-                        self.request, "price_change", "product", product.pk, product.name,
-                        before={"price": str(old_price)}, after={"price": str(new_price)}, company=company,
-                    )
-            else:
-                product = self._create(company, p)
-                created.append({"barcode": p["barcode"], "product_id": str(product.id)})
-            result.append({"product_id": str(product.id), "quantity": str(product.quantity)})
-        return created, result
+            try:
+                if partial:
+                    with transaction.atomic():  # ошибочная строка откатывает только себя
+                        row, new_card = self._apply_row(company, p, products)
+                else:
+                    row, new_card = self._apply_row(company, p, products)
+            except MassIncomingError as e:
+                e.client_row_id = p.get("client_row_id")
+                if not partial:
+                    raise
+                errors.append(e.as_error())
+                continue
+            if new_card:
+                created.append({"barcode": p["barcode"], "product_id": row["product_id"]})
+            result.append(row)
+        return created, result, errors
+
+    def _apply_row(self, company, p, products):
+        if p["kind"] == "add":
+            if p["product_id"] not in products:
+                raise MassIncomingError(
+                    404, f"Товар {p['product_id']} не найден", p["index"], code="product_not_found"
+                )
+            product = products[p["product_id"]]
+            product.quantity = Decimal(str(product.quantity or 0)) + p["quantity"]
+            fields = ["quantity", "updated_at"]
+            old_price = Decimal(str(product.price or 0))
+            if p.get("unit_code"):
+                product.unit = UNIT_LABELS[p["unit_code"]]
+                product.unit_code = p["unit_code"]
+                fields += ["unit", "unit_code"]
+            if p.get("purchase_price") is not None:
+                product.purchase_price = p["purchase_price"]
+                fields.append("purchase_price")
+            if p["price"] is not None and p["price"] != product.price:
+                product.price = p["price"]
+                product.markup_percent = _calc_markup(product.purchase_price or Decimal("0"), p["price"])
+                fields += ["price", "markup_percent"]
+            elif p.get("recalc_price") and Decimal(str(product.markup_percent or 0)) != Decimal("0"):
+                # Б-06: пересчёт цены из закупки и наценки — только по явному флагу строки.
+                product.price = _calc_price(
+                    Decimal(str(product.purchase_price or 0)), Decimal(str(product.markup_percent or 0))
+                )
+                fields.append("price")
+            elif p.get("purchase_price") is not None:
+                # Закупка изменилась, цена продажи прежняя — пересчитываем только наценку.
+                product.markup_percent = _calc_markup(
+                    Decimal(str(product.purchase_price or 0)), Decimal(str(product.price or 0))
+                )
+                fields.append("markup_percent")
+            product.save(update_fields=fields)
+            new_price = Decimal(str(product.price or 0))
+            price_changed = new_price.quantize(Decimal("0.01")) != old_price.quantize(Decimal("0.01"))
+            if price_changed:
+                admin_audit.log_request(
+                    self.request, "price_change", "product", product.pk, product.name,
+                    before={"price": str(old_price)}, after={"price": str(new_price)}, company=company,
+                )
+            new_card = False
+        else:
+            product = self._create(company, p)
+            price_changed = False
+            new_card = True
+        row = {
+            "client_row_id": p.get("client_row_id"),
+            "product_id": str(product.id),
+            "quantity": str(product.quantity),
+            "unit": product.unit,
+            "purchase_price": str(Decimal(str(product.purchase_price or 0)).quantize(Decimal("0.01"))),
+            "price": str(Decimal(str(product.price or 0)).quantize(Decimal("0.01"))),
+            "price_changed": price_changed,
+        }
+        return row, new_card
 
     def _create(self, company, p):
         barcode = p["barcode"]
@@ -204,20 +317,25 @@ class ProductMassIncomingAPIView(CompanyBranchRestrictedMixin, APIView):
             or ProductAlternateBarcode.objects.filter(company=company, barcode=barcode).exists()
         ):
             raise MassIncomingError(
-                409, f"Товар со штрихкодом {barcode} уже есть в каталоге компании", p["index"]
+                409, f"Товар со штрихкодом {barcode} уже есть в каталоге компании", p["index"],
+                code="barcode_exists",
             )
         brand = category = None
         if p["from_global"]:
             gp = GlobalProduct.objects.select_related("brand", "category").filter(barcode=barcode).first()
             if gp is None:
                 raise MassIncomingError(
-                    400, f"Штрихкод {barcode} не найден в глобальной базе NurCRM.", p["index"]
+                    400, f"Штрихкод {barcode} не найден в глобальной базе NurCRM.", p["index"],
+                    code="global_product_not_found",
                 )
             if gp.brand:
                 brand = ProductBrand.objects.get_or_create(company=company, name=gp.brand.name)[0]
             if gp.category:
                 category = ProductCategory.objects.get_or_create(company=company, name=gp.category.name)[0]
         # Как create-by-barcode / create-manual: карточка уровня компании, закупочная цена 0.
+        unit_kwargs = {}
+        if p.get("unit_code"):  # ТЗ 29.10 Б-42: единица создаваемого товара
+            unit_kwargs = {"unit": UNIT_LABELS[p["unit_code"]], "unit_code": p["unit_code"]}
         return Product.objects.create(
             company=company,
             branch=None,
@@ -231,4 +349,5 @@ class ProductMassIncomingAPIView(CompanyBranchRestrictedMixin, APIView):
             quantity=p["quantity"],
             date=timezone.now(),
             created_by=self.request.user,
+            **unit_kwargs,
         )

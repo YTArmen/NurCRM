@@ -143,8 +143,10 @@ class TzN13PayDebtTests(TestCase):
         self.assertEqual(r.json()["data"]["max"], "100.00")
         r = self._sale_pay(method="transfer", cashbox_id=str(uuid.uuid4()))
         self.assertEqual(r.json()["code"], "cashbox_not_found")
+        # ТЗ 29.10 Б-13: владелец без shift принимает наличные вне смены (раньше было shift_not_open)
         r = self._sale_pay(method="cash")
-        self.assertEqual(r.json()["code"], "shift_not_open")
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertIsNone(r.json()["shift"])
 
     def test_sale_pay_debt_other_cashier_shift_forbidden(self):
         other = User.objects.create_user(email=f"o-{uuid.uuid4().hex}@test.com", password="x", company=self.company, role="cashier")
