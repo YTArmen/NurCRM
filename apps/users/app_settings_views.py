@@ -22,6 +22,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.http_cache import ETagMixin
 from apps.main.telegram_bot.crypto import decrypt_secret, encrypt_secret
 from apps.users.models import (
     Branch,
@@ -196,7 +197,7 @@ def _apply_patch(obj, body, user=None, expected_keys=None):
     return changed
 
 
-class _AppSettingsMixin:
+class _AppSettingsMixin(ETagMixin):
     """get/patch для записи настроек (личной или компании)."""
 
     model = None

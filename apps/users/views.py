@@ -8,6 +8,7 @@ from django.utils.text import slugify
 import logging
 
 from rest_framework import generics, permissions, status
+from core.http_cache import ETagMixin
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from apps.users.permissions import read_only_guard
 from apps.users.permissions_flags import EmployeesListAccess  # ТЗ Н-16
@@ -341,7 +342,7 @@ class CustomTokenRefreshView(TokenRefreshView):
 # employees
 # =========================
 
-class EmployeeListAPIView(generics.ListAPIView):
+class EmployeeListAPIView(ETagMixin, generics.ListAPIView):
     serializer_class = UserListSerializer
     permission_classes = [IsAuthenticated, EmployeesListAccess]  # ТЗ Н-16
 
@@ -552,7 +553,7 @@ def _emit_company_updated(company, changed_fields):
 
 
 @read_only_guard("can_edit_settings")
-class CompanyDetailAPIView(generics.RetrieveUpdateAPIView):
+class CompanyDetailAPIView(ETagMixin, generics.RetrieveUpdateAPIView):
     """
     GET   /api/users/company/
     PATCH /api/users/company/  — только владелец (например {"market_sphere": "clothing"})
@@ -688,7 +689,7 @@ class CompanyCheckSlugAPIView(APIView):
 # roles
 # =========================
 
-class RoleListAPIView(generics.ListAPIView):
+class RoleListAPIView(ETagMixin, generics.ListAPIView):
     serializer_class = CustomRoleSerializer
     permission_classes = [IsAuthenticated]
 
