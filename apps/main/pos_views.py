@@ -4800,7 +4800,7 @@ class SaleListOrderingFilter(filters.OrderingFilter):
 class SaleListAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, generics.ListAPIView):
     serializer_class = SaleListSerializer
     queryset = (
-        Sale.objects.select_related("user", "consultant", "client", "cashbox", "cashbox__branch")
+        Sale.objects.select_related("user", "consultant", "client", "cashbox", "cashbox__branch", "branch")
         .prefetch_related("items__product", "payments", "deals", "deals__installments", "returns")
         .all()
     )
@@ -4814,6 +4814,13 @@ class SaleListAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, gene
 
     def get_queryset(self):
         qs = super().get_queryset().annotate(sold_at=Coalesce("paid_at", "created_at"))
+        # ТЗ 29.10 Б-99: начисленные бонусы по чеку одним подзапросом (без N+1)
+        from django.db.models import DecimalField as _DF, OuterRef as _OR, Subquery as _SQ, Sum as _Sum
+        from apps.main.models import ClientBonusTransaction as _CBT
+        qs = qs.annotate(bonus_earned_sum=Coalesce(_SQ(
+            _CBT.objects.filter(sale=_OR("pk"), reason="earn").values("sale").annotate(s=_Sum("delta")).values("s"),
+            output_field=_DF(max_digits=14, decimal_places=2),
+        ), Decimal("0.00"), output_field=_DF(max_digits=14, decimal_places=2)))
         qs = _apply_sale_date_filters(qs, self.request)
 
         # ТЗ-28 §5.1: фильтры по смене, кассе, кассиру и точному времени — чтобы телефон

@@ -6949,6 +6949,7 @@ class ClientBonusTransaction(models.Model):
         EARN = "earn", "Начисление"
         REDEEM = "redeem", "Списание"
         MANUAL = "manual", "Ручная корректировка"
+        EXPIRE = "expire", "Сгорание"  # ТЗ 29.10 Б-99: срока бонусов в настройках пока нет, значение зарезервировано
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="bonus_transactions")
@@ -6965,10 +6966,17 @@ class ClientBonusTransaction(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # ТЗ 29.10 Б-99: где начислили/списали
+    branch = models.ForeignKey(
+        Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    cashbox = models.ForeignKey(
+        "construction.Cashbox", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
 
     class Meta:
         ordering = ("-created_at",)
-        indexes = [models.Index(fields=["client", "created_at"])]
+        indexes = [models.Index(fields=["client", "created_at"]), models.Index(fields=["company", "created_at"])]
         constraints = [
             models.UniqueConstraint(
                 fields=["company", "idempotency_key"],

@@ -3,6 +3,7 @@ from django.urls import path, include
 from apps.main.mass_incoming_views import ProductMassIncomingAPIView
 from .views import *
 from .purchase_orders import PurchaseOrderListCreateAPIView, PurchaseOrderDetailAPIView
+from .tz1029_bonus import ClientBonusSummaryAPIView
 from .tz1029_views import AppTestChecksView, GlobalProductExportView
 from .price_check import ProductCatalogVersionView, ProductPriceCheckView
 from .change_views import ChangesFeedView  # ТЗ Н-31
@@ -384,6 +385,7 @@ urlpatterns = [
     path("clients/<uuid:pk>/pay-debt/", ClientPayDebtAPIView.as_view(), name="client-pay-debt"),
     path("clients/<uuid:client_id>/pay-supplier-debt/", SupplierDebtPayAPIView.as_view(), name="client-pay-supplier-debt"),
     path("clients/<uuid:client_id>/debts/", ClientDirectDebtAPIView.as_view(), name="client-direct-debt"),
+    path("clients/bonus/summary/", ClientBonusSummaryAPIView.as_view(), name="client-bonus-summary"),  # ТЗ 29.10 Б-99
     path("clients/<uuid:pk>/bonus/", ClientBonusAPIView.as_view(), name="client-bonus"),
     path("clients/<uuid:pk>/bonus/history/", ClientBonusHistoryAPIView.as_view(), name="client-bonus-history"),
     path(

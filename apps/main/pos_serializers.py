@@ -912,11 +912,30 @@ class SaleListSerializer(serializers.ModelSerializer):
     due_date = serializers.SerializerMethodField(read_only=True)  # ТЗ Н-14
     created_by = serializers.SerializerMethodField(read_only=True)  # Б-67
     sold_at = serializers.SerializerMethodField(read_only=True)  # Б-68
+    # ТЗ 29.10 Б-99
+    bonus_used = serializers.SerializerMethodField(read_only=True)
+    bonus_earned = serializers.SerializerMethodField(read_only=True)
+    branch_name = serializers.SerializerMethodField(read_only=True)
+
+    def get_bonus_used(self, obj):
+        return str(money(obj.bonus_redeemed or Decimal("0.00")))
+
+    def get_bonus_earned(self, obj):
+        val = getattr(obj, "bonus_earned_sum", None)
+        if val is None:  # вне списка pos/sales/ (нет аннотации) — отдельный запрос
+            from django.db.models import Sum
+            val = obj.bonus_transactions.filter(reason="earn").aggregate(s=Sum("delta"))["s"]
+        return str(money(val or Decimal("0.00")))
+
+    def get_branch_name(self, obj):
+        b = getattr(obj, "branch", None)
+        return b.name if b else None
 
     class Meta:
         model = Sale
         fields = (
             "source", "device_key", "device_name", "created_by", "sold_at",  # Б-67, Б-68
+            "bonus_used", "bonus_earned", "branch_name",  # Б-99
             "id",
             "number",
             "branch",
