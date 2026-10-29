@@ -408,6 +408,8 @@ class GlobalProduct(models.Model):
     brand = models.ForeignKey(GlobalBrand, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
     category = models.ForeignKey(GlobalCategory, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
     created_at = models.DateTimeField(auto_now_add=True)
+    # ТЗ 29.10 Б-97: для выгрузки справочника пачками (?since=)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True, db_index=True)
 
     class Meta:
         verbose_name = "Глобальный товар"
