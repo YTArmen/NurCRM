@@ -1466,6 +1466,13 @@ class ProductListView(CompanyBranchRestrictedMixin, generics.ListAPIView):
             ):
                 current.append("seq")
             return qs.order_by(*current)
+        if any(
+            isinstance(o, str) and o.lstrip("-") == "updated_at"
+            for o in current
+        ):
+            # Б-46 (27.10.2026): ?ordering=-updated_at&page_size=1 — «версия каталога» кассы.
+            # Избранные сверху ломали её: первым всегда шёл один и тот же избранный товар.
+            return qs.order_by(*current, "-id")
         qs = qs.order_by("-is_favorite", *current)
         return qs
 
@@ -2697,8 +2704,9 @@ class ProductRetrieveUpdateDestroyAPIView(TrashDestroyMixin, CompanyBranchRestri
             .get()
         )
         data = self.get_serializer(instance).data
+        # Б-06: price_changed считает сериализатор, который делал update, — переносим в ответ.
         if hasattr(serializer, "_price_changed"):
-            data["price_changed"] = serializer._price_changed
+            data["price_changed"] = bool(serializer._price_changed)
         return Response(data, status=status.HTTP_200_OK)
 
 
@@ -6245,6 +6253,18 @@ class SupplierReceiptAPIView(CompanyBranchRestrictedMixin, APIView):
                     ).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
             type(prod).objects.filter(id=pid).update(**upd)
+            # Журнал товара (ТЗ п.8): смена цены продажи приходом — было → стало.
+            if "price" in upd:
+                try:
+                    _old_price = Decimal(str(getattr(prod, "price", None) or 0))
+                    if _old_price.quantize(Decimal("0.01")) != Decimal(upd["price"]).quantize(Decimal("0.01")):
+                        admin_audit.log_request(
+                            request, "price_change", "product", pid, prod.name,
+                            before={"price": str(_old_price)}, after={"price": str(upd["price"])},
+                            company=company,
+                        )
+                except Exception:
+                    pass
             # ТЗ Н-27: приход по варианту — остаток варианта и товара в этой же транзакции.
             self._receipt_apply_variants(company, prod, it, qty)
             # The batch retains the shelf-life configuration at the receipt moment.

@@ -1207,6 +1207,8 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
         ),
     )
     discount_percent = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    # Б-06: пересчитать цену продажи из закупки и наценки (иначе PATCH purchase_price цену не трогает).
+    recalc_price = serializers.BooleanField(required=False, default=False, write_only=True)
 
     country = serializers.CharField(required=False, allow_blank=True)
     expiration_date = serializers.DateField(required=False, allow_null=True)
@@ -1278,6 +1280,7 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             "purchase_price",
             "markup_percent",
             "price",
+            "recalc_price",
             "wholesale_price",
             "discount_percent",
             "plu",
@@ -1689,8 +1692,9 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             data = super().to_representation(instance)
         if "stock" in data:
             data["is_promo"] = data["stock"]
+        # Б-06: в ответе PATCH/PUT — менялась ли цена продажи этим запросом.
         if hasattr(self, "_price_changed"):
-            data["price_changed"] = self._price_changed
+            data["price_changed"] = bool(self._price_changed)
         try:
             data["alternate_barcodes"] = [
                 {"barcode": item.barcode, "name": item.name, "quantity": item.quantity}
@@ -1737,6 +1741,7 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
         description = (validated_data.pop("description", "") or "").strip()
 
         # ===== цены: двусторонняя логика =====
+        validated_data.pop("recalc_price", None)  # при создании смысла не имеет
         purchase_price = self._to_dec(validated_data.pop("purchase_price", Decimal("0")))
         markup_percent = self._to_dec(validated_data.pop("markup_percent", Decimal("0")))
         price_in = validated_data.pop("price", None)
@@ -1912,6 +1917,7 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
         # склад и падал с IntegrityError (uq_company_main_barcode_not_empty).
 
         # ===== цены: двусторонняя логика =====
+        recalc_price = bool(validated_data.pop("recalc_price", False))
         has_purchase = "purchase_price" in validated_data
         has_markup = "markup_percent" in validated_data
         has_price = "price" in validated_data

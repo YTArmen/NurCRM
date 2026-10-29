@@ -4951,6 +4951,13 @@ def _audit_sale_deleted(request, infos):
         log_request(request, "delete", "sale", pk, f"Чек {pk[:8]}", before=before, company=company)
 
 
+def _audit_sale_deleted(request, infos):
+    from apps.construction.audit import log_request
+
+    for company, pk, before in infos[:500]:
+        log_request(request, "delete", "sale", pk, f"Чек {pk[:8]}", before=before, company=company)
+
+
 class SaleRetrieveAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [permissions.IsAuthenticated]
     lookup_field = "id"

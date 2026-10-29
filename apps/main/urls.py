@@ -9,6 +9,7 @@ from core.capabilities import CapabilitiesAPIView, ClientVersionsReportAPIView  
 from .variant_stock_diff import VariantStockDiffAPIView  # Б-02
 from .pos_requests import (PosRequestAcceptView, PosRequestCancelView, PosRequestDeclineView,
                            PosRequestListCreateView)
+from .product_changes import ProductChangesView
 from .pos_views import *
 from apps.construction.views_buhgalter import AuditLogView
 from apps.construction.views_admin import TrashListView, TrashRestoreView
@@ -191,6 +192,7 @@ urlpatterns = [
     path('client-versions/', ClientVersionsReportAPIView.as_view(), name='api-client-versions'),  # Б-01
     path('products/variant-stock-diff/', VariantStockDiffAPIView.as_view(), name='variant-stock-diff'),  # Б-02
     path('products/catalog-version/', ProductCatalogVersionView.as_view(), name='product-catalog-version'),
+    path('products/changes/', ProductChangesView.as_view(), name='product-changes'),
     path('products/scale-export/', WeightProductsScaleExportAPIView.as_view(), name='product-scale-export'),
     path('products/create-by-barcode/', ProductCreateByBarcodeAPIView.as_view(), name='product-create-by-barcode'),
     path("products/barcode-duplicates/", BarcodeDuplicatesAPIView.as_view(), name="product-barcode-duplicates"),

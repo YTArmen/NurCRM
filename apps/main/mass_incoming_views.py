@@ -13,6 +13,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.construction import audit as admin_audit
 from apps.integrations.idempotency import idempotent
 from apps.main.models import (
     GlobalProduct,
@@ -24,6 +25,7 @@ from apps.main.models import (
 from apps.main.views import (
     CompanyBranchRestrictedMixin,
     _calc_markup,
+    _calc_price,
     _filter_products_company_only,
 )
 from apps.users.models import Company
@@ -108,6 +110,9 @@ class ProductMassIncomingAPIView(CompanyBranchRestrictedMixin, APIView):
                 "product_id": str(raw["product_id"]).strip(),
                 "quantity": quantity,
                 "price": _decimal(raw.get("price"), "price", index, required=False),
+                # Б-06: новая закупочная (цену продажи не меняет) и флаг пересчёта цены из наценки.
+                "purchase_price": _decimal(raw.get("purchase_price"), "purchase_price", index, required=False),
+                "recalc_price": _bool(raw.get("recalc_price")),
             }
         barcode = str(raw.get("barcode") or "").strip()
         name = str(raw.get("name") or "").strip()
@@ -159,11 +164,33 @@ class ProductMassIncomingAPIView(CompanyBranchRestrictedMixin, APIView):
                 product = products[p["product_id"]]
                 product.quantity = Decimal(str(product.quantity or 0)) + p["quantity"]
                 fields = ["quantity", "updated_at"]
+                old_price = Decimal(str(product.price or 0))
+                if p.get("purchase_price") is not None:
+                    product.purchase_price = p["purchase_price"]
+                    fields.append("purchase_price")
                 if p["price"] is not None and p["price"] != product.price:
                     product.price = p["price"]
                     product.markup_percent = _calc_markup(product.purchase_price or Decimal("0"), p["price"])
                     fields += ["price", "markup_percent"]
+                elif p.get("recalc_price") and Decimal(str(product.markup_percent or 0)) != Decimal("0"):
+                    # Б-06: пересчёт цены из закупки и наценки — только по явному флагу строки.
+                    product.price = _calc_price(
+                        Decimal(str(product.purchase_price or 0)), Decimal(str(product.markup_percent or 0))
+                    )
+                    fields.append("price")
+                elif p.get("purchase_price") is not None:
+                    # Закупка изменилась, цена продажи прежняя — пересчитываем только наценку.
+                    product.markup_percent = _calc_markup(
+                        Decimal(str(product.purchase_price or 0)), Decimal(str(product.price or 0))
+                    )
+                    fields.append("markup_percent")
                 product.save(update_fields=fields)
+                new_price = Decimal(str(product.price or 0))
+                if new_price.quantize(Decimal("0.01")) != old_price.quantize(Decimal("0.01")):
+                    admin_audit.log_request(
+                        self.request, "price_change", "product", product.pk, product.name,
+                        before={"price": str(old_price)}, after={"price": str(new_price)}, company=company,
+                    )
             else:
                 product = self._create(company, p)
                 created.append({"barcode": p["barcode"], "product_id": str(product.id)})
