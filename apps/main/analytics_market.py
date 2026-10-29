@@ -4592,6 +4592,7 @@ class AnalyticsView(APIView):
         # OPEX: расходы по CashFlow без закупок товара (они уже в себестоимости),
         # без возвратов покупателям (выручка уже за их вычетом) и без залогов.
         cf_out = _money_cashflows(company, branch, period).filter(type=CashFlow.Type.EXPENSE)
+        cf_out = cf_out.exclude(kind="startup")  # ТЗ 29.10 Б-100: стартовые вложения не входят в opex/прибыль
         exp = _sum_by_category(cf_out, _cf_expense_category())
         salaries = exp.get("salaries", Z_MONEY)
         rent = exp.get("rent", Z_MONEY)

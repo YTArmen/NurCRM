@@ -733,6 +733,11 @@ class CashFlowListCreateView(CompanyBranchScopedMixin, generics.ListCreateAPIVie
         if shift_id:
             qs = qs.filter(shift_id=shift_id)
 
+        # ТЗ 29.10 Б-100: ?kind=startup — только стартовые расходы
+        kind_q = (qp.get("kind") or "").strip()
+        if kind_q:
+            qs = qs.filter(kind=kind_q)
+
         # ✅ по источнику: ?source_kind=shift_drawer_inflow&source_id=<id операции кассы>
         source_kinds = _csv_choices(
             qp, "source_kind", "source_kinds", CashFlow.SourceKind.values,

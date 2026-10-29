@@ -8496,3 +8496,43 @@ class AppTestCheck(models.Model):
             models.UniqueConstraint(fields=["company", "version", "item_id", "device_id"], name="uniq_app_test_check"),
         ]
         indexes = [models.Index(fields=["company", "version"])]
+
+
+# ==========================
+# ТЗ 29.10 Б-100: инвесторы и выплаты
+# ==========================
+class Investor(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="investors")
+    name = models.CharField(max_length=255)
+    phone = models.CharField(max_length=32, blank=True, default="")
+    amount = models.DecimalField(max_digits=14, decimal_places=2, default=0, verbose_name="Вложение")
+    date = models.DateField(null=True, blank=True, verbose_name="Дата вложения")
+    terms = models.JSONField(default=dict, blank=True, verbose_name="Условия (например {\"percent\": 20})")
+    version = models.PositiveIntegerField(default=1)
+    effective_from = models.DateField(null=True, blank=True, verbose_name="Действует с")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("name", "created_at")
+
+
+class InvestorPayout(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="investor_payouts")
+    investor = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="payouts")
+    month = models.DateField(verbose_name="Месяц (первое число)")
+    accrued = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    paid = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    paid_date = models.DateField(null=True, blank=True)
+    marked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-month", "-created_at")
+        indexes = [models.Index(fields=["company", "month"])]

@@ -1169,6 +1169,8 @@ class CashFlow(models.Model):
         db_index=True,
         verbose_name="Способ оплаты",
     )
+    # ТЗ 29.10 Б-100: "startup" — вложение при открытии, не входит в opex/operating_profit отчёта pnl
+    kind = models.CharField(max_length=16, blank=True, default="", db_default="", verbose_name="Вид расхода")
 
     shift = models.ForeignKey(
         "construction.CashShift",

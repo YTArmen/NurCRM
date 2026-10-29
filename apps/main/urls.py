@@ -3,6 +3,9 @@ from django.urls import path, include
 from apps.main.mass_incoming_views import ProductMassIncomingAPIView
 from .views import *
 from .purchase_orders import PurchaseOrderListCreateAPIView, PurchaseOrderDetailAPIView
+from .tz1029_invest import (
+    InvestorDetailView, InvestorListCreateView, PayoutDetailView, PayoutListCreateView, StartupPaybackAPIView,
+)
 from .tz1029_bonus import ClientBonusSummaryAPIView
 from .tz1029_views import AppTestChecksView, GlobalProductExportView
 from .price_check import ProductCatalogVersionView, ProductPriceCheckView
@@ -673,6 +676,11 @@ urlpatterns = [
     path("orders/draft/status/", OrderDraftStatusAPIView.as_view(), name="order-draft-status"),
     path("voice/calls/", VoiceCallAPIView.as_view(), name="voice-calls"),
     path("bot/notify-owner/", BotNotifyOwnerView.as_view(), name="bot-notify-owner"),  # ТЗ Н-23
+    path("analytics/startup-payback/", StartupPaybackAPIView.as_view(), name="analytics-startup-payback"),  # ТЗ 29.10 Б-100
+    path("investors/", InvestorListCreateView.as_view(), name="investors"),
+    path("investors/<uuid:pk>/", InvestorDetailView.as_view(), name="investor-detail"),
+    path("investor-payouts/", PayoutListCreateView.as_view(), name="investor-payouts"),
+    path("investor-payouts/<uuid:pk>/", PayoutDetailView.as_view(), name="investor-payout-detail"),
     path("global-products/export/", GlobalProductExportView.as_view(), name="global-products-export"),  # ТЗ 29.10 Б-97
     path("app-tests/checks/", AppTestChecksView.as_view(), name="app-tests-checks"),  # ТЗ 29.10 Б-98
     path("telegram-bot/", include("apps.main.telegram_bot.urls")),

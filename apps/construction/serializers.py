@@ -705,6 +705,7 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
             "resolved_at",
             "idempotency_key",
             "payment_method",
+            "kind",
         ]
         read_only_fields = [
             "id",
@@ -726,6 +727,18 @@ class CashFlowSerializer(CompanyBranchReadOnlyMixin):
             "idempotency_key",
             "checked_at", "checked_by", "accountant_note",
         ]
+
+    def validate_kind(self, value):
+        # ТЗ 29.10 Б-100: допустимо "" или "startup"; "startup" ставит только владелец/администратор
+        value = (value or "").strip()
+        if value not in ("", "startup"):
+            raise serializers.ValidationError('Допустимо: "" или "startup".')
+        if value == "startup":
+            from apps.utils import _is_owner_like
+            req = self.context.get("request")
+            if req is None or not _is_owner_like(req.user):
+                raise serializers.ValidationError("Стартовые расходы — только владелец или администратор.")
+        return value
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
