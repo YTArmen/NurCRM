@@ -131,7 +131,7 @@ class ReceiptPriceTests(_Base):
         self.assertEqual(self.product.quantity, Decimal("15"))
         self.assertEqual(self.product.purchase_price, Decimal("160.000"))
         self.assertEqual(self.product.price, Decimal("195.000"))
-        self.assertEqual(self.product.markup_percent, Decimal("21.8800"))
+        self.assertEqual(self.product.markup_percent, Decimal("21.8750"))  # наценка хранится с 4 знаками (ТЗ Н-04)
 
     def test_receipt_recalc_price_flag(self):
         r = self.receipt({"product": str(self.product.id), "qty": 5, "purchase_price": 160, "recalc_price": True})
