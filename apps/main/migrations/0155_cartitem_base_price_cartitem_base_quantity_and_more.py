@@ -74,6 +74,12 @@ class Migration(migrations.Migration):
             name='attributes',
             field=models.JSONField(blank=True, default=list, verbose_name='Атрибуты'),
         ),
+        # Выкатка 29.10: значение по умолчанию и в базе — старый код, который ещё работает во время
+        # миграции, создаёт товары без этого поля.
+        migrations.RunSQL(
+            "ALTER TABLE main_product ALTER COLUMN attributes SET DEFAULT '[]'::jsonb",
+            reverse_sql="ALTER TABLE main_product ALTER COLUMN attributes DROP DEFAULT",
+        ),
         migrations.AddField(
             model_name='product',
             name='min_sale_quantity',
