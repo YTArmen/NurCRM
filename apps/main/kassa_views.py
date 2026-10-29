@@ -472,6 +472,16 @@ class PosQuickCheckoutAPIView(APIView):
 
     permission_classes = [permissions.IsAuthenticated, PosAccess]  # ТЗ Н-16
 
+    @staticmethod
+    def _shift_not_owned(request, company):
+        """ТЗ 29.10 Б-13: чужая смена — code shift_not_owned (новый клиент: 403, старый — прежний 400)."""
+        msg = "Это не ваша смена."
+        return ApiError(
+            "shift_not_owned", msg,
+            status_code=403 if is_strict(request, company) else 400,
+            top={"shift": msg},
+        )
+
     def post(self, request, *args, **kwargs):
         from apps.main.pos_views import (
             SaleCheckoutAPIView,
@@ -516,20 +526,21 @@ class PosQuickCheckoutAPIView(APIView):
                         shift_id=data.get("shift"), cashbox_id=data.get("cashbox"),
                     )
                     if shift.cashier_id != user.id and not _is_owner_like(user):
-                        raise ValidationError({"shift": "Это не ваша смена."})
+                        raise self._shift_not_owned(request, company)
                 elif data.get("shift") and offline_at:
                     shift = _resolve_offline_shift(company=company, shift_id=data["shift"], at=offline_at)
                     if shift.cashier_id != user.id and not _is_owner_like(user):
-                        raise ValidationError({"shift": "Это не ваша смена."})
+                        raise self._shift_not_owned(request, company)
                 elif data.get("shift"):
                     shift = _resolve_requested_open_shift(company=company, cashier=user, shift_id=data["shift"])
                     if shift.cashier_id != user.id and not _is_owner_like(user):
-                        raise ValidationError({"shift": "Это не ваша смена."})
+                        raise self._shift_not_owned(request, company)
                 else:
                     shift = _find_open_shift_for_cashier(company=company, cashier=user)
                 if shift is None:
                     raise ValidationError(
-                        {"detail": "Смена не открыта. Сначала откройте смену на кассе, затем завершите продажу.", "code": "shift_closed"}
+                        {"detail": "Смена не открыта. Сначала откройте смену на кассе, затем завершите продажу.",
+                         "code": "shift_closed"}
                     )
 
                 cart = Cart.objects.create(
@@ -1388,9 +1399,11 @@ class ClientPayDebtAPIView(APIView):
        "received_by": {"id", "name"}, "received_at", "shift", "cashbox"}
 
     ТЗ Н-13: способ оплаты — `method` или `payment_method` (разные значения → 400 field_conflict).
-    Без `shift` платёж привязывается к открытой смене пользователя на выбранной кассе
-    (так было и раньше, create_auto_cashflow ищет её сам) — отвязка «вне смены» не делается,
-    чтобы не менять expected_cash у действующих касс; в ответе `shift` показывает, что вышло.
+    ТЗ 29.10 Б-13: без `shift` владелец/админ принимает деньги «в руки» — движение type:income,
+    source_kind:debt_repayment, shift:null, касса по умолчанию «Основная касса компании», в смену не попадает.
+    Кассир без `shift` — в свою открытую смену как раньше (новый клиент без открытой смены: 400 shift_required).
+    Коды: no_debt, amount_exceeds_debt (data.max), amount_invalid, shift_required, shift_closed,
+    shift_not_found, shift_not_owned (403), method_not_allowed (data.allowed, новый клиент), cashbox_not_found.
 
     Гасит от старых долгов к новым (по сроку взноса), как clients/{id}/deals/pay-any/.
     """
@@ -1409,9 +1422,21 @@ class ClientPayDebtAPIView(APIView):
         except ValueError:
             idem = uuid.uuid5(uuid.NAMESPACE_URL, f"nurcrm-pay-debt:{pk}:{key}")
 
-        from apps.main.services_debt import normalize_debt_payment_method, pick_debt_method
+        from apps.main.services_debt import (
+            VALID_DEBT_PAYMENT_METHODS, normalize_debt_payment_method, pick_debt_method,
+        )
 
-        pm = normalize_debt_payment_method(pick_debt_method(data))
+        raw_pm = pick_debt_method(data)
+        if raw_pm == "card":
+            raw_pm = "transfer"
+        if raw_pm and raw_pm not in VALID_DEBT_PAYMENT_METHODS and is_strict(request, None):
+            # ТЗ 29.10 Б-13: новый клиент получает код вместо тихой замены на transfer
+            raise ApiError(
+                "method_not_allowed", "Неизвестный способ оплаты.",
+                data={"allowed": sorted(VALID_DEBT_PAYMENT_METHODS)},
+                top={"payment_method": [f"Допустимо: {', '.join(sorted(VALID_DEBT_PAYMENT_METHODS))}."]},
+            )
+        pm = normalize_debt_payment_method(raw_pm)
         payload = {
             "amount": str(data["amount"]),
             "idempotency_key": str(idem),
@@ -1432,14 +1457,25 @@ class ClientPayDebtAPIView(APIView):
             if resp.status_code >= 400:
                 transaction.set_rollback(True)
                 return resp
-            applied = [
-                {
+            pairs = list(getattr(view, "applied", []))
+            if not pairs and getattr(view, "replayed", False):
+                # ТЗ 29.10 Б-13 п.6: повтор показывает то, что было применено в первый раз
+                merged = {}
+                for p_ in getattr(view, "replay_payments", []):
+                    d_ = merged.setdefault(p_.deal_id, [p_.deal, Decimal("0.00")])
+                    d_[1] += p_.amount
+                pairs = [(d, a) for d, a in merged.values()]
+            applied = []
+            for deal, amount in pairs:
+                # остаток долга по этой продаже после платежа и номер чека (ТЗ 29.10 Б-13 п.3)
+                fresh = ClientDeal.objects.select_related("sale").prefetch_related("installments").get(pk=deal.pk)
+                applied.append({
                     "sale": str(deal.sale_id) if deal.sale_id else None,
                     "deal": str(deal.id),
                     "amount": str(money(amount)),
-                }
-                for deal, amount in getattr(view, "applied", [])
-            ]
+                    "sale_number": fresh.sale.doc_number if fresh.sale_id else None,
+                    "sale_debt_left": str(money(max(ZERO, fresh.remaining_debt))),
+                })
         client = get_object_or_404(Client, pk=pk)
         left = sum(
             (r[2] for r in _open_debts([client.company_id], Client.objects.filter(pk=pk).values("id"))),
@@ -1457,7 +1493,7 @@ class ClientPayDebtAPIView(APIView):
                 "paid": resp.data.get("paid_total"),
                 "left": str(money(left)),
                 "applied": applied,
-                "replayed": not applied,
+                "replayed": bool(getattr(view, "replayed", False)),
                 "method": pm,
                 "payment_method": pm,
                 **info,

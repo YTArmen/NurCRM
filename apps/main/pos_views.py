@@ -3371,8 +3371,9 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
         pm = normalize_debt_payment_method(raw_pm)
 
         shift = None
+        detached = False
         shift_id = data.get("shift") or data.get("shift_id")
-        cashbox_id = data.get("cashbox_id")
+        cashbox_id = data.get("cashbox_id") or data.get("cashbox")
         if cashbox_id and not (_is_uuid(cashbox_id) and Cashbox.objects.filter(id=cashbox_id, company=sale.company).exists()):
             return Response(
                 {"detail": "Касса не найдена или не принадлежит компании.", "code": "cashbox_not_found"},
@@ -3394,10 +3395,14 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
                 company=sale.company, cashier=request.user, shift_id=shift_id, cashbox_id=cashbox_id
             )
         else:
-            shift = _find_open_shift_for_cashier(company=sale.company, cashier=request.user)
-        if shift is None and pm == "cash":
+            # ТЗ 29.10 Б-13: владелец без shift принимает «в руки» — вне смены; кассир — в свою открытую
+            detached = _is_owner_like(request.user)
+            shift = None if detached else _find_open_shift_for_cashier(company=sale.company, cashier=request.user)
+        if shift is None and pm == "cash" and not detached:
+            from core.api_compat import is_strict as _is_strict
             return Response(
-                {"detail": "Смена не открыта. Откройте смену на кассе, чтобы принять наличные.", "code": "shift_not_open"},
+                {"detail": "Смена не открыта. Откройте смену на кассе, чтобы принять наличные.",
+                 "code": "shift_required" if _is_strict(request, sale.company) else "shift_not_open"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -3444,6 +3449,7 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
             source_business_operation_id="Оплата долга",
             payment_method=pm,
             affects_shift_drawer=(pm == "cash"),
+            detached=detached,
         )
 
         from apps.main.models import sync_sale_status_from_deal
@@ -3467,6 +3473,11 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
                 "replayed": replayed,
                 "sale": SaleDetailSerializer(sale, context={"request": request}).data,
                 "cashflows": serialize_auto_cashflows(cashflows),
+                # ТЗ 29.10 Б-13 п.3: что и сколько погашено по продаже
+                "applied": [{
+                    "sale": str(sale.id), "sale_number": sale.doc_number,
+                    "amount": str(money(paid)), "sale_debt_left": str(money(left)),
+                }],
                 # ТЗ Н-13: оба имени поля способа оплаты, кто принял, смена, касса
                 "method": pm,
                 "payment_method": pm,
