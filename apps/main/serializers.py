@@ -1947,6 +1947,10 @@ class ProductSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer)
             else:
                 markup_percent = self._calc_markup(purchase_price, price)
 
+        # Б-06: recalc_price без purchase_price — пересчитать цену от текущей закупки и наценки.
+        elif recalc_price and not has_price and not has_markup:
+            price = self._calc_price(purchase_price, markup_percent)
+
         old_price = instance.price
         instance.purchase_price = purchase_price
         instance.markup_percent = markup_percent
