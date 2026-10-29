@@ -181,6 +181,8 @@ class AppShopSettings(models.Model):
     longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     points_enabled = models.BooleanField(null=True, blank=True)
     points_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    # ТЗ 29.10 Б-99: срок жизни бонусов, дней (только строка компании); null = не сгорают
+    points_expire_days = models.PositiveIntegerField(null=True, blank=True)
     geocoded_at = models.DateTimeField(null=True, blank=True)
     geocoded_address = models.CharField(max_length=255, blank=True, default="")
     geocode_status = models.CharField(max_length=16, choices=GeocodeStatus.choices, blank=True, default="")

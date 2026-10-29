@@ -386,6 +386,10 @@ CELERY_BEAT_SCHEDULE = {
     'inbox-wake-snoozed': {'task': 'apps.inbox.tasks.wake_snoozed', 'schedule': crontab(minute='*/5')},
     'inbox-alert-unanswered': {'task': 'apps.inbox.tasks.alert_unanswered', 'schedule': crontab(minute='*/15')},
     'inbox-cleanup': {'task': 'apps.inbox.tasks.cleanup_old_data', 'schedule': crontab(hour=4, minute=10)},
+    'tz1029-expire-bonuses': {  # ТЗ 29.10 Б-99: сгорание бонусов по сроку
+        'task': 'apps.main.tz1029_bonus_tasks.expire_bonuses',
+        'schedule': crontab(hour=3, minute=50),
+    },
     'tz26-print-jobs-purge': {  # ТЗ 26.10 Б-69: задания печати хранятся 7 дней
         'task': 'apps.main.tz26.pos_print.tasks.purge_print_jobs',
         'schedule': crontab(hour=3, minute=40),
