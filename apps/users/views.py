@@ -15,7 +15,8 @@ from apps.users.permissions_flags import EmployeesListAccess, denied  # ТЗ Н-
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.throttling import SimpleRateThrottle
+from rest_framework.exceptions import Throttled, NotFound, PermissionDenied, ValidationError
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -365,7 +366,43 @@ def _emit_employee_changed(request, employee, action, fields=None):
         logger.exception("employee_changed not recorded")
 
 
-class EmployeeWriteDeniedMixin:
+class _EmployeeThrottled(Throttled):
+    custom_code = "too_many_requests"
+    default_detail = "Слишком много изменений сотрудников. Повторите попытку позже."
+
+
+class EmployeeWriteThrottle(SimpleRateThrottle):
+    """ТЗ 29.10 Б-101 п.6: не больше 30 изменений сотрудников в минуту на компанию."""
+
+    scope = "employee_write"
+    rate = "30/minute"
+
+    def get_cache_key(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return None
+        company = _get_company(user)
+        ident = f"c{company.pk}" if company else f"u{user.pk}"
+        return self.cache_format % {"scope": self.scope, "ident": ident}
+
+    def allow_request(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return super().allow_request(request, view)
+
+    def throttle_failure(self):
+        return False
+
+
+class EmployeeWriteThrottleMixin:
+    def get_throttles(self):
+        return super().get_throttles() + [EmployeeWriteThrottle()]
+
+    def throttled(self, request, wait):
+        raise _EmployeeThrottled(wait=wait)
+
+
+class EmployeeWriteDeniedMixin(EmployeeWriteThrottleMixin):
     """ТЗ 29.10 Б-101: отказ в правах на сотрудников — 403 permission_denied, required=can_edit_employees."""
 
     def permission_denied(self, request, message=None, code=None):

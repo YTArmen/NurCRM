@@ -145,10 +145,13 @@ def _api_exception_handler(exc, context):
         data.setdefault("detail", _first_message(fields))
 
     if response.status_code == 429:
-        data["code"] = "rate_limited"
+        # ТЗ 29.10 Б-101: исключение может задать свой code (too_many_requests) и retry_after в теле.
+        data["code"] = getattr(exc, "custom_code", None) or "rate_limited"
         wait = getattr(exc, "wait", None)
         if wait is not None and "Retry-After" not in response:
             response["Retry-After"] = str(int(wait) + 1)
+        if getattr(exc, "custom_code", None) and "Retry-After" in response:
+            data["retry_after"] = int(response["Retry-After"])
     return response
 
 
