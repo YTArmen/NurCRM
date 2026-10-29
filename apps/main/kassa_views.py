@@ -46,6 +46,9 @@ from apps.main.pos_utils import money, qty3
 from apps.main.tz26.pos_sync.services import return_origin_fields  # Б-67
 from apps.main.views import CompanyBranchRestrictedMixin, _filter_clients_visible_for_user
 from core.api_compat import is_new_client, is_strict, parse_client
+import logging
+
+logger = logging.getLogger(__name__)
 from core.exceptions import ApiError
 from apps.main.tz26.hw_prices.services import (
     attach_debtor_objects as hw_attach_debtor_objects,
@@ -205,6 +208,24 @@ class QuickCheckoutPaymentSerializer(serializers.Serializer):
         return super().to_internal_value(data)
 
 
+
+class SoftMoneyField(serializers.Field):
+    """Горячая правка 29.10: сверочная сумма (expected_total) — подсказка, а не условие продажи.
+    Касса шлёт double с хвостом (1297.5400000000001) — DRF DecimalField отказывал «не более 12 цифр».
+    Округляем до копеек, мусор — None (сверка просто не выполняется)."""
+
+    def to_internal_value(self, data):
+        if data in (None, ""):
+            return None
+        try:
+            return money(Decimal(str(data)).quantize(Decimal("0.01")))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def to_representation(self, value):
+        return None if value is None else str(value)
+
+
 class QuickCheckoutSerializer(serializers.Serializer):
     shift = serializers.UUIDField(required=False, allow_null=True)
     client = serializers.UUIDField(required=False, allow_null=True)
@@ -215,7 +236,7 @@ class QuickCheckoutSerializer(serializers.Serializer):
     )
     bonus_redeemed = MoneyField(required=False, allow_null=True)
     # ТЗ Н-15: итог, который видит кассир; расхождение с серверным > 0.01 → 409 total_mismatch
-    expected_total = MoneyField(required=False, allow_null=True)
+    expected_total = SoftMoneyField(required=False, allow_null=True)
     payment = QuickCheckoutPaymentSerializer()
     prepayment_method = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     consultant_id = serializers.UUIDField(required=False, allow_null=True)
@@ -747,6 +768,11 @@ class PosQuickCheckoutAPIView(APIView):
         cart.recalc()
         server_total = money(cart.total or ZERO)
         if abs(server_total - money(expected)) <= TOTAL_TOLERANCE:
+            return
+        # Горячая правка 29.10: до 29.10 сверки не было — старым кассам и сайту чек не отказываем,
+        # только пишем расхождение в журнал. 409 total_mismatch — для новых клиентов.
+        if req is not None and not is_strict(req):
+            logger.warning("total_mismatch (не strict) cart=%s server=%s expected=%s", cart.pk, server_total, expected)
             return
         lines = []
         for i, ci in enumerate(CartItem.objects.filter(cart=cart)):

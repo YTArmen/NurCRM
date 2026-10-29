@@ -50,7 +50,19 @@ def resolve_origin(request, data=None) -> dict:
         errors["device_name"] = [f"Не длиннее {DEVICE_NAME_MAX} символов."]
 
     if errors:
-        raise ValidationError(errors)
+        from core.api_compat import is_strict
+
+        if is_strict(request):
+            raise ValidationError(errors)
+        # горячая правка 29.10: старые кассы и сайт — неверные значения не отклоняют продажу
+        if "source" in errors:
+            source = source_from_header(request)
+            if source not in SOURCES:
+                source = SOURCES[0]
+        if "device_key" in errors:
+            device_key = ""
+        if "device_name" in errors:
+            device_name = device_name[:DEVICE_NAME_MAX]
     return {"source": source, "device_key": device_key, "device_name": device_name}
 
 

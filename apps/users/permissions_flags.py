@@ -47,6 +47,18 @@ def denied(flags, detail=None):
     return PermissionDenied(detail=body)
 
 
+def _legacy_client(request) -> bool:
+    """Выкатка 29.10 (горячая правка): права Н-16 по флагам действуют только для новых клиентов
+    (заголовок X-NurMarket-Client нужной версии) или при флаге компании api_strict_2026_10.
+    Веб-касса и старые кассы получают прежнее поведение — как до 29.10, без новых 403."""
+    try:
+        from core.api_compat import is_strict
+
+        return not is_strict(request)
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def flag_permission(*flags, read=False, detail=None, allow=None):
     """Класс permission: нужен любой из флагов (владелец/админ — всегда)."""
 
@@ -58,6 +70,8 @@ def flag_permission(*flags, read=False, detail=None, allow=None):
             if not (user and user.is_authenticated):
                 return False  # аутентификацию проверяет IsAuthenticated
             if is_privileged(user):
+                return True
+            if _legacy_client(request):
                 return True
             if not read and request.method in SAFE:
                 return True
@@ -94,6 +108,8 @@ class EmployeesListAccess(permissions.BasePermission):
             return False
         if is_privileged(user) or getattr(user, "role", None) in ("rop", "supervisor"):
             return True
+        if _legacy_client(request):
+            return True  # до 29.10 список отдавался любому сотруднику — старые кассы и сайт так и работают
         # role=salesperson — это и кассир магазина; консалтинг-продавца отличает привязка к региону
         if has_any_flag(user, self.FLAGS):
             return True

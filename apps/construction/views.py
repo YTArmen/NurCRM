@@ -654,6 +654,9 @@ class CashFlowWriteAccess(permissions.BasePermission):
             return False
         if request.method in permissions.SAFE_METHODS or is_privileged(user) or has_any_flag(user, ["can_view_cashbox"]):
             return True
+        from apps.users.permissions_flags import _legacy_client
+        if _legacy_client(request):
+            return True  # горячая правка 29.10: старые кассы и сайт — как до Н-16
         if request.method == "POST":
             data = request.data if hasattr(request.data, "get") else {}
             # операции ящика смены: привязку к своей открытой смене проверяет сериализатор (400 shift)
@@ -678,6 +681,9 @@ class CashFlowWriteAccess(permissions.BasePermission):
         user = request.user
         if request.method in permissions.SAFE_METHODS or is_privileged(user) or has_any_flag(user, ["can_view_cashbox"]):
             return True
+        from apps.users.permissions_flags import _legacy_client
+        if _legacy_client(request):
+            return True  # горячая правка 29.10
         shift = getattr(obj, "shift", None)
         if shift is not None and shift.cashier_id == user.id:
             return True

@@ -5582,6 +5582,10 @@ class SaleAddCustomItemAPIView(MarketCashierOnlyMixin, APIView):
         qty = _to_decimal(ser.validated_data.get("quantity", "1.000"), default=Decimal("1.000"))
         qty = qty3(qty)
 
+        # Горячая правка 29.10: у старой кассы «Расход» снова отдельная строка с минусом, как до 29.10.
+        # Перевод в скидку чека терялся: любой следующий запрос, пишущий скидку чека, затирал её,
+        # и сумма на сервере расходилась с кассой («разница 435, продажа не проведена»).
+        negative_expense = False
         if negative_expense:
             extra = _q2(-price * qty)
             cart.order_discount_percent = None
