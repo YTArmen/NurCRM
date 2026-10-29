@@ -85,6 +85,8 @@ DEFAULT_CORS_ORIGINS = DEV_CORS_ORIGINS
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-dev-only-change-me")
+# ТЗ 29.10 Б-96: секрет подписи списка покупок (пусто — выводится из SECRET_KEY)
+PURCHASES_SIGNING_KEY = os.getenv("PURCHASES_SIGNING_KEY", "")
 # Ключ support.nurcrm.kg для конструктора тарифа «По договору» (apps/users/support_views.py). Пусто — выключено.
 NURCRM_SUPPORT_TOKEN = os.getenv("NURCRM_SUPPORT_TOKEN", "")
 

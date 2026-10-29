@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 from apps.main.change_feed import RETENTION_DAYS, feed_type, serialize_event
 from apps.main.models import ChangeEvent
 from apps.main.price_check import _etag_matches
+from core.http_cache import ETagMixin
 from apps.main.views import CompanyBranchRestrictedMixin
 
 MAX_LIMIT = 1000
@@ -33,7 +34,7 @@ def decode_cursor(value: str):
         return None
 
 
-class ChangesFeedView(CompanyBranchRestrictedMixin, APIView):
+class ChangesFeedView(ETagMixin, CompanyBranchRestrictedMixin, APIView):
     """
     GET /api/main/changes/?since=<cursor>&types=a,b&limit=500
     → {cursor, has_more, events:[{id,type,at,branch,actor,entity,entity_id,data}]}

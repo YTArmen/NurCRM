@@ -22,6 +22,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.http_cache import ETagMixin
 from apps.main.telegram_bot.crypto import decrypt_secret, encrypt_secret
 from apps.users.models import (
     Branch,
@@ -196,7 +197,7 @@ def _apply_patch(obj, body, user=None, expected_keys=None):
     return changed
 
 
-class _AppSettingsMixin:
+class _AppSettingsMixin(ETagMixin):
     """get/patch для записи настроек (личной или компании)."""
 
     model = None
@@ -356,6 +357,7 @@ class CompanyFeatureActivateAPIView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    force_strict = False  # ТЗ 29.10 Б-96: purchases/activate всегда отвечает по-новому (409/429)
 
     def post(self, request):
         from datetime import timedelta as _td
@@ -378,7 +380,7 @@ class CompanyFeatureActivateAPIView(APIView):
         by_company = recent.filter(company=company).count()
         by_ip = recent.filter(ip=ip).count() if ip else 0
         # Б-02/Б-36: старый клиент (без флага api_strict_2026_10) ждёт прежний 400 key_used, новый — 409/429
-        strict = is_strict(request, company)
+        strict = self.force_strict or is_strict(request, company)
         if max(by_company, by_ip) >= KEY_ATTEMPTS_PER_HOUR:
             if not strict:
                 return Response({"detail": "Слишком много неверных ключей. Попробуйте через час.", "code": "key_used"},

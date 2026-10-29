@@ -35,6 +35,8 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.http_cache import ETagMixin, etag_matches
+
 from .models import Product, ProductDeletion
 from .price_check import catalog_version
 from .views import CompanyBranchRestrictedMixin, _filter_products_company_only
@@ -91,7 +93,7 @@ def _row(r):
     return out
 
 
-class ProductChangesView(CompanyBranchRestrictedMixin, APIView):
+class ProductChangesView(ETagMixin, CompanyBranchRestrictedMixin, APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
@@ -105,8 +107,8 @@ class ProductChangesView(CompanyBranchRestrictedMixin, APIView):
         scope = _filter_products_company_only(self, Product.objects.all())
         version = catalog_version(scope)["version"]
         etag = '"%s"' % hashlib.sha1(("%s|%s|%s" % (version, _ms(since) if since else "", limit)).encode()).hexdigest()[:24]
-        inm = request.headers.get("If-None-Match") or ""
-        if since is not None and inm and etag in [t.strip() for t in inm.split(",")]:
+        # ТЗ 29.10 Б-46: W/"…", список через запятую и `*` тоже дают 304 (раньше сравнивали строку целиком).
+        if etag_matches(request.headers.get("If-None-Match"), etag):
             resp = HttpResponse(status=304)
             resp["ETag"] = etag
             resp["Cache-Control"] = "private, no-cache"
