@@ -24,11 +24,45 @@ FEATURES = (
     "negative_custom_rejected", "client_documents", "bot_owner_server", "salary_payouts",
     "supplier_pay_debt", "access_codes", "changes_feed", "receipt_create_deal", "rentals_paged",
     "strict_permissions", "route_not_found", "client_header", "employee_limits", "support_constructor",
+    "etag_304", "purchases",
 )
 
 
+_VERSION_CACHE = []
+
+
+def _detect_version():
+    """ТЗ 29.10 Б-01: SERVER_VERSION (env) → /home/nur/.server_version → git short hash → "dev"."""
+    for name in ("SERVER_VERSION", "NURCRM_SERVER_VERSION"):
+        v = (os.getenv(name) or "").strip()
+        if v:
+            return v
+    try:
+        with open("/home/nur/.server_version", encoding="utf-8") as fh:
+            v = fh.read().strip()
+        if v:
+            return v
+    except OSError:
+        pass
+    try:
+        import subprocess
+
+        from django.conf import settings
+
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(settings.BASE_DIR),
+                             capture_output=True, text=True, timeout=3)
+        v = (out.stdout or "").strip()
+        if out.returncode == 0 and v:
+            return v
+    except Exception:
+        pass
+    return "dev"
+
+
 def server_version():
-    return os.getenv("NURCRM_SERVER_VERSION", "") or "dev"
+    if not _VERSION_CACHE:
+        _VERSION_CACHE.append(_detect_version())
+    return _VERSION_CACHE[0]
 
 
 def _company(user):
