@@ -1,3 +1,4 @@
+from apps.main.services_debt import debt_detached_client as _debt_detached_client  # ТЗ 29.10 Б-13
 from apps.integrations.idempotency import idempotent
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP, InvalidOperation
 from uuid import UUID, uuid4, uuid5
@@ -4477,6 +4478,7 @@ class ClientDealsPayAnyAPIView(APIView, CompanyBranchRestrictedMixin):
             and not data.get("shift_id")
             and not getattr(request, "_pos_request_accept", False)
             and _is_owner_like(request.user)
+            and _debt_detached_client(request, client.company)
         )
         if (
             not is_supplier and not data.get("shift_id") and not detached and pm0 == "cash"

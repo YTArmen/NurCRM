@@ -11,6 +11,7 @@ from apps.main.models import Client, ClientDeal, Product, Sale
 from apps.users.models import Branch, Company, User
 
 STRICT = {"HTTP_X_NURMARKET_CLIENT": "kassa/1.17.61"}
+OWNER_APP = {"HTTP_X_NURMARKET_CLIENT": "owner/1.17.61"}  # программа владельца
 
 
 class B13Base(TestCase):
@@ -69,7 +70,7 @@ class ClientPayDebtOutOfShiftTests(B13Base):
     def test_no_shift_cash_does_not_touch_open_shift(self):
         sh = self.shift(self.owner)
         before = self.expected(sh)
-        r = self.pay(key="K1")
+        r = self.pay(key="K1", hdr=OWNER_APP)
         self.assertEqual(r.status_code, 200, r.content)
         d = r.json()
         self.assertEqual((d["paid"], d["left"]), ("30.00", "70.00"))
@@ -83,6 +84,18 @@ class ClientPayDebtOutOfShiftTests(B13Base):
         self.assertIsNone(cf.shift_id)
         self.assertEqual(cf.type, CashFlow.Type.INCOME)
         self.assertEqual(cf.cashbox_id, self.main_box.id)
+
+    def test_owner_at_kassa_with_open_shift_goes_to_shift(self):
+        # Владелец сам стоит за кассой: старая касса (без заголовка) и новая касса shift не шлют —
+        # наличные идут в его открытую смену, как раньше.
+        sh = self.shift(self.owner)
+        before = self.expected(sh)
+        self.assertEqual(self.pay(amount="10.00").status_code, 200)
+        self.assertEqual(self.expected(sh), before + 10)
+        r = self.pay(amount="5.00", hdr=STRICT)
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()["shift"], str(sh.id))
+        self.assertEqual(self.expected(sh), before + 15)
 
     def test_applied_has_sale_number_and_debt_left(self):
         d = self.pay().json()
@@ -201,7 +214,7 @@ class PayAnyAndSalePayDebtTests(B13Base):
         before = self.expected(sh)
         r = self.api.post(
             f"/api/main/clients/{self.client_obj.id}/deals/pay-any/",
-            {"amount": "30.00", "method": "cash", "idempotency_key": str(uuid.uuid4())}, format="json",
+            {"amount": "30.00", "method": "cash", "idempotency_key": str(uuid.uuid4())}, format="json", **OWNER_APP,
         )
         self.assertEqual(r.status_code, 200, r.content)
         d = r.json()
@@ -236,7 +249,7 @@ class PayAnyAndSalePayDebtTests(B13Base):
     def test_sale_pay_debt_out_of_shift(self):
         sh = self.shift(self.owner)
         before = self.expected(sh)
-        r = self._sale_pay()
+        r = self._sale_pay(hdr=OWNER_APP)
         self.assertEqual(r.status_code, 200, r.content)
         d = r.json()
         self.assertIsNone(d["shift"])

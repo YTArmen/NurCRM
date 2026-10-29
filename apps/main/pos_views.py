@@ -1,3 +1,4 @@
+from apps.main.services_debt import debt_detached_client as _debt_detached_client  # ТЗ 29.10 Б-13
 from apps.users.pin import pin_guard
 from apps.integrations.idempotency import idempotent
 from rest_framework import generics, status, permissions, filters
@@ -3396,7 +3397,7 @@ class SalePayDebtAPIView(MarketCashierOnlyMixin, CompanyBranchRestrictedMixin, A
             )
         else:
             # ТЗ 29.10 Б-13: владелец без shift принимает «в руки» — вне смены; кассир — в свою открытую
-            detached = _is_owner_like(request.user)
+            detached = _is_owner_like(request.user) and _debt_detached_client(request, sale.company)
             shift = None if detached else _find_open_shift_for_cashier(company=sale.company, cashier=request.user)
         if shift is None and pm == "cash" and not detached:
             from core.api_compat import is_strict as _is_strict
