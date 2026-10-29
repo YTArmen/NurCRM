@@ -1200,7 +1200,8 @@ class MassIncomingBatchTests(KassaBase):
         self.other.refresh_from_db()
         self.assertEqual(self.product.quantity, Decimal("13"))
         self.assertEqual((self.other.quantity, self.other.price), (Decimal("2"), Decimal("120.00")))
-        self.assertEqual(r.data["items"][0], {"product_id": str(self.product.id), "quantity": "13.000"})
+        row = r.data["items"][0]  # ТЗ 29.10 Б-42: к старым полям добавлены client_row_id/unit/price…
+        self.assertEqual({k: row[k] for k in ("product_id", "quantity")}, {"product_id": str(self.product.id), "quantity": "13.000"})
 
     def test_creates_from_global_and_manually(self):
         r = self._post([
