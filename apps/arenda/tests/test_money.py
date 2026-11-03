@@ -407,3 +407,52 @@ class ManualChargeTests(MoneyBase):
         self.assertEqual(self.client.post(f"{API}charges/{cid}/void/", {"reason": "ещё"}, format="json").status_code, 409)
         from apps.arenda.models import AuditLog
         self.assertTrue(AuditLog.objects.filter(object_type="charge", action="void", object_id=cid).exists())
+
+
+class DoublePenaltyTests(ArendaBase):
+    """Автопеня 3 дня + оплата с флажком «добавить пеню»: итог = Долг × ставка × дни, без удвоения."""
+
+    def test_auto_penalty_then_paid_with_flag_not_doubled(self):
+        from apps.arenda.defaults import ensure_company_defaults
+        from apps.arenda.models import ReminderRule
+        from apps.arenda.services.reminders import run_auto_reminders
+
+        from .base import orm_charge, orm_lease
+        ensure_company_defaults(self.company)
+        ReminderRule.objects.filter(company=self.company, kind="penalty_from_day_1").update(enabled=True)
+        u, t = self.unit("101"), self.tenant()
+        lease = orm_lease(self, t, [u], date(2026, 1, 1), penalty_rate="0.100")
+        orm_charge(self, t, lease, date(2026, 10, 17), 1_000_000)
+        for d in (18, 19, 20):
+            run_auto_reminders(self.company, date(2026, 10, d))
+        pens = Charge.objects.filter(tenant_id=t["id"], kind="penalty")
+        self.assertEqual(sorted(p.amount for p in pens), [1000, 1000, 1000])
+        # повторный прогон того же дня ничего не добавляет
+        run_auto_reminders(self.company, date(2026, 10, 20))
+        self.assertEqual(pens.count(), 3)
+        # 21-го (4-й день просрочки) оплата с флажком: формула 1 000 000 × 0,1% × 4 = 4000, 3000 уже начислено
+        with mock.patch("django.utils.timezone.localdate", return_value=date(2026, 10, 21)):
+            r = self.client.post(API + "payments/", {"tenant": t["id"], "amount": 1_004_000, "method": "cash",
+                                                     "add_penalty": True}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        total = sum(p.amount for p in Charge.objects.filter(tenant_id=t["id"], kind="penalty", voided_at__isnull=True))
+        self.assertEqual(total, calc_penalty(1_000_000, "0.100", 4))  # 4000, а не 7000
+        self.assertEqual(r.data["debt_after"], 0)
+        self.assertEqual(r.data["receipt"]["snapshot"]["penalty"], 4000)
+
+    def test_flag_adds_only_missing_part(self):
+        from apps.arenda.defaults import ensure_company_defaults
+        from apps.arenda.services.reminders import create_penalty_charge
+
+        from .base import orm_charge, orm_lease
+        ensure_company_defaults(self.company)
+        u, t = self.unit("101"), self.tenant()
+        lease = orm_lease(self, t, [u], date(2026, 1, 1))
+        orm_charge(self, t, lease, date(2026, 10, 17), 1_000_000)
+        create_penalty_charge(self.company, t["id"], lease, date(2026, 10, 18), 1_000_000, "0.100")  # только 1 день
+        with mock.patch("django.utils.timezone.localdate", return_value=date(2026, 10, 20)):
+            r = self.client.post(API + "payments/", {"tenant": t["id"], "amount": 1_003_000, "method": "cash",
+                                                     "add_penalty": True}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        total = sum(p.amount for p in Charge.objects.filter(tenant_id=t["id"], kind="penalty", voided_at__isnull=True))
+        self.assertEqual(total, 3000)

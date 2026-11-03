@@ -132,6 +132,16 @@ def _snapshot(payment, settings_obj, allocations, debt_after):
     }
 
 
+def accrued_penalty(company, tenant, since) -> int:
+    """Уже начисленная (не отменённая) пеня за текущий непрерывный период просрочки: срок начисления не раньше since
+    (since — срок самого старого неоплаченного начисления; None — просрочки нет)."""
+    if since is None:
+        return 0
+    qs = Charge.objects.filter(company=company, tenant_id=tenant.pk, kind="penalty", voided_at__isnull=True,
+                               due_date__gte=since)
+    return int(qs.aggregate(s=Sum("amount"))["s"] or 0)
+
+
 @transaction.atomic
 def post_payment(*, company, settings_obj, user, branch_id, tenant, amount, method, day, add_penalty=False,
                  description="", today=None):
@@ -144,6 +154,8 @@ def post_payment(*, company, settings_obj, user, branch_id, tenant, amount, meth
             info = tenant_debt(company, tenant, today, settings_obj.soon_days)
             pen = calc_penalty(info.overdue_base, tenant_penalty_rate(tenant, settings_obj.penalty_rate),
                                info.overdue_days)
+            # итог за период просрочки = Долг × ставка × дни: уже начисленную пеню (автоправило, вручную) вычитаем
+            pen = max(0, pen - accrued_penalty(company, tenant, info.oldest_due))
             penalty_charge, created = create_penalty_charge(
                 company=company, tenant_id=tenant.pk, branch_id=branch_id, on_date=today, amount=pen,
                 description=f"Пеня на {today:%d.%m.%Y}", created_by=user)
