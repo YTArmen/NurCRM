@@ -16,6 +16,7 @@ from ..models import Charge, Lease, Payment, Reminder, ReminderRule, Tenant
 from .charges import create_penalty_charge as _create_penalty
 from .charges import month_start
 from .debt import allocate_fifo, calc_penalty, compute_debt
+from . import sender
 from .stats import rented_leases
 
 logger = logging.getLogger(__name__)
@@ -129,9 +130,20 @@ def send_owner_telegram(company, text):
         return False, "Ошибка отправки в Telegram"
 
 
+def _tenant_phone(reminder):
+    from ..views_access import normalize_phone
+    raw = reminder.tenant.phone if reminder.tenant_id else ""
+    return normalize_phone(raw) or (raw or "").strip()
+
+
 def deliver(reminder):
-    """SMS/WhatsApp — заглушка (not_sent). Telegram — владельцу, если настроен."""
-    if reminder.channel == "telegram":
+    """SMS/WhatsApp — через sender (шлюз из env; не настроен -> not_sent). Telegram — владельцу, если настроен."""
+    if reminder.channel in ("sms", "whatsapp"):
+        status, err = sender.send_message(reminder.channel, _tenant_phone(reminder), reminder.text, reminder.id)
+        reminder.status, reminder.error = status, err
+        reminder.sent_at = timezone.now() if status == "sent" else None
+        reminder.save(update_fields=["status", "error", "sent_at", "updated_at"])
+    elif reminder.channel == "telegram":
         ok, err = send_owner_telegram(reminder.company, reminder.text)
         reminder.status = "sent" if ok else "not_sent"
         reminder.error = err

@@ -40,8 +40,10 @@ def _app_link():
 
 
 def send_invite_sms(phone, text):
-    """Заглушка SMS-шлюза. Текст с паролем живёт только в памяти; возвращает True, если реально отправлено."""
-    return False
+    """SMS через общий шлюз (services/sender). Текст с паролем живёт только в памяти; True, если принято шлюзом."""
+    from .services import sender
+    status, _ = sender.send_message("sms", normalize_phone(phone) or phone, text)
+    return status == "sent"
 
 
 class AccessGrantMixin(CtxMixin):

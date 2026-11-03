@@ -15,6 +15,7 @@ urlpatterns = [
     path("notifications/summary/", vf.SummaryView.as_view()),
     path("notifications/remind/", vf.RemindView.as_view()),
     path("reminders/", vf.ReminderListView.as_view()),
+    path("reminders/delivery/", vf.DeliveryReportView.as_view()),
     path("reminder-rules/", vf.RulesView.as_view()),
     path("analytics/", vn.AnalyticsView.as_view()),
     path("analytics/<str:tab>/", vn.AnalyticsView.as_view()),

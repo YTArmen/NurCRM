@@ -73,19 +73,30 @@ class RemindTests(NotifyBase):
         self.scenario()
         self.client.get("/api/arenda/reminder-rules/")
         ReminderRule.objects.filter(company=self.company, kind="due_day").update(params={"telegram_chat_id": "42"})
+        from apps.arenda.models import Tenant
+        from apps.arenda.services.reminders import make_reminder
         with mock.patch("apps.arenda.services.reminders._telegram_post", return_value=True) as m:
-            r = self.client.post("/api/arenda/notifications/remind/", {"all": True, "channel": "telegram"}, format="json")
-        self.assertEqual(r.data["results"][0]["status"], "sent")
+            rem, _ = make_reminder(self.company, Tenant.objects.get(pk=self.ta["id"]), "telegram", "Копия")
+        self.assertEqual(rem.status, "sent")
         m.assert_called_once()
         self.assertEqual(m.call_args[0][:2], ("T", "42"))
 
     def test_telegram_not_configured_is_not_sent(self):
         self.scenario()
+        from apps.arenda.models import Tenant
+        from apps.arenda.services.reminders import make_reminder
         with mock.patch("apps.arenda.services.reminders._telegram_post") as m:
-            r = self.client.post("/api/arenda/notifications/remind/", {"all": True, "channel": "telegram"}, format="json")
+            rem, _ = make_reminder(self.company, Tenant.objects.get(pk=self.ta["id"]), "telegram", "Копия")
         m.assert_not_called()
-        self.assertEqual(r.data["results"][0]["status"], "not_sent")
-        self.assertEqual(r.data["results"][0]["error"], "Telegram не настроен")
+        self.assertEqual(rem.status, "not_sent")
+        self.assertEqual(rem.error, "Telegram не настроен")
+
+    def test_manual_telegram_to_tenant_rejected(self):
+        self.scenario()
+        r = self.client.post("/api/arenda/notifications/remind/", {"all": True, "channel": "telegram"}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Telegram — только для копий владельцу. Выберите SMS или WhatsApp.", str(r.data))
+        self.assertEqual(Reminder.objects.count(), 0)
 
 
 class RulesTests(NotifyBase):
@@ -186,3 +197,82 @@ class AutoRemindersTests(NotifyBase):
         self.assertIn("5.00%", qs.get().text)
         self.run_cmd(d + timedelta(days=1))
         self.assertEqual(Reminder.objects.filter(rule_kind="indexation").count(), 1)
+
+
+GW = dict(ARENDA_SMS_URL="https://sms.example/send", ARENDA_SMS_TOKEN="tok",
+          ARENDA_WHATSAPP_URL="https://wa.example/send", ARENDA_WHATSAPP_TOKEN="wtok")
+
+
+class SenderTests(NotifyBase):
+    def test_not_configured_keeps_not_sent_with_text(self):
+        self.scenario()
+        r = self.client.post("/api/arenda/notifications/remind/", {"all": True, "channel": "sms"}, format="json")
+        self.assertEqual(r.data["results"][0]["status"], "not_sent")
+        self.assertEqual(r.data["results"][0]["error"], "Сервис SMS не подключён")
+        r = self.client.post("/api/arenda/notifications/remind/", {"all": True, "channel": "whatsapp"}, format="json")
+        self.assertEqual(r.data["results"][0]["error"], "Сервис WhatsApp не подключён")
+
+    @override_settings(**GW)
+    def test_sms_sent_when_gateway_2xx(self):
+        self.scenario()
+        with mock.patch("apps.arenda.services.sender._post", return_value=200) as m:
+            r = self.client.post("/api/arenda/notifications/remind/", {"all": True, "channel": "sms"}, format="json")
+        res = r.data["results"][0]
+        self.assertEqual(res["status"], "sent")
+        self.assertIsNotNone(res["sent_at"])
+        url, token, payload = m.call_args[0]
+        self.assertEqual((url, token), ("https://sms.example/send", "tok"))
+        self.assertEqual(payload["phone"], "+996700111222")
+        self.assertEqual(payload["id"], res["id"])
+
+    @override_settings(**GW)
+    def test_whatsapp_uses_own_gateway_and_failure_is_failed(self):
+        self.scenario()
+        with mock.patch("apps.arenda.services.sender._post", side_effect=OSError("boom")) as m:
+            r = self.client.post("/api/arenda/notifications/remind/",
+                                 {"tenant_ids": [self.ta["id"]], "channel": "whatsapp"}, format="json")
+        self.assertEqual(m.call_args[0][0], "https://wa.example/send")
+        self.assertEqual(r.data["results"][0]["status"], "failed")
+        self.assertIn("WhatsApp", r.data["results"][0]["error"])
+
+    @override_settings(**GW)
+    def test_invite_sms_goes_through_sender(self):
+        from apps.arenda.views_access import send_invite_sms
+        with mock.patch("apps.arenda.services.sender._post", return_value=202) as m:
+            self.assertTrue(send_invite_sms("0700111222", "текст"))
+        self.assertEqual(m.call_args[0][2]["phone"], "+996700111222")
+        with mock.patch("apps.arenda.services.sender._post", return_value=500):
+            self.assertFalse(send_invite_sms("0700111222", "текст"))
+
+
+class DeliveryReportTests(NotifyBase):
+    def make(self):
+        self.scenario()
+        r = self.client.post("/api/arenda/notifications/remind/", {"all": True, "channel": "sms"}, format="json")
+        return r.data["results"][0]["id"]
+
+    @override_settings(ARENDA_DELIVERY_KEY="k1")
+    def test_delivery_requires_key(self):
+        from rest_framework.test import APIClient
+        rid = self.make()
+        anon = APIClient()
+        url = "/api/arenda/reminders/delivery/"
+        self.assertEqual(anon.post(url, {"id": rid, "status": "delivered"}, format="json").status_code, 403)
+        self.assertEqual(anon.post(url, {"id": rid, "status": "delivered"}, format="json",
+                                   HTTP_X_ARENDA_DELIVERY_KEY="bad").status_code, 403)
+        r = anon.post(url, {"id": rid, "status": "delivered"}, format="json", HTTP_X_ARENDA_DELIVERY_KEY="k1")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(Reminder.objects.get(pk=rid).status, "delivered")
+        r = anon.post(url, {"id": rid, "status": "failed", "error": "Абонент недоступен"}, format="json",
+                      HTTP_X_ARENDA_DELIVERY_KEY="k1")
+        rem = Reminder.objects.get(pk=rid)
+        self.assertEqual((rem.status, rem.error), ("failed", "Абонент недоступен"))
+        self.assertEqual(anon.post(url, {"id": rid, "status": "weird"}, format="json",
+                                   HTTP_X_ARENDA_DELIVERY_KEY="k1").status_code, 400)
+
+    def test_delivery_without_configured_key_is_403(self):
+        from rest_framework.test import APIClient
+        rid = self.make()
+        r = APIClient().post("/api/arenda/reminders/delivery/", {"id": rid, "status": "delivered"}, format="json",
+                             HTTP_X_ARENDA_DELIVERY_KEY="")
+        self.assertEqual(r.status_code, 403)

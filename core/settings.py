@@ -491,6 +491,14 @@ CELERY_BEAT_SCHEDULE = {
 # Приложение клиентов (/api/v1/)
 # ===========================
 # Отдельный бот входа (создать в @BotFather). Без токена/username вход отвечает 503 auth_unavailable.
+# Аренда помещений: шлюзы SMS/WhatsApp, ключ отчётов о доставке, бот Telegram (для копий владельцу)
+ARENDA_SMS_URL = os.getenv('ARENDA_SMS_URL', '')
+ARENDA_SMS_TOKEN = os.getenv('ARENDA_SMS_TOKEN', '')
+ARENDA_WHATSAPP_URL = os.getenv('ARENDA_WHATSAPP_URL', '')
+ARENDA_WHATSAPP_TOKEN = os.getenv('ARENDA_WHATSAPP_TOKEN', '')
+ARENDA_DELIVERY_KEY = os.getenv('ARENDA_DELIVERY_KEY', '')
+ARENDA_TELEGRAM_BOT_TOKEN = os.getenv('ARENDA_TELEGRAM_BOT_TOKEN', '')
+
 CLIENT_APP_TELEGRAM_BOT_TOKEN = os.getenv('CLIENT_APP_TELEGRAM_BOT_TOKEN', '')
 CLIENT_APP_TELEGRAM_WEBHOOK_SECRET = os.getenv('CLIENT_APP_TELEGRAM_WEBHOOK_SECRET', '')
 CLIENT_APP_BOT_USERNAME = os.getenv('CLIENT_APP_BOT_USERNAME', '')

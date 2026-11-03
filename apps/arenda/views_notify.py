@@ -1,11 +1,13 @@
 """Этап 6: уведомления, напоминания, правила автонапоминаний (ТЗ §3.9)."""
+import hmac
 import uuid
 
+from django.conf import settings as dj_settings
 from django.db import transaction
 from django.db.models import Q
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -56,6 +58,8 @@ class RemindView(CtxMixin, APIView):
         d = ser.validated_data
         if not d.get("all") and not d.get("tenant_ids"):
             raise ValidationError({"tenant_ids": ["Выберите арендаторов или «всех»."]})
+        if d["channel"] == "telegram":
+            raise ValidationError({"channel": ["Telegram — только для копий владельцу. Выберите SMS или WhatsApp."]})
         ctx = self.ctx
         today = self.today()
         s = ctx.company.arenda_settings
@@ -105,6 +109,34 @@ class ReminderListView(CtxMixin, APIView):
         pager = ArendaPagination()
         page = pager.paginate_queryset(qs, request, view=self)
         return pager.get_paginated_response([reminder_payload(r) for r in page])
+
+
+class DeliveryReportView(APIView):
+    """POST reminders/delivery/ {id, status: delivered|failed, error?} — отчёт шлюза SMS/WhatsApp о доставке.
+    Без входа, но с заголовком X-Arenda-Delivery-Key == env ARENDA_DELIVERY_KEY (ключ не задан или не совпал -> 403)."""
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        key = getattr(dj_settings, "ARENDA_DELIVERY_KEY", "") or ""
+        got = request.META.get("HTTP_X_ARENDA_DELIVERY_KEY", "")
+        if not key or not hmac.compare_digest(key.encode(), got.encode()):
+            raise ApiError("permission_denied", "Неверный ключ.", status_code=403)
+        try:
+            rid = uuid.UUID(str(request.data.get("id")))
+        except (ValueError, TypeError):
+            raise ValidationError({"id": ["Некорректный идентификатор."]})
+        status = request.data.get("status")
+        if status not in ("delivered", "failed"):
+            raise ValidationError({"status": ["Ожидается delivered или failed."]})
+        r = Reminder.objects.filter(pk=rid).first()
+        if not r:
+            raise ApiError("not_found", "Напоминание не найдено.", status_code=404)
+        r.status = status
+        r.error = (str(request.data.get("error") or "")[:255]) if status == "failed" else ""
+        r.save(update_fields=["status", "error", "updated_at"])
+        return Response(reminder_payload(r))
 
 
 def rule_payload(r):
