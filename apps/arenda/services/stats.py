@@ -10,6 +10,15 @@ from .charges import month_end, month_start
 from .debt import DebtInfo, calc_penalty, compute_debt
 
 
+def lease_covers(l, d: date) -> bool:
+    """Единое определение «сдано»: договор действует на дату d (start <= d <= end) и не расторгнут к этой дате.
+    Используют и шахматка (stats), и аналитика (analytics)."""
+    end = l.end_date
+    if l.status == "terminated" and l.terminated_at:
+        end = min(end, l.terminated_at) if end else l.terminated_at
+    return l.start_date <= d and (end is None or d <= end)
+
+
 def rented_leases(company, today, branch_ids=None):
     """Договоры, занимающие помещения сейчас: активные, начавшиеся (истёкшие остаются до расторжения)."""
     qs = (Lease.objects.filter(company=company, status="active", archived_at__isnull=True, start_date__lte=today)
@@ -46,7 +55,7 @@ def unit_state_map(company, today, branch_ids=None, soon_days=7):
     units = Unit.objects.filter(company=company, archived_at__isnull=True)
     if branch_ids is not None:
         units = units.filter(branch_id__in=branch_ids)
-    leases = rented_leases(company, today, branch_ids)
+    leases = [l for l in rented_leases(company, today, branch_ids) if lease_covers(l, today)]
     debts = debt_map(company, today, branch_ids, {l.tenant_id for l in leases}, soon_days)
     by_unit = {}
     for lease in leases:

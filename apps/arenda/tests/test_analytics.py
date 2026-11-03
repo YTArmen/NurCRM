@@ -183,3 +183,47 @@ class AnalyticsTests(AnalyticsBase):
         y = self.client.get(f"{URL}?tab=overview&period=year&date=2026-09-15").data
         self.assertEqual((y["date_from"], y["date_to"]), (date(2026, 1, 1), date(2026, 12, 31)))
         self.assertEqual(y["charged"], 10_000_000)
+
+
+class ConsistencyTests(ArendaBase):
+    """Расхождения 8: амортизация и заполняемость считаются одинаково в аналитике, итоге месяца и шахматке."""
+
+    def test_depreciation_same_in_analytics_and_month_summary(self):
+        from apps.arenda.models import Asset
+        from apps.arenda.services import analytics as an
+        from apps.arenda.services import expenses as ex
+        Asset.objects.create(company=self.company, branch=self.branch, name="Кондиционер", cost=1_000_001,
+                             purchase_date=date(2026, 3, 15), life_years=1)
+        assets = list(Asset.objects.filter(company=self.company))
+        for m in range(1, 13):
+            month = date(2026, m, 1)
+            self.assertEqual(an.depreciation_month(assets, month), ex.total_depreciation(self.company, month))
+        self.assertEqual(ex.total_depreciation(self.company, date(2026, 3, 1)), 0)  # со следующего месяца после покупки
+        total = sum(an.depreciation_month(assets, date(2026, m, 1)) for m in range(1, 13))
+        total += sum(an.depreciation_month(assets, date(2027, m, 1)) for m in range(1, 4))
+        self.assertEqual(total, 1_000_001)  # без потерь тыйынов
+
+    def test_expired_not_terminated_lease_is_not_rented_everywhere(self):
+        from apps.arenda.services import stats
+        u, t = self.unit("101"), self.tenant()
+        today = date(2026, 11, 3)
+        orm_lease(self, t, [u], date(2025, 1, 1), end=date(2026, 6, 30))  # истёк, но не расторгнут
+        st = stats.unit_state_map(self.company, today)
+        self.assertEqual(list(st.values())[0]["status"], "free")
+        self.assertEqual(stats.kpis(self.company, today)["occupancy_percent"], 0.0)
+        from apps.arenda.models import Unit
+        from apps.arenda.services import analytics as an
+        sc = an.Scope(self.company, None, "month", today, today)
+        self.assertEqual(an.occupancy_at(sc, sc.units(), today)[0], 0.0)
+
+    def test_chess_and_analytics_agree_on_occupancy(self):
+        from apps.arenda.services import analytics as an
+        from apps.arenda.services import stats
+        u1, u2, t = self.unit("101"), self.unit("102"), self.tenant()
+        today = date(2026, 11, 3)
+        orm_lease(self, t, [u1], date(2026, 1, 1), end=date(2026, 12, 31))
+        st = stats.unit_state_map(self.company, today)
+        sc = an.Scope(self.company, None, "month", today, today)
+        self.assertEqual(stats.kpis(self.company, today)["occupancy_percent"],
+                         an.occupancy_at(sc, sc.units(), today)[0])
+        self.assertEqual(sum(1 for v in st.values() if v["status"] != "free"), 1)

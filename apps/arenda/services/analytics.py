@@ -3,7 +3,7 @@
 Определения:
 - Начислено = Σ Charge (не аннулированные) по месяцу начисления `period`: аренда, коммунальные, пеня, штрафы.
 - Собрано = Σ проведённых оплат арендаторов (tenant != null) по дате оплаты. Прочий доход = оплаты без арендатора.
-- Расходы = Σ Expense (не аннулированные) по дате. Амортизация = стоимость / (срок × 12) за месяцы жизни актива.
+- Расходы = Σ Expense (не аннулированные) по дате. Амортизация — функция depreciation_for_month из services/expenses.py (та же, что в «Итоге месяца»).
 - Прибыль = Начислено + Прочий доход − Расходы − Амортизация.
 - Заполняемость = сданная площадь / вся площадь; договор занимает помещение с start_date по min(end_date, terminated_at).
 """
@@ -15,8 +15,10 @@ from decimal import Decimal
 from ..models import (Asset, Charge, Employee, Expense, Lease, Payment, PayrollLine, Remark, Tenant, Unit)
 from .charges import month_end, month_start
 from .debt import calc_penalty
+from .expenses import depreciation_for_month
 from .money import calc_rent, round_int
 from .reminders import _rates, tenant_states
+from .stats import lease_covers  # noqa: F401  (одно определение «сдано» для шахматки и аналитики)
 
 TABS = ["overview", "revenue", "expenses", "tenants", "units"]
 PERIODS = ["month", "quarter", "year"]
@@ -88,13 +90,6 @@ class Scope:
         return self._leases
 
 
-def lease_covers(l, d: date) -> bool:
-    end = l.end_date
-    if l.status == "terminated" and l.terminated_at:
-        end = min(end, l.terminated_at) if end else l.terminated_at
-    return l.start_date <= d and (end is None or d <= end)
-
-
 def occupied_unit_ids(sc: Scope, d: date) -> set:
     out = set()
     for l in sc.leases():
@@ -104,13 +99,8 @@ def occupied_unit_ids(sc: Scope, d: date) -> set:
 
 
 def depreciation_month(assets, month: date) -> int:
-    total = 0
-    for a in assets:
-        first = month_start(a.purchase_date)
-        n = a.life_years * 12
-        if first <= month < add_months(first, n):
-            total += round_int(Decimal(a.cost) / n)
-    return total
+    """Амортизация за месяц — та же функция, что в «Итоге месяца» (services/expenses.py)."""
+    return sum(depreciation_for_month(a, month) for a in assets)
 
 
 def depreciation(sc: Scope, start=None, end=None) -> int:
