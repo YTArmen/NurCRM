@@ -345,3 +345,65 @@ class WalletMethodTests(MoneyBase):
         self.assertEqual(lst.data["totals"]["month"]["by_method"]["wallet"], 250_000)
         self.assertEqual(self.client.post(API + "payments/", {"tenant": self.t["id"], "amount": 5, "method": "x"},
                                           format="json").status_code, 400)
+
+
+class ManualChargeTests(MoneyBase):
+    def body(self, **kw):
+        return {"kind": "utilities", "amount": 120_000, "period": "2026-10", "due_date": "2026-10-15",
+                "comment": "Электричество", **kw}
+
+    def test_utilities_created_raises_debt_and_logged(self):
+        before = self.debt()["debt"]
+        r = self.client.post(f"{API}tenants/{self.t['id']}/charges/", self.body(lease_id=str(self.lease_obj.id)),
+                             format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual((r.data["kind"], r.data["amount"], r.data["period"]), ("utilities", 120_000, "2026-10"))
+        self.assertEqual(r.data["debt_after"], before + 120_000)
+        from apps.arenda.models import AuditLog
+        self.assertTrue(AuditLog.objects.filter(object_type="charge", action="create", object_id=r.data["id"]).exists())
+        # повтор по тому же договору и периоду — 409
+        r2 = self.client.post(f"{API}tenants/{self.t['id']}/charges/", self.body(lease_id=str(self.lease_obj.id)),
+                              format="json")
+        self.assertEqual(r2.status_code, 409)
+
+    def test_validation(self):
+        url = f"{API}tenants/{self.t['id']}/charges/"
+        self.assertEqual(self.client.post(url, self.body(amount=0), format="json").status_code, 400)
+        self.assertEqual(self.client.post(url, self.body(period="2026-13"), format="json").status_code, 400)
+        self.assertEqual(self.client.post(url, self.body(kind="rent"), format="json").status_code, 400)
+
+    def test_penalty_owner_only_utilities_for_cash_section(self):
+        from apps.arenda.models import ArendaAccess
+        u, c = self.staff("cash@a.kg")
+        ArendaAccess.objects.create(company=self.company, user=u, sections=["cash"], all_branches=True)
+        url = f"{API}tenants/{self.t['id']}/charges/"
+        self.assertEqual(c.post(url, self.body(kind="penalty"), format="json").status_code, 403)
+        self.assertEqual(c.post(url, self.body(), format="json").status_code, 201)
+        self.assertEqual(self.client.post(url, self.body(kind="penalty", amount=5000), format="json").status_code, 201)
+        u2, c2 = self.staff("none@a.kg")
+        self.assertEqual(c2.post(url, self.body(), format="json").status_code, 403)
+
+    def test_void_owner_only_and_blocked_by_payments(self):
+        url = f"{API}tenants/{self.t['id']}/charges/"
+        cid = self.client.post(url, self.body(kind="penalty", amount=7000, due_date="2026-10-19"),
+                               format="json").data["id"]
+        from apps.arenda.models import ArendaAccess
+        u, c = self.staff("cash@a.kg")
+        ArendaAccess.objects.create(company=self.company, user=u, sections=["cash"], all_branches=True)
+        self.assertEqual(c.post(f"{API}charges/{cid}/void/", {"reason": "ошибка"}, format="json").status_code, 403)
+        self.assertEqual(self.client.post(f"{API}charges/{cid}/void/", {}, format="json").status_code, 400)
+        # оплата покрыла начисление -> 409
+        self.pay(self.debt()["debt"])
+        r = self.client.post(f"{API}charges/{cid}/void/", {"reason": "ошибка"}, format="json")
+        self.assertEqual(r.status_code, 409, r.data)
+
+    def test_void_without_payments(self):
+        before = self.debt()["debt"]
+        cid = self.client.post(f"{API}tenants/{self.t['id']}/charges/", self.body(), format="json").data["id"]
+        r = self.client.post(f"{API}charges/{cid}/void/", {"reason": "ошибка"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertTrue(r.data["voided"])
+        self.assertEqual(self.debt()["debt"], before)
+        self.assertEqual(self.client.post(f"{API}charges/{cid}/void/", {"reason": "ещё"}, format="json").status_code, 409)
+        from apps.arenda.models import AuditLog
+        self.assertTrue(AuditLog.objects.filter(object_type="charge", action="void", object_id=cid).exists())

@@ -56,3 +56,12 @@ class ActInSerializer(serializers.Serializer):
         if attrs["date_from"] > attrs["date_to"]:
             raise serializers.ValidationError({"date_to": ["Конец периода раньше начала."]})
         return attrs
+
+
+class ChargeInSerializer(serializers.Serializer):
+    kind = serializers.ChoiceField(choices=["penalty", "utilities"])
+    amount = serializers.IntegerField(min_value=1, max_value=MAX_MONEY)
+    period = serializers.RegexField(r"^\d{4}-(0[1-9]|1[0-2])$", error_messages={"invalid": "Ожидается формат ГГГГ-ММ."})
+    due_date = serializers.DateField()
+    comment = serializers.CharField(required=False, allow_blank=True, default="", max_length=200)
+    lease_id = serializers.UUIDField(required=False, allow_null=True)

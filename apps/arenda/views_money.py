@@ -20,7 +20,7 @@ from . import audit
 from .branch_filter import apply_branch, tenant_visible
 from .models import Charge, Payment, ReconciliationAct, Receipt, Reminder, Remark, Tenant
 from .permissions import ArendaSection, deny
-from .serializers_money import ActInSerializer, PaymentInSerializer, RemarkInSerializer, StornoSerializer
+from .serializers_money import ActInSerializer, ChargeInSerializer, PaymentInSerializer, RemarkInSerializer, StornoSerializer
 from .services import acts as acts_srv
 from .services import payments as pay_srv
 from .services import stats
@@ -292,6 +292,92 @@ class ReceiptPrintView(CtxMixin, APIView):
     def get(self, request, pk):
         r = _receipt_or_404(self.ctx, pk)
         return HttpResponse(pay_srv.receipt_html(r), content_type="text/html; charset=utf-8")
+
+
+# ------------------------------------------------------------------ ручные начисления
+
+
+def charge_payload(c):
+    return {"id": str(c.id), "tenant": str(c.tenant_id), "lease": str(c.lease_id) if c.lease_id else None,
+            "kind": c.kind, "period": c.period.strftime("%Y-%m"), "amount": c.amount, "due_date": c.due_date.isoformat(),
+            "description": c.description, "voided": c.voided_at is not None}
+
+
+class TenantChargesView(CtxMixin, APIView):
+    """POST tenants/<id>/charges/ {kind: penalty|utilities, amount, period: ГГГГ-ММ, due_date, comment?, lease_id?}.
+    Пеню выставляет только владелец; коммунальные — «Касса» или «Арендаторы»."""
+
+    permission_classes = [IsAuthenticated, ArendaSection("cash", "tenants")]
+
+    def post(self, request, pk):
+        from .models import Lease
+        ctx = self.ctx
+        t = _tenant_or_404(ctx, pk)
+        ser = ChargeInSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        d = ser.validated_data
+        if d["kind"] == "penalty" and not ctx.is_owner:
+            raise ApiError("permission_denied", "Пеню выставляет только владелец.", status_code=403)
+        lease = None
+        if d.get("lease_id"):
+            lease = Lease.objects.filter(pk=d["lease_id"], company=ctx.company, tenant=t).first()
+            if lease is None:
+                raise ValidationError({"lease_id": ["Договор не найден у этого арендатора."]})
+        branch_id = lease.branch_id if lease else pay_srv.tenant_branch_id(t)
+        if not branch_id:
+            raise ValidationError({"lease_id": ["У арендатора нет договора и филиала — начислять некуда."]})
+        _check_branch(ctx, branch_id)
+        period = date(int(d["period"][:4]), int(d["period"][5:7]), 1)
+        label = "Пеня" if d["kind"] == "penalty" else "Коммунальные"
+        with transaction.atomic():
+            if d["kind"] == "utilities" and lease is not None and Charge.objects.filter(
+                    lease=lease, kind="utilities", period=period).exists():
+                raise ApiError("charge_exists", "Коммунальные за этот период по договору уже выставлены.",
+                               status_code=409)
+            ch = Charge.objects.create(
+                company=ctx.company, branch_id=branch_id, tenant=t, lease=lease, kind=d["kind"], period=period,
+                amount=d["amount"], due_date=d["due_date"],
+                description=(d["comment"].strip() or f"{label} за {period:%m.%Y} (вручную)")[:255],
+                created_by=request.user)
+            pay_srv.rebuild_allocations(ctx.company, t)
+            audit.log(request, ctx.company, "create", "charge", ch, branch=ch.branch,
+                      object_name=f"{t.name}: {label} {period:%m.%Y}",
+                      after={"kind": ch.kind, "amount": ch.amount, "period": d["period"],
+                             "due_date": d["due_date"].isoformat(), "lease": str(lease.id) if lease else None})
+        out = charge_payload(ch)
+        out["debt_after"] = pay_srv.tenant_debt(ctx.company, t, timezone.localdate(),
+                                                ctx.company.arenda_settings.soon_days).debt
+        return Response(out, status=201)
+
+
+class ChargeVoidView(CtxMixin, APIView):
+    """POST charges/<id>/void/ {reason} — только владелец; если по начислению есть разнесённые оплаты — 409."""
+
+    permission_classes = [IsAuthenticated, ArendaSection("cash", "tenants")]
+
+    def post(self, request, pk):
+        from .models import PaymentAllocation
+        ctx = self.ctx
+        if not ctx.is_owner:
+            raise ApiError("permission_denied", "Отменить начисление может только владелец.", status_code=403)
+        ser = StornoSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        with transaction.atomic():
+            ch = Charge.objects.select_for_update().filter(pk=pk, company=ctx.company).select_related("tenant").first()
+            if ch is None:
+                raise ApiError("not_found", "Начисление не найдено.", status_code=404)
+            _check_branch(ctx, ch.branch_id)
+            if ch.voided_at:
+                raise ApiError("already_voided", "Начисление уже отменено.", status_code=409)
+            if PaymentAllocation.objects.filter(charge=ch, payment__status="posted").exists():
+                raise ApiError("charge_has_payments",
+                               "По начислению есть оплаты. Сначала сторнируйте оплату.", status_code=409)
+            ch.voided_at = timezone.now()
+            ch.save(update_fields=["voided_at", "updated_at"])
+            pay_srv.rebuild_allocations(ctx.company, ch.tenant)
+            audit.log(request, ctx.company, "void", "charge", ch, branch=ch.branch, object_name=ch.description,
+                      before={"amount": ch.amount, "kind": ch.kind}, after={"reason": ser.validated_data["reason"]})
+        return Response(charge_payload(ch))
 
 
 # ------------------------------------------------------------------ замечания и взыскания
