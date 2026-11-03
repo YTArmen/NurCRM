@@ -3,6 +3,8 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import mixins, status as http, viewsets
 from rest_framework.decorators import action
+from datetime import date
+
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -106,6 +108,12 @@ class ExpenseViewSet(TeamMixin, mixins.ListModelMixin, mixins.CreateModelMixin, 
         if q.get("month"):
             m = self.month()
             qs = qs.filter(date__gte=m, date__lte=ex.month_end(m))
+        for key, op in (("date_from", "gte"), ("date_to", "lte")):
+            if q.get(key):
+                try:
+                    qs = qs.filter(**{f"date__{op}": date.fromisoformat(q[key])})
+                except ValueError:
+                    raise ValidationError({key: ["Формат даты ГГГГ-ММ-ДД."]})
         if q.get("category"):
             qs = qs.filter(category_id=q["category"])
         if q.get("method"):

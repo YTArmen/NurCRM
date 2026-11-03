@@ -12,7 +12,7 @@ from .charges import month_end, month_start
 
 TAX_CATEGORY = "Налоги"
 SALARY_CATEGORY = "Зарплата"
-TAX_DUE_DAY = 25  # налоги с зарплаты платятся до 25-го числа следующего месяца
+TAX_DUE_DAY = 25  # по умолчанию: налоги с зарплаты платятся до 25-го числа следующего месяца (ArendaSettings.tax_due_day)
 
 
 def parse_month(raw, default=None) -> date:
@@ -147,7 +147,8 @@ def sync_payroll_taxes(company, month: date, branch_ids=None, user=None) -> None
         b["social"] += ln["social"]
         b["income_tax"] += ln["income_tax"]
         b["employer"] += ln["employer_contribution"]
-    due = clamp_day(add_months(month, 1), TAX_DUE_DAY)
+    due_day = getattr(getattr(company, "arenda_settings", None), "tax_due_day", None) or TAX_DUE_DAY
+    due = clamp_day(add_months(month, 1), due_day)
     ym = month.strftime("%Y-%m")
     titles = {
         "social": f"Соцфонд (удержание с работников) за {ym}",

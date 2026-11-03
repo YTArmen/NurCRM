@@ -147,13 +147,14 @@ class SettingsSerializer(serializers.ModelSerializer):
     soon_days = serializers.IntegerField(required=False, min_value=0, max_value=365)
     lease_expiring_days = serializers.IntegerField(required=False, min_value=0, max_value=365)
     indexation_notice_days = serializers.IntegerField(required=False, min_value=0, max_value=365)
+    tax_due_day = serializers.IntegerField(required=False, min_value=1, max_value=31)
 
     class Meta:
         model = ArendaSettings
         fields = ["org_name", "inn", "okpo", "legal_address", "director", "chief_accountant", "bank", "bik",
                   "account", "phone", "email", "penalty_rate", "payroll_social_employee", "payroll_income_tax",
                   "payroll_social_employer", "advance_percent", "advance_day", "settle_day", "soon_days",
-                  "lease_expiring_days", "indexation_notice_days"]
+                  "lease_expiring_days", "indexation_notice_days", "tax_due_day"]
 
 
 class AccessInSerializer(serializers.Serializer):

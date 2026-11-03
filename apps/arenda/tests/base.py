@@ -12,6 +12,15 @@ def make_user(email, company=None, **kw):
 
 class ArendaBase(APITestCase):
     def setUp(self):
+        import shutil
+        import tempfile
+
+        from django.test import override_settings
+        tmp = tempfile.mkdtemp()  # загруженные файлы (исходники шаблонов) не пишем в боевой media
+        self.addCleanup(shutil.rmtree, tmp, True)
+        ov = override_settings(MEDIA_ROOT=tmp)
+        ov.enable()
+        self.addCleanup(ov.disable)
         self.owner = make_user("owner@a.kg")
         self.company = Company.objects.create(name="ТЦ Co", owner=self.owner)
         self.owner.company = self.company

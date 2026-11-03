@@ -284,8 +284,9 @@ class TemplateImportView(CtxMixin, APIView):
         text = eng.normalize_template_text(text.replace("\r\n", "\n"), kind)
         name = (request.data.get("name") or os.path.splitext(os.path.basename(f.name))[0] or "Импортированный").strip()
         known, unknown = eng.used_fields(text, kind)
+        f.seek(0)
         t = Template.objects.create(company=self.ctx.company, created_by=request.user, kind=kind, name=name[:255],
-                                    text=text)
+                                    text=text, source_file=f)  # исходный файл сохраняем
         audit.log(request, self.ctx.company, "create", "template", t,
                   after={"name": t.name, "kind": kind, "imported": ext})
         return Response({**template_payload(t, 0), "fields_found": known, "unknown_fields": unknown}, status=201)

@@ -637,6 +637,30 @@ class LeaseViewSet(ManualPaging, CtxMixin, viewsets.ViewSet):
             raise ApiError("lease_overlap", "На это помещение уже есть договор с пересекающимися датами.",
                            status_code=409, data={"units": bad})
 
+    def _template_snapshot(self, request, units, d, label):
+        """(шаблон, снимок текста): template_id из запроса, иначе первый не архивный шаблон аренды;
+        шаблонов нет — снимок пустой (создание договора это не ломает)."""
+        from .models import Template
+        from .services import templates as eng
+        from .views_docs import FORM_TITLES, _branch_city, _pick_template, _tenant_dict
+        ctx = self.ctx
+        tid = request.data.get("template_id")
+        if tid:
+            template = _pick_template(ctx, "lease", tid)
+        else:
+            template = (Template.objects.filter(company=ctx.company, kind="lease", archived_at__isnull=True)
+                        .order_by("created_at").first())
+        if template is None:
+            return None, ""
+        tenant = d["tenant"]
+        terms = {k: d.get(k) for k in ("start_date", "end_date", "rent_monthly", "pay_day", "deposit_months",
+                                       "deposit_amount", "penalty_rate", "indexation_percent", "utilities")}
+        values = eng.lease_values(
+            settings_obj=self.settings_obj(), branch=units[0].branch, city=_branch_city(units[0].branch),
+            tenant=_tenant_dict(tenant), units=units, terms=terms, label=label, on_date=self.today(),
+            tenant_form_title=FORM_TITLES.get(tenant.form, ""))
+        return template, eng.render_template(template.text, values, "lease")["text"]
+
     def create(self, request):
         ctx = self.ctx
         ser = LeaseInSerializer(data=request.data, context={"ctx": ctx})
@@ -657,9 +681,11 @@ class LeaseViewSet(ManualPaging, CtxMixin, viewsets.ViewSet):
             monthly = d.get("rent_monthly")
             base_rent = monthly if monthly is not None else sum(calc_rent(u.area, u.rate) for u in units)
             dm = d.get("deposit_months", 0)
+            label = f"А-{self.today().year}/{n:03d}"
+            template, snapshot = self._template_snapshot(request, units, d, label)
             lease = Lease.objects.create(
                 company=ctx.company, created_by=request.user, branch_id=units[0].branch_id,
-                number=n, label=f"А-{self.today().year}/{n:03d}", tenant=d["tenant"],
+                number=n, label=label, tenant=d["tenant"], template=template, text_snapshot=snapshot,
                 start_date=d["start_date"], end_date=d.get("end_date"), rent_monthly=monthly,
                 pay_day=d.get("pay_day", 10), deposit_months=dm,
                 deposit_amount=d["deposit_amount"] if d.get("deposit_amount") is not None else base_rent * dm,

@@ -66,6 +66,7 @@ class ArendaSettings(Base):
     soon_days = models.PositiveSmallIntegerField(default=7)
     lease_expiring_days = models.PositiveSmallIntegerField(default=45)
     indexation_notice_days = models.PositiveSmallIntegerField(default=30)
+    tax_due_day = models.PositiveSmallIntegerField(default=25, help_text="День следующего месяца, до которого платятся налоги с зарплаты")
 
 
 class Counter(models.Model):
