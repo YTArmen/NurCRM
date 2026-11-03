@@ -22,6 +22,7 @@ from .models import Charge, Payment, ReconciliationAct, Receipt, Reminder, Remar
 from .permissions import ArendaSection, deny
 from .serializers_money import ActInSerializer, ChargeInSerializer, PaymentInSerializer, RemarkInSerializer, StornoSerializer
 from .services import acts as acts_srv
+from .services import docx_io
 from .services import payments as pay_srv
 from .services import stats
 from .services.charges import month_start
@@ -292,6 +293,36 @@ class ReceiptPrintView(CtxMixin, APIView):
     def get(self, request, pk):
         r = _receipt_or_404(self.ctx, pk)
         return HttpResponse(pay_srv.receipt_html(r), content_type="text/html; charset=utf-8")
+
+
+def _pdf_response(data, name, request):
+    resp = HttpResponse(data, content_type="application/pdf")
+    disp = "inline" if request.query_params.get("inline") in ("1", "true") else "attachment"
+    resp["Content-Disposition"] = f'{disp}; filename="{name}"'
+    return resp
+
+
+class ReceiptPdfView(CtxMixin, APIView):
+    """GET receipts/<id>/receipt.pdf — чек шириной 80 мм."""
+    content_negotiation_class = IgnoreFormatNegotiation
+    permission_classes = [IsAuthenticated, ArendaSection("cash", "tenants")]
+
+    def get(self, request, pk):
+        r = _receipt_or_404(self.ctx, pk)
+        paid = timezone.localtime(r.payment.paid_at)
+        data = docx_io.build_receipt_pdf(r.label, r.snapshot, paid_text=f"{paid:%d.%m.%Y %H:%M}",
+                                         reversed_=r.payment.status == "reversed")
+        return _pdf_response(data, f"receipt-{r.number}.pdf", request)
+
+
+class ActPdfView(CtxMixin, APIView):
+    """GET acts/<id>/act.pdf — акт сверки с местом подписи арендатора."""
+    content_negotiation_class = IgnoreFormatNegotiation
+    permission_classes = [IsAuthenticated, ArendaSection("tenants", "cash")]
+
+    def get(self, request, pk):
+        a = _act_or_404(self.ctx, pk)
+        return _pdf_response(docx_io.build_act_pdf(a.label, a.snapshot), f"act-{a.number}.pdf", request)
 
 
 # ------------------------------------------------------------------ ручные начисления

@@ -55,7 +55,8 @@ def build_snapshot(company, settings_obj, tenant, date_from, date_to):
         "closing_balance": closing,
         "summary": summary_phrase(closing, settings_obj.org_name or "арендодателя", tenant.name),
         "signatures": {"director": settings_obj.director, "chief_accountant": settings_obj.chief_accountant,
-                       "tenant": tenant.name},
+                       "tenant": tenant.name,
+                       "tenant_signer": tenant.contact_person or tenant.name},
     }
 
 
@@ -102,7 +103,7 @@ th, td {{ border: 1px solid #000; padding: 4px 6px; }} th {{ background: #eee; }
 </tbody></table>
 <p>{escape(s['summary'])}</p>
 <div class="sign">
-<div>Директор {escape(sg.get('director') or '')}</div>
-<div>Бухгалтер {escape(sg.get('chief_accountant') or '')}</div>
-<div>Арендатор {escape(sg.get('tenant') or '')}</div>
+<div>Директор: ______________ / {escape(sg.get('director') or '')} /</div>
+<div>Бухгалтер: ______________ / {escape(sg.get('chief_accountant') or '')} /</div>
+<div>Арендатор: ______________ / {escape(sg.get('tenant_signer') or sg.get('tenant') or '')} /</div>
 </div></body></html>"""

@@ -456,3 +456,52 @@ class DoublePenaltyTests(ArendaBase):
         self.assertEqual(r.status_code, 201, r.data)
         total = sum(p.amount for p in Charge.objects.filter(tenant_id=t["id"], kind="penalty", voided_at__isnull=True))
         self.assertEqual(total, 3000)
+
+
+class PdfTests(MoneyBase):
+    def _media_box(self, data):
+        import re
+        m = re.search(rb"/MediaBox \[ ?([\d. ]+?) ?\]", data)
+        return [float(x) for x in m.group(1).split()]
+
+    def test_receipt_pdf_is_80mm_wide(self):
+        rid = self.pay(400_000).data["receipt"]["id"]
+        r = self.client.get(f"{API}receipts/{rid}/receipt.pdf")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r["Content-Type"], "application/pdf")
+        self.assertTrue(r.content.startswith(b"%PDF"))
+        box = self._media_box(r.content)
+        self.assertAlmostEqual(box[2] - box[0], 80 / 25.4 * 72, delta=0.5)  # 80 мм
+        self.assertEqual(self.client.get(f"{API}receipts/00000000-0000-0000-0000-000000000000/receipt.pdf")
+                         .status_code, 404)
+
+    def test_receipt_pdf_requires_section(self):
+        rid = self.pay(1000).data["receipt"]["id"]
+        u, c = self.staff("x@a.kg")
+        self.assertEqual(c.get(f"{API}receipts/{rid}/receipt.pdf").status_code, 403)
+
+    def test_act_pdf_and_signature_line_in_html(self):
+        self.t_obj = None
+        from apps.arenda.models import Tenant
+        Tenant.objects.filter(pk=self.t["id"]).update(contact_person="Асанов А.А.")
+        r = self.client.post(f"{API}tenants/{self.t['id']}/acts/", {
+            "date_from": self.start.isoformat(), "date_to": self.today.isoformat()}, format="json")
+        aid = r.data["id"]
+        p = self.client.get(f"{API}acts/{aid}/act.pdf")
+        self.assertEqual(p.status_code, 200)
+        self.assertTrue(p.content.startswith(b"%PDF"))
+        box = self._media_box(p.content)
+        self.assertAlmostEqual(box[2] - box[0], 210 / 25.4 * 72, delta=1)  # A4
+        html = self.client.get(f"{API}acts/{aid}/print/").content.decode()
+        self.assertIn("Арендатор: ______________ / Асанов А.А. /", html)
+
+    def test_act_pdf_for_old_snapshot_without_signer(self):
+        from apps.arenda.models import ReconciliationAct
+        r = self.client.post(f"{API}tenants/{self.t['id']}/acts/", {
+            "date_from": self.start.isoformat(), "date_to": self.today.isoformat()}, format="json")
+        a = ReconciliationAct.objects.get(pk=r.data["id"])
+        a.snapshot["signatures"].pop("tenant_signer", None)
+        a.save()
+        self.assertEqual(self.client.get(f"{API}acts/{a.id}/act.pdf").status_code, 200)
+        self.assertIn("Арендатор: ______________ / ИП Асанов /",
+                      self.client.get(f"{API}acts/{a.id}/print/").content.decode())
