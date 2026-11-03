@@ -360,6 +360,7 @@ CELERY_IMPORTS = (
     'apps.instagram.tasks',
     'apps.support.tasks',
     'apps.clientapp.tasks',
+    'apps.arenda.tasks',
 )
 
 # Строгий режим машины состояний воронки консалтинга.
@@ -468,6 +469,16 @@ CELERY_BEAT_SCHEDULE = {
     'clientapp-cleanup': {
         'task': 'apps.clientapp.tasks.cleanup_client_app',
         'schedule': crontab(hour=4, minute=40),
+    },
+    # Аренда помещений: начисления месяца и налоговый календарь (00:10 Asia/Bishkek), идемпотентно.
+    'arenda-monthly-charges': {
+        'task': 'apps.arenda.tasks.monthly_charges',
+        'schedule': crontab(hour=0, minute=10),
+    },
+    # Аренда помещений: автонапоминания и автопеня (09:00 Asia/Bishkek), идемпотентно.
+    'arenda-auto-reminders': {
+        'task': 'apps.arenda.tasks.auto_reminders',
+        'schedule': crontab(hour=9, minute=0),
     },
     # Склад: ежедневный контроль остатков (карточка/регистр/Σ движений), только лог и алерт.
     'warehouse-check-stock-consistency': {
