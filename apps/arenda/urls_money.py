@@ -11,6 +11,7 @@ urlpatterns = [
     path("receipts/<uuid:pk>/text/", v.ReceiptTextView.as_view()),
     path("receipts/<uuid:pk>/print/", v.ReceiptPrintView.as_view()),
     path("receipts/<uuid:pk>/receipt.pdf", v.ReceiptPdfView.as_view()),
+    path("receipts/<uuid:pk>/send/", v.ReceiptSendView.as_view()),
     path("tenants/<uuid:pk>/card/", v.TenantCardView.as_view()),
     path("tenants/<uuid:pk>/charges/", v.TenantChargesView.as_view()),
     path("charges/<uuid:pk>/void/", v.ChargeVoidView.as_view()),
@@ -21,4 +22,5 @@ urlpatterns = [
     path("acts/<uuid:pk>/", v.ActDetailView.as_view()),
     path("acts/<uuid:pk>/print/", v.ActPrintView.as_view()),
     path("acts/<uuid:pk>/act.pdf", v.ActPdfView.as_view()),
+    path("acts/<uuid:pk>/send/", v.ActSendView.as_view()),
 ]

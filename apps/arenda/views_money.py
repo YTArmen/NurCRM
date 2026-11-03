@@ -7,6 +7,7 @@ from django.db import transaction
 from django.db.models import Q, Sum
 from django.http import HttpResponse
 from django.utils import timezone
+from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -323,6 +324,63 @@ class ActPdfView(CtxMixin, APIView):
     def get(self, request, pk):
         a = _act_or_404(self.ctx, pk)
         return _pdf_response(docx_io.build_act_pdf(a.label, a.snapshot), f"act-{a.number}.pdf", request)
+
+
+class SendChannelSerializer(serializers.Serializer):
+    channel = serializers.ChoiceField(choices=["sms", "whatsapp"])
+
+
+def _send_document(request, ctx, tenant, text, obj_type, obj, name):
+    """Напоминание в истории арендатора + отправка через единый sender; -> payload напоминания."""
+    from .services import reminders as rem_srv
+    from .views_notify import reminder_payload
+    ser = SendChannelSerializer(data=request.data)
+    ser.is_valid(raise_exception=True)
+    channel = ser.validated_data["channel"]
+    rem, _ = rem_srv.make_reminder(ctx.company, tenant, channel, text, user=request.user)
+    audit.log(request, ctx.company, "send", obj_type, obj, object_name=f"{name} → {tenant.name}",
+              after={"channel": channel, "status": rem.status, "reminder": str(rem.id)})
+    return Response(reminder_payload(rem), status=201)
+
+
+class ReceiptSendView(CtxMixin, APIView):
+    """POST receipts/<id>/send/ {channel: sms|whatsapp} -> запись напоминания (история арендатора)."""
+    permission_classes = [IsAuthenticated, ArendaSection("cash", "tenants")]
+
+    def post(self, request, pk):
+        from .services.reminders import fmt_money
+        r = _receipt_or_404(self.ctx, pk)
+        s = r.snapshot
+        paid = timezone.localtime(r.payment.paid_at)
+        text = (f"{s['company'].get('name') or 'Аренда'}: чек {r.label} от {paid:%d.%m.%Y}. "
+                f"Принято {fmt_money(s['amount'])}")
+        if s.get("period"):
+            text += f" за {s['period']}"
+        text += f". Остаток долга {fmt_money(s['debt_after'])}."
+        if r.payment.status == "reversed":
+            text += " Оплата сторнирована."
+        return _send_document(request, self.ctx, r.payment.tenant, text, "receipt", r, f"Чек {r.label}")
+
+
+class ActSendView(CtxMixin, APIView):
+    """POST acts/<id>/send/ {channel: sms|whatsapp} -> запись напоминания (история арендатора)."""
+    permission_classes = [IsAuthenticated, ArendaSection("tenants", "cash")]
+
+    def post(self, request, pk):
+        from .services.reminders import fmt_money
+        a = _act_or_404(self.ctx, pk)
+        s = a.snapshot
+        d = lambda x: f"{x[8:10]}.{x[5:7]}.{x[:4]}"  # noqa: E731
+        closing = a.closing_balance
+        if closing > 0:
+            tail = f"Сальдо на конец: долг {fmt_money(closing)}."
+        elif closing < 0:
+            tail = f"Сальдо на конец: переплата {fmt_money(-closing)}."
+        else:
+            tail = "Задолженности нет."
+        text = (f"{s['company'].get('name') or 'Аренда'}: акт сверки {a.label} за {d(s['period_from'])}–"
+                f"{d(s['period_to'])}. {tail}")
+        return _send_document(request, self.ctx, a.tenant, text, "reconciliation_act", a, f"Акт {a.label}")
 
 
 # ------------------------------------------------------------------ ручные начисления

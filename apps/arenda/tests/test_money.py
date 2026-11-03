@@ -505,3 +505,42 @@ class PdfTests(MoneyBase):
         self.assertEqual(self.client.get(f"{API}acts/{a.id}/act.pdf").status_code, 200)
         self.assertIn("Арендатор: ______________ / ИП Асанов /",
                       self.client.get(f"{API}acts/{a.id}/print/").content.decode())
+
+
+class SendDocumentTests(MoneyBase):
+    GW = dict(ARENDA_SMS_URL="https://sms.example/send", ARENDA_SMS_TOKEN="t",
+              ARENDA_WHATSAPP_URL="https://wa.example/send", ARENDA_WHATSAPP_TOKEN="w")
+
+    def test_send_receipt_creates_reminder_not_sent_without_gateway(self):
+        rid = self.pay(400_000).data["receipt"]["id"]
+        r = self.client.post(f"{API}receipts/{rid}/send/", {"channel": "sms"}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual((r.data["channel"], r.data["status"]), ("sms", "not_sent"))
+        self.assertEqual(r.data["error"], "Сервис SMS не подключён")
+        self.assertIn("Ч-00001", r.data["text"])
+        self.assertIn("4 000 с", r.data["text"])
+        hist = self.client.get(f"{API}reminders/?tenant={self.t['id']}")
+        self.assertEqual(hist.data["count"], 1)
+
+    def test_send_receipt_and_act_through_gateway(self):
+        from django.test import override_settings
+        rid = self.pay(400_000).data["receipt"]["id"]
+        aid = self.client.post(f"{API}tenants/{self.t['id']}/acts/", {
+            "date_from": self.start.isoformat(), "date_to": self.today.isoformat()}, format="json").data["id"]
+        with override_settings(**self.GW), mock.patch("apps.arenda.services.sender._post", return_value=200) as m:
+            r1 = self.client.post(f"{API}receipts/{rid}/send/", {"channel": "whatsapp"}, format="json")
+            r2 = self.client.post(f"{API}acts/{aid}/send/", {"channel": "sms"}, format="json")
+        self.assertEqual((r1.data["status"], r2.data["status"]), ("sent", "sent"))
+        self.assertEqual([c[0][0] for c in m.call_args_list], ["https://wa.example/send", "https://sms.example/send"])
+        self.assertIn("акт сверки АС-", r2.data["text"])
+        self.assertIn("долг", r2.data["text"])
+        from apps.arenda.models import AuditLog
+        self.assertEqual(AuditLog.objects.filter(action="send").count(), 2)
+
+    def test_bad_channel_and_permissions(self):
+        rid = self.pay(1000).data["receipt"]["id"]
+        self.assertEqual(self.client.post(f"{API}receipts/{rid}/send/", {"channel": "telegram"}, format="json")
+                         .status_code, 400)
+        self.assertEqual(self.client.post(f"{API}receipts/{rid}/send/", {}, format="json").status_code, 400)
+        u, c = self.staff("x@a.kg")
+        self.assertEqual(c.post(f"{API}receipts/{rid}/send/", {"channel": "sms"}, format="json").status_code, 403)
