@@ -9,6 +9,8 @@ urlpatterns = [
     path("me/", va.ArendaMeView.as_view()),  # перекрывает views.MeView: as_user, дата смены пароля
     path("me/password/", va.PasswordView.as_view()),
     path("auth/login/", va.LoginView.as_view()),
+    path("auth/reset/request/", va.ResetRequestView.as_view()),
+    path("auth/reset/confirm/", va.ResetConfirmView.as_view()),
     path("employees/<uuid:pk>/access/", va.EmployeeAccessView.as_view()),
     path("access/<uuid:user_id>/invite/", va.AccessInviteView.as_view()),
     path("audit/", va.AuditListView.as_view()),

@@ -25,14 +25,7 @@ from .views import CtxMixin, MeView, _access_payload, _user_brief
 INVITE_DOMAIN = "staff.arenda.nurcrm.kg"
 
 
-def normalize_phone(raw: str) -> str:
-    """+996XXXXXXXXX (Кыргызстан). Пустая строка, если номер не разобрать."""
-    digits = re.sub(r"\D", "", raw or "")
-    if len(digits) == 10 and digits.startswith("0"):
-        digits = "996" + digits[1:]
-    elif len(digits) == 9:
-        digits = "996" + digits
-    return "+" + digits if len(digits) == 12 and digits.startswith("996") else ""
+normalize_phone = security.normalize_phone
 
 
 def _app_link():
@@ -307,13 +300,110 @@ class LoginView(APIView):
         password = request.data.get("password") or ""
         email = login.lower()
         if login and "@" not in login:
-            phone = normalize_phone(login)
-            u = User.objects.filter(phone_number=phone, arenda_access__isnull=False).first() if phone else None
+            u = security.find_user_by_phone(login, arenda_only=False)  # по полю телефона User, если номер однозначен
             if u:
                 email = u.email.lower()
         ser = CustomTokenObtainPairSerializer(data={"email": email, "password": password})
         ser.is_valid(raise_exception=True)
         return Response(ser.validated_data)
+
+
+# ------------------------------------------------------------------ восстановление пароля по SMS
+
+RESET_TTL_MINUTES = 10
+RESET_MAX_ATTEMPTS = 5
+RESET_RESEND_SECONDS = 60
+RESET_REPLY = "Если такой пользователь есть, мы отправили код по SMS. Код действует 10 минут."
+RESET_BAD = "Код неверный или устарел."
+
+
+def _code_hash(user, code):
+    import hashlib
+    import hmac
+    return hmac.new(dj_settings.SECRET_KEY.encode(), f"{user.pk}:{code}".encode(), hashlib.sha256).hexdigest()
+
+
+class ResetRequestView(APIView):
+    """POST auth/reset/request/ {login} — код 6 цифр по SMS. Ответ всегда одинаковый (не раскрываем, есть ли
+    пользователь); не чаще 1 раза в минуту на пользователя. SMS не подключён -> 503 {code:"sms_unavailable"}."""
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        import secrets
+        from datetime import timedelta
+
+        from .models_access import PasswordResetCode
+        from .services import sender
+
+        login = str(request.data.get("login") or "").strip()
+        if not login:
+            raise ValidationError({"login": ["Укажите телефон или email."]})
+        if not sender.is_configured("sms"):
+            raise ApiError("sms_unavailable", "Сервис SMS не подключён. Обратитесь к владельцу.", status_code=503)
+        user = security.find_user_by_login(login)
+        phone = security.normalize_phone(user.phone_number or "") if user else ""
+        if user and phone and user.is_active:
+            now = timezone.now()
+            recent = PasswordResetCode.objects.filter(
+                user=user, created_at__gt=now - timedelta(seconds=RESET_RESEND_SECONDS)).exists()
+            if not recent:
+                code = f"{secrets.randbelow(10 ** 6):06d}"
+                PasswordResetCode.objects.filter(user=user, used_at__isnull=True).update(used_at=now)
+                PasswordResetCode.objects.create(user=user, code_hash=_code_hash(user, code),
+                                                 expires_at=now + timedelta(minutes=RESET_TTL_MINUTES))
+                sender.send_message("sms", phone, f"Кезек: код восстановления пароля {code}. Действует "
+                                                  f"{RESET_TTL_MINUTES} минут. Никому не сообщайте код.")
+        return Response({"detail": RESET_REPLY, "expires_in": RESET_TTL_MINUTES * 60})
+
+
+class ResetConfirmView(APIView):
+    """POST auth/reset/confirm/ {login, code, new_password}. 5 неверных вводов — код сгорает.
+    После смены все сеансы завершаются, запись в журнал."""
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        import hmac
+
+        from .models_access import PasswordResetCode
+
+        login = str(request.data.get("login") or "").strip()
+        code = str(request.data.get("code") or "").strip()
+        new = request.data.get("new_password") or ""
+        if not login or not code:
+            raise ValidationError({"code": [RESET_BAD]})
+        user = security.find_user_by_login(login)
+        rec = PasswordResetCode.objects.filter(user=user, used_at__isnull=True).first() if user else None
+        if rec is None or rec.expires_at <= timezone.now():
+            raise ValidationError({"code": [RESET_BAD]})
+        if not hmac.compare_digest(rec.code_hash, _code_hash(user, code)):
+            rec.attempts += 1
+            if rec.attempts >= RESET_MAX_ATTEMPTS:
+                rec.used_at = timezone.now()  # код сгорел
+            rec.save(update_fields=["attempts", "used_at"])
+            raise ValidationError({"code": [RESET_BAD]})
+        errs = security.validate_new_password(new)
+        if errs:
+            raise ValidationError({"new_password": errs})
+        with transaction.atomic():
+            user.set_password(new)
+            user.save(update_fields=["password"])
+            rec.used_at = timezone.now()
+            rec.save(update_fields=["used_at"])
+            sec = security.revoke_sessions(user)
+            sec.password_changed_at = timezone.now()
+            sec.must_change_password = False
+            sec.failed_attempts, sec.locked_until = 0, None
+            sec.save(update_fields=["password_changed_at", "must_change_password", "failed_attempts",
+                                    "locked_until", "updated_at"])
+            company = getattr(user, "owned_company", None) or user.company
+            if company is not None:
+                audit.log(request, company, "password_reset", "user", user, user=user,
+                          object_name=_user_brief(user)["name"], after={"via": "sms"})
+        return Response({"detail": "Пароль изменён. Войдите с новым паролем."})
 
 
 # ------------------------------------------------------------------ журнал действий

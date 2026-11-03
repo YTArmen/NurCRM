@@ -128,6 +128,42 @@ def is_arenda_user(user) -> bool:
     return bool(company and hasattr(company, "arenda_settings"))
 
 
+def normalize_phone(raw: str) -> str:
+    """+996XXXXXXXXX (Кыргызстан). Пустая строка, если номер не разобрать."""
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 10 and digits.startswith("0"):
+        digits = "996" + digits[1:]
+    elif len(digits) == 9:
+        digits = "996" + digits
+    return "+" + digits if len(digits) == 12 and digits.startswith("996") else ""
+
+
+def find_user_by_phone(phone: str, *, arenda_only=True):
+    """Пользователь по телефону (User.phone_number в любом написании), только если номер однозначен; иначе None."""
+    from apps.users.models import User
+
+    n = normalize_phone(phone)
+    if not n:
+        return None
+    nine = n[4:]  # 9 цифр после +996
+    rx = r"^\D*(?:\+?\D*996\D*|0\D*)?" + r"\D*".join(nine) + r"\D*$"
+    users = [u for u in User.objects.filter(phone_number__regex=rx)[:10] if normalize_phone(u.phone_number) == n]
+    if arenda_only:
+        users = [u for u in users if is_arenda_user(u)]
+    return users[0] if len(users) == 1 else None
+
+
+def find_user_by_login(login: str):
+    """Email или телефон -> пользователь аренды (None, если не найден или телефон неоднозначен)."""
+    login = (login or "").strip()
+    if not login:
+        return None
+    if "@" in login:
+        u = _find_user(login)
+        return u if is_arenda_user(u) else None
+    return find_user_by_phone(login)
+
+
 def _find_user(identifier):
     from apps.users.models import User
 

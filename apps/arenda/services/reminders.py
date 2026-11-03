@@ -131,7 +131,7 @@ def send_owner_telegram(company, text):
 
 
 def _tenant_phone(reminder):
-    from ..views_access import normalize_phone
+    from ..security import normalize_phone
     raw = reminder.tenant.phone if reminder.tenant_id else ""
     return normalize_phone(raw) or (raw or "").strip()
 
