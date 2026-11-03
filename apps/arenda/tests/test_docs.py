@@ -1,5 +1,6 @@
 import io
 import zipfile
+from unittest import mock
 from datetime import date
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -178,6 +179,10 @@ class LeaseWizardTests(WizardMixin, ArendaBase):
         self.assertEqual(Counter.objects.filter(key="lease").count(), 0)
 
     def test_sign_creates_lease_with_all_fields(self):
+        fixed = date(2026, 10, 15)  # «сегодня» зафиксировано: договор 101 (с 1.11.2026) стартует в будущем
+        p = mock.patch("django.utils.timezone.localdate", return_value=fixed)
+        p.start()
+        self.addCleanup(p.stop)
         u = self.unit("101", area="10.00", rate=100000)
         r = self.client.post("/api/arenda/leases/sign/", self.body([u]), format="json")
         self.assertEqual(r.status_code, 201, r.data)
@@ -208,7 +213,7 @@ class LeaseWizardTests(WizardMixin, ArendaBase):
         # помещение стало «сдано» (договор начинается в будущем — сдан при старте), проверим сегодняшним договором
         u2 = self.unit("102")
         b = self.body([u2])
-        b["terms"]["start_date"] = date.today().isoformat()
+        b["terms"]["start_date"] = fixed.isoformat()
         b["terms"]["end_date"] = None
         self.assertEqual(self.client.post("/api/arenda/leases/sign/", b, format="json").status_code, 201)
         self.assertEqual(Lease.objects.get(units__number="102").charges.count(), 1)  # первое начисление

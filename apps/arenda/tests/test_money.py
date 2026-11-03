@@ -19,7 +19,11 @@ class MoneyBase(ArendaBase):
 
     def setUp(self):
         super().setUp()
-        self.today = timezone.localdate()
+        # «сегодня» зафиксировано: тесты не зависят от числа месяца (срок оплаты — 5-е)
+        self.today = date(2026, 10, 20)
+        p = mock.patch("django.utils.timezone.localdate", return_value=self.today)
+        p.start()
+        self.addCleanup(p.stop)
         self.t = self.tenant()
         self.u = self.unit("101", area="10.00", rate=100000)
         start = (self.today.replace(day=1) - timedelta(days=62)).replace(day=1)
