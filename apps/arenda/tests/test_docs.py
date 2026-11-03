@@ -229,7 +229,7 @@ class LeaseWizardTests(WizardMixin, ArendaBase):
         r = self.client.post("/api/arenda/leases/sign/", b, format="json")
         self.assertEqual(r.status_code, 201, r.data)
         self.assertIn("окончание", r.data["filled"])  # «бессрочно»
-        self.assertIn("срок_мес", r.data["missing"])
+        self.assertIn("срок_мес", r.data["filled"])  # «без ограничения»
         b["unit_ids"] = [u2["id"]]
         r2 = self.client.post("/api/arenda/leases/sign/", b, format="json")
         self.assertTrue(r2.data["label"].endswith("/002"))

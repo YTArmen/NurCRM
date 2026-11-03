@@ -259,7 +259,7 @@ def lease_values(*, settings_obj, branch, city, tenant, units, terms, label, on_
             fmt_som(round(int(monthly) / area)) if units and area else ""),
         "аренда_в_месяц": fmt_som_words(monthly) if units else "",
         "начало": fmt_date(start), "окончание": fmt_date(end) if end else ("бессрочно" if start else ""),
-        "срок_мес": str(months) if months else "",
+        "срок_мес": str(months) if months else ("без ограничения" if start and not end else ""),
         "день_оплаты": str(terms.get("pay_day") or 10),
         "депозит": fmt_som_words(deposit) if deposit else "не предусмотрен",
         "пеня": f"{fmt_decimal(penalty)}%",
