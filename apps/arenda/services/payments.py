@@ -34,6 +34,12 @@ def category_of(description: str):
     return None
 
 
+def custom_title_of(description: str):
+    """Своя статья прочего прихода: часть описания до двоеточия ('Аренда рекламы: текст'). Пусто — None."""
+    title = (description or "").split(":", 1)[0].strip()
+    return title or None
+
+
 def tenant_branch_id(tenant):
     lease = (Lease.objects.filter(tenant=tenant, status="active", archived_at__isnull=True)
              .order_by("start_date").first())

@@ -167,6 +167,8 @@ class BranchViewSet(ManualPaging, CtxMixin, viewsets.ViewSet):
             for f in ("city", "object_type", "manager_name"):
                 if f in data:
                     setattr(info, f, data[f] or "")
+            if len(info.object_type) > 64:
+                raise ValidationError({"object_type": ["Тип объекта — не длиннее 64 символов."]})
             if "floors" in data:
                 try:
                     info.floors = max(1, int(data["floors"]))

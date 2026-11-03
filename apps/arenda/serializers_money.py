@@ -13,12 +13,24 @@ class PaymentInSerializer(serializers.Serializer):
     add_penalty = serializers.BooleanField(required=False, default=False)
     comment = serializers.CharField(required=False, allow_blank=True, default="", max_length=200)
     category = serializers.ChoiceField(choices=list(CATEGORIES), required=False, allow_blank=True, default="")
+    category_title = serializers.CharField(required=False, allow_blank=True, default="", max_length=64)
     branch = serializers.UUIDField(required=False, allow_null=True)
 
+    def validate_category_title(self, v):
+        v = " ".join((v or "").split())
+        if ":" in v:
+            raise serializers.ValidationError("В названии статьи не должно быть двоеточия.")
+        return v
+
     def validate(self, attrs):
-        if not attrs.get("tenant") and not attrs.get("category"):
-            raise serializers.ValidationError(
-                {"category": ["Для прихода без арендатора укажите категорию (реклама, парковка, прочее)."]})
+        if not attrs.get("tenant"):
+            if attrs.get("category") and attrs.get("category_title"):
+                raise serializers.ValidationError(
+                    {"category_title": ["Укажите либо category, либо category_title."]})
+            if not attrs.get("category") and not attrs.get("category_title"):
+                raise serializers.ValidationError(
+                    {"category": ["Для прихода без арендатора укажите категорию (реклама, парковка, прочее) "
+                                  "или свою статью (category_title)."]})
         return attrs
 
 

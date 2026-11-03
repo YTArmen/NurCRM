@@ -315,6 +315,13 @@ class BranchFilterTests(ArendaBase):
         self.assertEqual(self.client.delete(f"/api/arenda/branches/{self.branch2.id}/").status_code, 204)
         self.assertEqual(self.client.get("/api/arenda/branches/").data["count"], 1)
 
+    def test_branch_custom_object_type(self):
+        r = self.client.post("/api/arenda/branches/", {"name": "Пассаж", "object_type": "Пассаж"}, format="json")
+        self.assertEqual((r.status_code, r.data["object_type"]), (201, "Пассаж"), r.data)
+        r = self.client.post("/api/arenda/branches/", {"name": "Длинный", "object_type": "я" * 65}, format="json")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("object_type", r.data.get("fields", r.data) if isinstance(r.data, dict) else {})
+
     def test_create_branch(self):
         r = self.client.post("/api/arenda/branches/", {"name": "Новый ТЦ", "city": "Ош", "floors": 3,
                                                        "object_type": "ТЦ"}, format="json")
@@ -323,6 +330,18 @@ class BranchFilterTests(ArendaBase):
 
 
 class SettingsTests(ArendaBase):
+    def test_rates_and_terms_writable(self):
+        body = {"penalty_rate": "0.25", "soon_days": 5, "lease_expiring_days": 60, "indexation_notice_days": 20,
+                "payroll_social_employee": "9.5", "payroll_income_tax": "8", "payroll_social_employer": "16.5",
+                "advance_percent": 30, "advance_day": 12, "settle_day": 5, "tax_due_day": 20}
+        r = self.client.patch("/api/arenda/settings/", body, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        g = self.client.get("/api/arenda/settings/").data
+        self.assertEqual((float(g["penalty_rate"]), g["soon_days"], g["lease_expiring_days"], g["indexation_notice_days"]), (0.25, 5, 60, 20))
+        self.assertEqual((float(g["payroll_social_employer"]), g["advance_percent"], g["advance_day"], g["settle_day"], g["tax_due_day"]), (16.5, 30, 12, 5, 20))
+        self.assertEqual(self.client.patch("/api/arenda/settings/", {"advance_percent": 101}, format="json").status_code, 400)
+
+
     def test_validation(self):
         for body, field in (({"inn": "123"}, "inn"), ({"bik": "12345"}, "bik"), ({"account": "1" * 15}, "account")):
             r = self.client.patch("/api/arenda/settings/", body, format="json")

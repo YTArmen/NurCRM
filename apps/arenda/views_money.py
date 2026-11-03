@@ -98,6 +98,7 @@ def payment_payload(p):
         "tenant_name": p.tenant.name if p.tenant_id else None,
         "amount": p.amount, "method": p.method, "paid_at": local.isoformat(), "date": local.date().isoformat(),
         "cashier_name": _brief_user(p.cashier), "description": p.description, "category": cat,
+        "category_title": pay_srv.custom_title_of(p.description) if (cat is None and not p.tenant_id) else None,
         "add_penalty": p.add_penalty, "status": p.status, "reversal_reason": p.reversal_reason,
         "receipt_id": str(receipt.id) if receipt else None, "receipt_label": receipt.label if receipt else None,
     }
@@ -193,7 +194,7 @@ class PaymentsView(ManualPaging, CtxMixin, APIView):
             raise ValidationError({"date": ["Дата оплаты не может быть в будущем."]})
         description = ""
         if tenant is None:
-            title = pay_srv.CATEGORIES[d["category"]]
+            title = pay_srv.CATEGORIES[d["category"]] if d["category"] else d["category_title"]
             description = f"{title}: {d['comment']}" if d["comment"] else title
         else:
             description = d["comment"]

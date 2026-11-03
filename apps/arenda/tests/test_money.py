@@ -119,6 +119,24 @@ class PaymentTests(MoneyBase):
         self.assertIsNone(r.data["receipt"])
         self.assertEqual(r.data["payment"]["category"], "advertising")
 
+    def test_other_income_custom_title(self):
+        b = {"amount": 70_000, "method": "cash", "branch": str(self.branch.id)}
+        r = self.client.post(API + "payments/", {**b, "category_title": "Аренда рекламы", "comment": "щит"}, format="json")
+        self.assertEqual(r.status_code, 201, r.data)
+        p = r.data["payment"]
+        self.assertEqual((p["category"], p["category_title"], p["description"]), (None, "Аренда рекламы", "Аренда рекламы: щит"))
+        r = self.client.post(API + "payments/", {**b, "category_title": "Вендинг"}, format="json")
+        self.assertEqual(r.data["payment"]["description"], "Вендинг")
+        self.assertEqual(r.data["payment"]["category_title"], "Вендинг")
+        # в списке то же самое; у известной категории category_title пуст
+        r = self.client.post(API + "payments/", {**b, "category": "parking"}, format="json")
+        self.assertIsNone(r.data["payment"]["category_title"])
+        rows = self.client.get(API + "payments/").data["results"]
+        self.assertEqual({x["category_title"] for x in rows if x["category"] is None}, {"Аренда рекламы", "Вендинг"})
+        # нельзя одновременно, нельзя двоеточие, длиннее 64 нельзя
+        for extra in ({"category": "parking", "category_title": "X"}, {"category_title": "A: B"}, {"category_title": "я" * 65}):
+            self.assertEqual(self.client.post(API + "payments/", {**b, **extra}, format="json").status_code, 400)
+
     def test_idempotent(self):
         body = {"tenant": self.t["id"], "amount": 100_000, "method": "cash"}
         r1 = self.client.post(API + "payments/", body, format="json", HTTP_IDEMPOTENCY_KEY="k-1")
