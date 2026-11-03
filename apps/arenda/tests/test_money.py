@@ -332,3 +332,16 @@ class WordsTests(ArendaBase):
         self.assertEqual(som_to_words(1100 * 100 + 200), "одна тысяча сто два сома".replace("одна тысяча", "одна тысяча"))
         self.assertEqual(fmt_som(1_250_000), "12 500")
         self.assertEqual(fmt_som(1_250_050), "12 500,50")
+
+
+class WalletMethodTests(MoneyBase):
+    def test_wallet_payment_accepted_and_counted_in_balances(self):
+        r = self.pay(250_000, method="wallet")
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data["receipt"]["snapshot"]["method"], "wallet")
+        self.assertEqual(r.data["receipt"]["snapshot"]["method_title"], "Кошелёк")
+        lst = self.client.get(API + "payments/")
+        self.assertEqual(lst.data["balances"]["wallet"], 250_000)
+        self.assertEqual(lst.data["totals"]["month"]["by_method"]["wallet"], 250_000)
+        self.assertEqual(self.client.post(API + "payments/", {"tenant": self.t["id"], "amount": 5, "method": "x"},
+                                          format="json").status_code, 400)

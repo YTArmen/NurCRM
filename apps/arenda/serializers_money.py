@@ -8,7 +8,7 @@ from .services.payments import CATEGORIES
 class PaymentInSerializer(serializers.Serializer):
     tenant = serializers.UUIDField(required=False, allow_null=True)
     amount = serializers.IntegerField(min_value=1, max_value=MAX_MONEY)
-    method = serializers.ChoiceField(choices=["cash", "bank", "qr"])
+    method = serializers.ChoiceField(choices=["cash", "bank", "qr", "wallet"])
     date = serializers.DateField(required=False, allow_null=True)
     add_penalty = serializers.BooleanField(required=False, default=False)
     comment = serializers.CharField(required=False, allow_blank=True, default="", max_length=200)
