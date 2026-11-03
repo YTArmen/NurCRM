@@ -138,16 +138,21 @@ def normalize_phone(raw: str) -> str:
     return "+" + digits if len(digits) == 12 and digits.startswith("996") else ""
 
 
-def find_user_by_phone(phone: str, *, arenda_only=True):
-    """Пользователь по телефону (User.phone_number в любом написании), только если номер однозначен; иначе None."""
+def users_with_phone(phone: str, limit=10) -> list:
+    """Все пользователи, у которых User.phone_number — этот номер (в любом написании)."""
     from apps.users.models import User
 
     n = normalize_phone(phone)
     if not n:
-        return None
+        return []
     nine = n[4:]  # 9 цифр после +996
     rx = r"^\D*(?:\+?\D*996\D*|0\D*)?" + r"\D*".join(nine) + r"\D*$"
-    users = [u for u in User.objects.filter(phone_number__regex=rx)[:10] if normalize_phone(u.phone_number) == n]
+    return [u for u in User.objects.filter(phone_number__regex=rx)[:limit] if normalize_phone(u.phone_number) == n]
+
+
+def find_user_by_phone(phone: str, *, arenda_only=True):
+    """Пользователь по телефону, только если номер однозначен; иначе None."""
+    users = users_with_phone(phone)
     if arenda_only:
         users = [u for u in users if is_arenda_user(u)]
     return users[0] if len(users) == 1 else None

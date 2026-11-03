@@ -162,3 +162,10 @@ class AccessInSerializer(serializers.Serializer):
     all_branches = serializers.BooleanField(required=False)
     branches = serializers.ListField(child=serializers.UUIDField(), required=False)
     is_active = serializers.BooleanField(required=False)
+
+
+class ProfileInSerializer(serializers.Serializer):
+    first_name = serializers.CharField(max_length=64, allow_blank=False)
+    last_name = serializers.CharField(max_length=64, allow_blank=True)
+    phone = serializers.CharField(max_length=32, allow_blank=True)
+    email = serializers.EmailField(max_length=254)

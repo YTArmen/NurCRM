@@ -22,7 +22,7 @@ from .models import (ArendaAccess, ArendaBranchInfo, ArendaSettings, Asset, Char
                      Lease, Payment, Tenant, Unit, UnitType)
 from .pagination import ArendaPagination
 from .permissions import ArendaSection, get_ctx
-from .serializers import (AccessInSerializer, LeaseInSerializer, SettingsSerializer, TenantInSerializer,
+from .serializers import (AccessInSerializer, LeaseInSerializer, ProfileInSerializer, SettingsSerializer, TenantInSerializer,
                           UnitSerializer, UnitTypeSerializer)
 from .services import stats
 from .services.charges import (charge_amount_for_period, ensure_rent_charge, lease_current_rent,
@@ -768,6 +768,7 @@ class SettingsView(CtxMixin, APIView):
 
 def _user_brief(u):
     return {"id": str(u.id), "name": f"{u.first_name} {u.last_name}".strip() or u.email,
+            "first_name": u.first_name or "", "last_name": u.last_name or "",
             "phone": u.phone_number or "", "email": u.email}
 
 
@@ -871,3 +872,37 @@ class MeView(CtxMixin, APIView):
             "user": _user_brief(request.user),
             "section_titles": {s: SECTION_TITLES[s] for s in ctx.sections},
         })
+
+    def patch(self, request):
+        """PATCH me/ {first_name?, last_name?, phone?, email?} — свой профиль. Email и телефон уникальны (409)."""
+        from . import audit, security
+        ctx = self.ctx
+        ser = ProfileInSerializer(data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        d = ser.validated_data
+        user = request.user
+        before = {k: getattr(user, k) for k in ("first_name", "last_name", "phone_number", "email")}
+        if "phone" in d:
+            phone = d["phone"].strip()
+            if phone:
+                norm = security.normalize_phone(phone)
+                if not norm:
+                    raise ValidationError({"phone": ["Телефон в формате +996XXXXXXXXX."]})
+                if any(u.pk != user.pk for u in security.users_with_phone(norm)):
+                    raise ApiError("phone_taken", "Этот телефон уже занят другим пользователем.", status_code=409)
+                phone = norm
+            user.phone_number = phone or None
+        if "email" in d:
+            email = d["email"].strip().lower()
+            if User.objects.filter(email__iexact=email).exclude(pk=user.pk).exists():
+                raise ApiError("email_taken", "Этот email уже занят другим пользователем.", status_code=409)
+            user.email = email
+        for k in ("first_name", "last_name"):
+            if k in d:
+                setattr(user, k, d[k].strip())
+        user.save()
+        after = {k: getattr(user, k) for k in before}
+        if after != before:
+            audit.log(request, ctx.company, "update", "profile", user, before=before, after=after,
+                      object_name=_user_brief(user)["name"])
+        return self.get(request)

@@ -276,3 +276,56 @@ class PasswordAndLockoutTests(AccessBase):
             APIClient().post("/api/arenda/auth/login/", {"login": "+996700123456", "password": "bad"}, format="json")
         r = APIClient().post("/api/arenda/auth/login/", {"login": "+996700123456", "password": self.temp}, format="json")
         self.assertEqual(r.status_code, 429)
+
+
+class ProfileTests(AccessBase):
+    def test_get_me_has_names_and_patch_updates(self):
+        r = self.client.get("/api/arenda/me/")
+        self.assertEqual(r.data["user"]["first_name"], "Имя")
+        r = self.client.patch("/api/arenda/me/", {"first_name": "Нурлан", "last_name": "Эсенов",
+                                                  "phone": "0555 111 222", "email": "New@A.kg"}, format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+        u = r.data["user"]
+        self.assertEqual((u["first_name"], u["last_name"], u["phone"], u["email"]),
+                         ("Нурлан", "Эсенов", "+996555111222", "new@a.kg"))
+        self.owner.refresh_from_db()
+        self.assertEqual(self.owner.email, "new@a.kg")
+        log = AuditLog.objects.get(object_type="profile")
+        self.assertEqual(log.before["email"], "owner@a.kg")
+        self.assertEqual(log.after["phone_number"], "+996555111222")
+        # вход по новому телефону работает
+        r = APIClient().post("/api/arenda/auth/login/", {"login": "+996555111222", "password": "pass12345"},
+                             format="json")
+        self.assertEqual(r.status_code, 200, r.data)
+
+    def test_partial_patch_keeps_other_fields(self):
+        self.client.patch("/api/arenda/me/", {"last_name": "Новый"}, format="json")
+        self.owner.refresh_from_db()
+        self.assertEqual((self.owner.first_name, self.owner.last_name), ("Имя", "Новый"))
+
+    def test_email_and_phone_must_be_unique(self):
+        make_user("other@a.kg", self.company, phone_number="0700 000 111")
+        r = self.client.patch("/api/arenda/me/", {"email": "OTHER@a.kg"}, format="json")
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.data["code"], "email_taken")
+        self.assertIn("email", r.data["detail"].lower())
+        r = self.client.patch("/api/arenda/me/", {"phone": "+996700000111"}, format="json")
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.data["code"], "phone_taken")
+        self.owner.refresh_from_db()
+        self.assertEqual(self.owner.email, "owner@a.kg")
+        # свой же телефон/почту можно «сохранить» повторно
+        self.assertEqual(self.client.patch("/api/arenda/me/", {"email": "owner@a.kg"}, format="json").status_code, 200)
+
+    def test_validation_and_staff_can_edit_self(self):
+        self.assertEqual(self.client.patch("/api/arenda/me/", {"phone": "123"}, format="json").status_code, 400)
+        self.assertEqual(self.client.patch("/api/arenda/me/", {"email": "bad"}, format="json").status_code, 400)
+        self.assertEqual(self.client.patch("/api/arenda/me/", {"first_name": ""}, format="json").status_code, 400)
+        e = self.employee()
+        self.grant(e, preset="cashier")
+        e.refresh_from_db()
+        c = APIClient()
+        c.force_authenticate(e.user)
+        self.assertEqual(c.patch("/api/arenda/me/", {"first_name": "Айбек"}, format="json").status_code, 200)
+        e.user.refresh_from_db()
+        self.assertEqual(e.user.first_name, "Айбек")
