@@ -389,7 +389,8 @@ class ActSendView(CtxMixin, APIView):
 def charge_payload(c):
     return {"id": str(c.id), "tenant": str(c.tenant_id), "lease": str(c.lease_id) if c.lease_id else None,
             "kind": c.kind, "period": c.period.strftime("%Y-%m"), "amount": c.amount, "due_date": c.due_date.isoformat(),
-            "description": c.description, "voided": c.voided_at is not None}
+            "description": c.description, "comment": c.description, "voided": c.voided_at is not None,
+            "status": "voided" if c.voided_at else "active"}
 
 
 class TenantChargesView(CtxMixin, APIView):
@@ -588,6 +589,9 @@ class TenantCardView(CtxMixin, APIView):
                            "is_auto": r.is_auto, "created_at": timezone.localtime(r.created_at).isoformat()}
                           for r in reminders],
             "remarks": [remark_payload(r) for r in remarks],
+            # ручные начисления (пеня, коммунальные), последние 50 — для списка и «Отменить» в карточке
+            "charges": [charge_payload(c) for c in Charge.objects.filter(
+                company=ctx.company, tenant=t, kind__in=("penalty", "utilities")).order_by("-due_date", "-created_at")[:50]],
         })
 
 

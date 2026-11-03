@@ -361,6 +361,10 @@ class ManualChargeTests(MoneyBase):
         self.assertEqual(r.data["debt_after"], before + 120_000)
         from apps.arenda.models import AuditLog
         self.assertTrue(AuditLog.objects.filter(object_type="charge", action="create", object_id=r.data["id"]).exists())
+        # начисление видно в карточке арендатора (список «ручных начислений»)
+        card = self.client.get(f"{API}tenants/{self.t['id']}/card/").data
+        row = next(x for x in card["charges"] if x["id"] == r.data["id"])
+        self.assertEqual((row["kind"], row["status"], row["comment"]), ("utilities", "active", "Электричество"))
         # повтор по тому же договору и периоду — 409
         r2 = self.client.post(f"{API}tenants/{self.t['id']}/charges/", self.body(lease_id=str(self.lease_obj.id)),
                               format="json")
