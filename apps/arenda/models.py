@@ -44,6 +44,7 @@ class ArendaSettings(Base):
 
     company = models.OneToOneField(Company, on_delete=models.CASCADE, related_name="arenda_settings")
     org_name = models.CharField(max_length=255, blank=True, default="")
+    flat_template_added = models.BooleanField(default=False)  # типовой договор жилья уже выдан компании
     inn = models.CharField(max_length=14, blank=True, default="")
     okpo = models.CharField(max_length=16, blank=True, default="")
     legal_address = models.CharField(max_length=255, blank=True, default="")
@@ -175,6 +176,8 @@ class Lease(Base):
     penalty_rate = models.DecimalField(max_digits=6, decimal_places=3, default="0.100")
     indexation_percent = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     utilities = models.CharField(max_length=255, blank=True, default="")
+    # показания при передаче помещения (акт приёма-передачи): electricity, water_cold, water_hot, gas, keys
+    handover = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=12, choices=STATUSES, default="active")
     text_snapshot = models.TextField(blank=True, default="")
     signed_at = models.DateTimeField(null=True, blank=True)

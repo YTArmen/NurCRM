@@ -72,7 +72,7 @@ class TemplateApiTests(WizardMixin, ArendaBase):
     def test_defaults_seeded_and_fields(self):
         r = self.client.get("/api/arenda/templates/?kind=lease")
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.data["count"], 1)
+        self.assertEqual(r.data["count"], 2)  # коммерческий + жилое помещение
         r = self.client.get("/api/arenda/templates/?kind=employment")
         self.assertEqual(r.data["count"], 1)
         r = self.client.get("/api/arenda/templates/fields/?kind=employment")
@@ -82,12 +82,16 @@ class TemplateApiTests(WizardMixin, ArendaBase):
         keys = {f["key"] for f in r.data["fields"]}
         self.assertIn("сумма_договора", keys)
         self.assertNotIn("сотрудник", keys)
-        # типовой шаблон аренды использует все поля аренды
-        t = Template.objects.get(company=self.company, kind="lease")
-        known, unknown = eng.used_fields(t.text, "lease")
-        self.assertEqual(unknown, [])
+        # два типовых шаблона аренды вместе используют все поля аренды (адрес арендатора — в блоке подписей жилья)
+        known = []
+        for name in (eng.DEFAULT_LEASE_NAME, eng.DEFAULT_LEASE_FLAT_NAME):
+            t = Template.objects.get(company=self.company, kind="lease", name=name)
+            k, unknown = eng.used_fields(t.text, "lease")
+            self.assertEqual(unknown, [])
+            known += k
         for f, _ in eng.LEASE_FIELDS:
-            self.assertIn(f, known)
+            if f != "адрес_арендатора":
+                self.assertIn(f, known)
 
     def test_crud_copy_archive_delete(self):
         r = self.client.post("/api/arenda/templates/", {"kind": "lease", "name": "Мой", "text": "# Д {{ город }}"},
@@ -114,7 +118,7 @@ class TemplateApiTests(WizardMixin, ArendaBase):
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.data["archived"])
         # архивный не виден по умолчанию и не годится для новых договоров
-        self.assertEqual(self.client.get("/api/arenda/templates/?kind=lease").data["count"], 0)
+        self.assertEqual(self.client.get("/api/arenda/templates/?kind=lease").data["count"], 1)  # остался жилой
         u2 = self.unit("102")
         r = self.client.post("/api/arenda/leases/sign/", self.body([u2], template_id=tid), format="json")
         self.assertEqual(r.status_code, 409)

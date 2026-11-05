@@ -450,7 +450,7 @@ def lease_payload(lease, today, expiring_days=45):
         "rent_monthly": lease.rent_monthly, "rent_monthly_calc": lease_monthly_rent(lease),
         "pay_day": lease.pay_day, "deposit_months": lease.deposit_months, "deposit_amount": lease.deposit_amount,
         "penalty_rate": str(lease.penalty_rate), "indexation_percent": str(lease.indexation_percent),
-        "utilities": lease.utilities, "status": lease.status, "status_display": disp,
+        "utilities": lease.utilities, "handover": lease.handover or {}, "status": lease.status, "status_display": disp,
         "days_left": lease_days_left(lease.end_date, today) if lease.status == "active" else None,
         "template": str(lease.template_id) if lease.template_id else None,
         "signed_at": lease.signed_at.isoformat() if lease.signed_at else None,

@@ -76,20 +76,20 @@ def file_response(fmt, blocks, label, request, title):
     return resp
 
 
-def document_response(request, fmt, *, label, snapshot, title):
-    """fmt: None -> JSON/HTML по ?format=, pdf|docx -> файл."""
+def document_response(request, fmt, *, label, snapshot, title, handover=None, extra=None):
+    """fmt: None -> JSON/HTML по ?format=, pdf|docx -> файл. handover — показания для [[счётчики]]."""
     fmt = fmt or request.query_params.get("format") or "json"
     if not snapshot:
         raise ApiError("no_snapshot", "У договора нет сохранённого текста (создан без шаблона).", status_code=409)
-    blocks = eng.to_blocks(snapshot)
+    blocks = eng.to_blocks(snapshot, handover)
     if fmt in ("pdf", "docx"):
         return file_response(fmt, blocks, label, request, title)
-    html = eng.snapshot_html(snapshot)
+    html = eng.snapshot_html(snapshot, handover)
     if fmt == "html":
         page = (f'<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>{title}</title></head>'
                 f'<body style="max-width:800px;margin:2em auto">{html}</body></html>')
         return HttpResponse(page, content_type="text/html; charset=utf-8")
-    return Response({"label": label, "title": title, "html": html, "text": snapshot})
+    return Response({"label": label, "title": title, "html": html, "text": snapshot, **(extra or {})})
 
 
 def _branch_city(branch):
@@ -461,7 +461,64 @@ class LeaseDocumentView(CtxMixin, APIView):
         if not lease:
             raise ApiError("not_found", "Договор не найден.", status_code=404)
         return document_response(request, fmt, label=lease.label, snapshot=lease.text_snapshot,
-                                 title=f"Договор аренды {lease.label}")
+                                 title=f"Договор аренды {lease.label}", handover=lease.handover,
+                                 extra={"lease_id": str(lease.id), "has_meters": eng.has_meters(lease.text_snapshot),
+                                        "handover": handover_payload(lease.handover)})
+
+
+HANDOVER_MAX = 64
+
+
+def handover_payload(h):
+    h = h if isinstance(h, dict) else {}
+    return {k: str(h.get(k) or "") for k in eng.HANDOVER_KEYS}
+
+
+class LeaseHandoverView(CtxMixin, APIView):
+    """PATCH: показания счётчиков и ключи при передаче помещения (для акта приёма-передачи). Пустое значение — линия."""
+    permission_classes = [IsAuthenticated, ArendaSection("leases")]
+
+    def _lease(self, pk):
+        qs = Lease.objects.filter(pk=pk, company=self.ctx.company, archived_at__isnull=True)
+        allowed = self.ctx.allowed_branch_ids()
+        if allowed is not None:
+            qs = qs.filter(branch_id__in=allowed)
+        lease = qs.first()
+        if not lease:
+            raise ApiError("not_found", "Договор не найден.", status_code=404)
+        return lease
+
+    def get(self, request, pk):
+        return Response({"handover": handover_payload(self._lease(pk).handover)})
+
+    def patch(self, request, pk):
+        data = request.data if isinstance(request.data, dict) else {}
+        errors, clean = {}, {}
+        for k in eng.HANDOVER_KEYS:
+            if k not in data:
+                continue
+            v = data[k]
+            if v is None:
+                v = ""
+            if not isinstance(v, (str, int, float)) or isinstance(v, bool):
+                errors[k] = ["Ожидается текст."]
+                continue
+            v = str(v).strip()
+            if len(v) > HANDOVER_MAX:
+                errors[k] = [f"Не больше {HANDOVER_MAX} символов."]
+                continue
+            clean[k] = v
+        if errors:
+            raise ValidationError(errors)
+        with transaction.atomic():
+            lease = Lease.objects.select_for_update().get(pk=self._lease(pk).pk)
+            before = handover_payload(lease.handover)
+            lease.handover = {**before, **clean}
+            lease.save(update_fields=["handover", "updated_at"])
+            audit.log(request, self.ctx.company, "update", "lease", lease,
+                      before={"handover": before}, after={"handover": handover_payload(lease.handover)},
+                      branch=lease.branch)
+        return Response({"handover": handover_payload(lease.handover)})
 
 
 # ---------------------------------------------------------------- трудовые договоры

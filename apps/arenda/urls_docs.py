@@ -12,6 +12,7 @@ urlpatterns = [
     path("leases/preview/", v.LeasePreviewView.as_view()),
     path("leases/sign/", v.LeaseSignView.as_view()),
     path("leases/<uuid:pk>/document/", v.LeaseDocumentView.as_view()),
+    path("leases/<uuid:pk>/handover/", v.LeaseHandoverView.as_view()),
     path("leases/<uuid:pk>/document.pdf", v.LeaseDocumentView.as_view(), {"fmt": "pdf"}),
     path("leases/<uuid:pk>/document.docx", v.LeaseDocumentView.as_view(), {"fmt": "docx"}),
     path("contracts/", v.ContractsBaseView.as_view()),

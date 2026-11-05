@@ -6,6 +6,11 @@
   ## текст           раздел
   [[подписи]]        блок подписей сторон (аренда / работодатель)
   [[подписи-работник]] блок подписей работодателя и работника
+  [[подписи-жильё]]  реквизиты и подписи граждан (ФИО, адрес, ИНН/паспорт, телефон)
+  [[подписи-акт]]    «Передал Арендодатель / Принял Арендатор»
+  [[новая-страница]] разрыв страницы (например, перед актом)
+  [[счётчики]]       показания счётчиков и ключи из карточки договора (пусто — линии для записи от руки)
+  | а | б |          строка таблицы с рамками; |! а | б | — строка-заголовок
 Остальные непустые строки — абзацы.
 Внутри готового текста (снимка) блок подписей развёрнут в строки «~~ левая ~~ правая».
 """
@@ -14,8 +19,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from html import escape
 
-from .doc_defaults import (DEFAULT_EMPLOYMENT_NAME, DEFAULT_EMPLOYMENT_TEXT, DEFAULT_LEASE_NAME,
-                           DEFAULT_LEASE_TEXT)
+from .doc_defaults import (DEFAULT_EMPLOYMENT_NAME, DEFAULT_EMPLOYMENT_TEXT, DEFAULT_LEASE_FLAT_NAME,
+                           DEFAULT_LEASE_FLAT_TEXT, DEFAULT_LEASE_NAME, DEFAULT_LEASE_TEXT)
 
 FIELD_RE = re.compile(r"\{\{\s*([^{}\n]+?)\s*\}\}")
 BLANK = "________"
@@ -23,7 +28,16 @@ BLANK = "________"
 # маркеры подсветки в предпросмотре (в чистом тексте их нет)
 OK_A, OK_B, MISS_A, MISS_B = "\x01", "\x02", "\x03", "\x04"
 
-SIGN_TOKENS = {"[[подписи]]": "party", "[[подписи-работник]]": "employee"}
+SIGN_TOKENS = {"[[подписи]]": "party", "[[подписи-работник]]": "employee", "[[подписи-жильё]]": "flat",
+               "[[подписи-жилье]]": "flat", "[[подписи-акт]]": "act"}
+PAGE_BREAK = "[[новая-страница]]"
+METERS_TOKEN = "[[счётчики]]"
+METERS_TOKENS = {METERS_TOKEN, "[[счетчики]]"}
+# показания при передаче помещения (Lease.handover)
+METERS = [("electricity", "Электроэнергия"), ("water_cold", "Вода холодная"), ("water_hot", "Вода горячая"),
+          ("gas", "Газ")]
+HANDOVER_KEYS = [k for k, _ in METERS] + ["keys"]
+LINE = "______________________"
 
 # ---------------------------------------------------------------- реестр полей
 
@@ -37,6 +51,11 @@ LEASE_FIELDS = [
     ("окончание", "Окончание аренды"), ("срок_мес", "Срок, месяцев"), ("день_оплаты", "День оплаты"),
     ("депозит", "Депозит"), ("пеня", "Пеня"), ("индексация", "Индексация"), ("коммунальные", "Коммунальные"),
     ("сумма_договора", "Сумма договора"),
+    # жилое помещение (договор аренды жилья); пустые поля печатаются линией
+    ("адрес_помещения", "Адрес помещения (адрес филиала)"), ("тип_жилья", "Квартира / дом"),
+    ("комнат", "Количество комнат"), ("проживающие", "Кто ещё проживает"),
+    ("основание_собственности", "Основание права собственности"), ("способ_оплаты", "Способ оплаты"),
+    ("возврат_депозита_дней", "Возврат депозита, дней"), ("адрес_арендатора", "Адрес арендатора"),
 ]
 # реквизиты арендодателя из Настроек (дополнительно к ТЗ)
 LANDLORD_FIELDS = [
@@ -64,6 +83,11 @@ SPECIAL_LINES = [
     {"token": "## ", "label": "Раздел"},
     {"token": "[[подписи]]", "label": "Блок подписей сторон"},
     {"token": "[[подписи-работник]]", "label": "Блок подписей работника"},
+    {"token": "[[подписи-жильё]]", "label": "Реквизиты и подписи граждан (жильё)"},
+    {"token": "[[подписи-акт]]", "label": "Подписи акта: передал / принял"},
+    {"token": "[[новая-страница]]", "label": "Новая страница"},
+    {"token": "[[счётчики]]", "label": "Показания счётчиков и ключи"},
+    {"token": "| ", "label": "Строка таблицы: | ячейка | ячейка | (|! — заголовок)"},
 ]
 
 
@@ -219,6 +243,7 @@ def landlord_values(settings_obj, branch=None, city=""):
         "арендодатель_инн": s.inn, "арендодатель_адрес": s.legal_address, "арендодатель_банк": s.bank,
         "арендодатель_счёт": s.account, "арендодатель_бик": s.bik, "арендодатель_телефон": s.phone,
         "объект": branch.name if branch is not None else "",
+        "адрес_помещения": (getattr(branch, "address", "") or "") if branch is not None else "",
         "город": city or "",
     }
 
@@ -288,6 +313,21 @@ def employment_values(*, settings_obj, branch, city, employee, label, on_date):
 def sign_rows(values, kind, which):
     """Строки таблицы подписей: список пар (левая, правая)."""
     g = lambda k: (values.get(k) or "").strip()  # noqa: E731
+    if which == "flat":
+        tenant_sign = g("подписант") or g("арендатор") or BLANK
+        rows = [("Арендодатель", "Арендатор"),
+                ("ФИО: " + (g("арендодатель") or LINE), "ФИО: " + (g("арендатор") or LINE)),
+                ("Адрес: " + (g("арендодатель_адрес") or LINE), "Адрес: " + (g("адрес_арендатора") or LINE)),
+                ("ИНН/паспорт: " + (g("арендодатель_инн") or LINE),
+                 "ИНН/паспорт: " + (" / ".join(x for x in (g("инн"), g("паспорт")) if x) or LINE)),
+                ("Телефон: " + (g("арендодатель_телефон") or LINE), "Телефон: " + (g("телефон") or LINE)),
+                ("", ""),
+                (f"Подпись: {BLANK} / {g('директор') or g('арендодатель') or BLANK} /", f"Подпись: {BLANK} / {tenant_sign} /")]
+        return rows
+    if which == "act":
+        return [("Передал Арендодатель", "Принял Арендатор"), ("", ""),
+                (f"Подпись: {BLANK} / {g('директор') or g('арендодатель') or BLANK} /",
+                 f"Подпись: {BLANK} / {g('подписант') or g('арендатор') or BLANK} /")]
     left = []
     org = g("арендодатель")
     left.append(("АРЕНДОДАТЕЛЬ" if kind == "lease" and which == "party" else "РАБОТОДАТЕЛЬ"))
@@ -362,12 +402,47 @@ def substitute(text, values, kind, mark=False):
     return "\n".join(out), filled, missing, unknown
 
 
-def to_blocks(text):
-    """Структурный вид: [{'type': 'title'|'section'|'para'|'table', ...}] — для HTML, DOCX, PDF."""
+def meter_lines(handover=None):
+    """Строки блока [[счётчики]]: значение из карточки договора или линия для записи от руки."""
+    h = handover if isinstance(handover, dict) else {}
+    val = lambda k: str(h.get(k) or "").strip()  # noqa: E731
+    out = [f"{title}: {val(k) or LINE}" for k, title in METERS]
+    out.append(f"Ключи переданы в количестве: {val('keys') or '__________'} комплект(ов).")
+    return out
+
+
+def _grid_cells(s):
+    header = s.startswith("|!")
+    body = s[2:] if header else s[1:]
+    if body.endswith("|"):
+        body = body[:-1]
+    return header, [c.strip() for c in body.split("|")]
+
+
+def to_blocks(text, handover=None):
+    """Структурный вид: [{'type': 'title'|'section'|'para'|'table'|'grid'|'break', ...}] — для HTML, DOCX, PDF.
+    handover — показания счётчиков договора для [[счётчики]] (нет — пустые линии)."""
     blocks = []
     for line in (text or "").split("\n"):
         s = line.strip()
         if not s:
+            continue
+        low = s.lower()
+        if low == PAGE_BREAK:
+            blocks.append({"type": "break"})
+            continue
+        if low in METERS_TOKENS:
+            for m in meter_lines(handover):
+                blocks.append({"type": "para", "text": m, "tight": True})
+            continue
+        if s.startswith("|"):
+            header, cells = _grid_cells(s)
+            last = blocks[-1] if blocks else None
+            if last and last["type"] == "grid" and len(last["rows"][0]) == len(cells):
+                last["rows"].append(cells)
+                last["header"].append(header)
+            else:
+                blocks.append({"type": "grid", "rows": [cells], "header": [header]})
             continue
         if s.startswith("~~"):
             cells = [c.strip() for c in s[2:].split("~~")]
@@ -393,16 +468,33 @@ def _h(s):
             .replace(MISS_B, "</span>"))
 
 
+TITLE_COLOR = "#1F4E79"
+GRID_HEAD = "#DCE9F5"
+
+
 def blocks_to_html(blocks):
     out = ['<div class="contract" style="font-family:\'Times New Roman\',serif;line-height:1.5">']
     for b in blocks:
         t = b["type"]
-        if t == "title":
-            out.append(f'<h1 style="text-align:center;font-size:1.3em;margin:0 0 .8em">{_h(b["text"])}</h1>')
+        if t == "break":
+            out.append('<div class="page-break" style="break-before:page;page-break-before:always;'
+                       'border-top:1px dashed #bbb;margin:2em 0"></div>')
+        elif t == "grid":
+            out.append('<table class="grid" style="width:100%;margin:.5em 0;border-collapse:collapse"><tbody>')
+            for cells, head in zip(b["rows"], b["header"]):
+                st = f"border:1px solid #9bb;padding:4px 6px;vertical-align:top;height:1.6em"
+                if head:
+                    st += f";background:{GRID_HEAD};font-weight:bold"
+                out.append("<tr>" + "".join(f'<td style="{st}">{_h(c)}</td>' for c in cells) + "</tr>")
+            out.append("</tbody></table>")
+        elif t == "title":
+            out.append(f'<h1 style="text-align:center;font-size:1.3em;margin:0 0 .8em;color:{TITLE_COLOR};'
+                       f'border-bottom:1.5px solid {TITLE_COLOR};padding-bottom:.2em">{_h(b["text"])}</h1>')
         elif t == "section":
             out.append(f'<h2 style="font-size:1.05em;margin:1em 0 .3em">{_h(b["text"])}</h2>')
         elif t == "para":
-            out.append(f'<p style="margin:.3em 0;text-align:justify">{_h(b["text"])}</p>')
+            m = ".1em 0" if b.get("tight") else ".3em 0"
+            out.append(f'<p style="margin:{m};text-align:justify">{_h(b["text"])}</p>')
         else:
             out.append('<table class="signs" style="width:100%;margin-top:1.2em;border-collapse:collapse"><tbody>')
             for l, r in b["rows"]:
@@ -427,8 +519,12 @@ def render_template(text, values, kind):
             "filled": filled, "missing": missing, "unknown": unknown}
 
 
-def snapshot_html(snapshot_text):
-    return blocks_to_html(to_blocks(snapshot_text))
+def snapshot_html(snapshot_text, handover=None):
+    return blocks_to_html(to_blocks(snapshot_text, handover))
+
+
+def has_meters(text):
+    return any(line.strip().lower() in METERS_TOKENS for line in (text or "").split("\n"))
 
 
 # ---------------------------------------------------------------- шаблоны по умолчанию
@@ -440,8 +536,23 @@ def ensure_default_templates(company, kind=None):
 
     kinds = [kind] if kind else ["lease", "employment"]
     for k in kinds:
-        if Template.objects.filter(company=company, kind=k).exists():
-            continue
-        name, text = ((DEFAULT_LEASE_NAME, DEFAULT_LEASE_TEXT) if k == "lease"
-                      else (DEFAULT_EMPLOYMENT_NAME, DEFAULT_EMPLOYMENT_TEXT))
-        Template.objects.create(company=company, kind=k, name=name, text=text)
+        if not Template.objects.filter(company=company, kind=k).exists():
+            name, text = ((DEFAULT_LEASE_NAME, DEFAULT_LEASE_TEXT) if k == "lease"
+                          else (DEFAULT_EMPLOYMENT_NAME, DEFAULT_EMPLOYMENT_TEXT))
+            Template.objects.create(company=company, kind=k, name=name, text=text)
+        if k == "lease":
+            _ensure_flat_template(company)
+
+
+def _ensure_flat_template(company):
+    """Второй типовой шаблон (жильё) — и новым, и уже работающим компаниям, один раз:
+    после добавления ставится отметка в настройках, поэтому удалённый шаблон не возвращается."""
+    from ..models import ArendaSettings, Template
+
+    st = ArendaSettings.objects.filter(company=company).first()
+    if st is not None and st.flat_template_added:
+        return
+    if not Template.objects.filter(company=company, kind="lease", name=DEFAULT_LEASE_FLAT_NAME).exists():
+        Template.objects.create(company=company, kind="lease", name=DEFAULT_LEASE_FLAT_NAME, text=DEFAULT_LEASE_FLAT_TEXT)
+    if st is not None:
+        ArendaSettings.objects.filter(pk=st.pk).update(flat_template_added=True)

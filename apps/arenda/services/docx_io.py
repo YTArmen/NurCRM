@@ -14,15 +14,41 @@ MAX_XML = 15 * 1024 * 1024
 # ---------------------------------------------------------------- сборка DOCX
 
 
-def _run(text, bold=False, size=24):
+TITLE_COLOR = "1F4E79"
+GRID_HEAD = "DCE9F5"
+
+
+def _run(text, bold=False, size=24, color=None):
     rpr = f'<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>' \
-          f'{"<w:b/>" if bold else ""}<w:sz w:val="{size}"/></w:rPr>'
+          f'{"<w:b/>" if bold else ""}{f'<w:color w:val="{color}"/>' if color else ""}<w:sz w:val="{size}"/></w:rPr>'
     return f'<w:r>{rpr}<w:t xml:space="preserve">{xesc(text)}</w:t></w:r>'
 
 
-def _para(text, *, bold=False, align="both", size=24, before=0, after=80):
-    return (f'<w:p><w:pPr><w:spacing w:before="{before}" w:after="{after}"/><w:jc w:val="{align}"/></w:pPr>'
-            f'{_run(text, bold, size)}</w:p>')
+def _para(text, *, bold=False, align="both", size=24, before=0, after=80, color=None, rule=False):
+    border = (f'<w:pBdr><w:bottom w:val="single" w:sz="8" w:space="1" w:color="{color or "000000"}"/></w:pBdr>'
+              if rule else "")
+    return (f'<w:p><w:pPr>{border}<w:spacing w:before="{before}" w:after="{after}"/><w:jc w:val="{align}"/></w:pPr>'
+            f'{_run(text, bold, size, color)}</w:p>')
+
+
+def _grid(rows, header):
+    n = max(len(r) for r in rows)
+    w = 9000 // n
+    edge = '<w:{0} w:val="single" w:sz="4" w:space="0" w:color="8FAACC"/>'
+    borders = "<w:tblBorders>" + "".join(edge.format(e) for e in ("top", "left", "bottom", "right", "insideH", "insideV")) \
+              + "</w:tblBorders>"
+    trs = []
+    for cells, head in zip(rows, header):
+        cells = list(cells) + [""] * (n - len(cells))
+        shade = f'<w:shd w:val="clear" w:color="auto" w:fill="{GRID_HEAD}"/>' if head else ""
+        tcs = "".join(
+            f'<w:tc><w:tcPr><w:tcW w:w="{w}" w:type="dxa"/>{shade}</w:tcPr>'
+            f'<w:p><w:pPr><w:spacing w:before="60" w:after="60"/></w:pPr>{_run(c, bold=head, size=22)}</w:p></w:tc>'
+            for c in cells)
+        trs.append(f"<w:tr>{tcs}</w:tr>")
+    grid = "".join(f'<w:gridCol w:w="{w}"/>' for _ in range(n))
+    return (f'<w:tbl><w:tblPr><w:tblW w:w="{w * n}" w:type="dxa"/>{borders}</w:tblPr>'
+            f'<w:tblGrid>{grid}</w:tblGrid>{"".join(trs)}</w:tbl><w:p/>')
 
 
 def _cell(text, width):
@@ -36,11 +62,15 @@ def build_docx(blocks):
     for b in blocks:
         t = b["type"]
         if t == "title":
-            body.append(_para(b["text"], bold=True, align="center", size=28, after=200))
+            body.append(_para(b["text"], bold=True, align="center", size=28, after=200, color=TITLE_COLOR, rule=True))
         elif t == "section":
             body.append(_para(b["text"], bold=True, align="left", before=160, after=60))
         elif t == "para":
-            body.append(_para(b["text"]))
+            body.append(_para(b["text"], after=20 if b.get("tight") else 80))
+        elif t == "grid":
+            body.append(_grid(b["rows"], b["header"]))
+        elif t == "break":
+            body.append('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
         else:
             rows = "".join(f"<w:tr>{_cell(l, 4500)}{_cell(r, 4500)}</w:tr>" for l, r in b["rows"])
             body.append('<w:tbl><w:tblPr><w:tblW w:w="9000" w:type="dxa"/></w:tblPr>'
@@ -153,12 +183,16 @@ def build_pdf(blocks, title="Договор"):
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.lib import colors
+    from reportlab.platypus import HRFlowable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     f = _fonts()
+    blue = colors.HexColor("#" + TITLE_COLOR)
     base = ParagraphStyle("b", fontName=f["regular"], fontSize=10, leading=14, alignment=TA_JUSTIFY, spaceAfter=3)
+    tight = ParagraphStyle("t", parent=base, spaceAfter=0)
     h1 = ParagraphStyle("h1", parent=base, fontName=f["bold"], fontSize=13, leading=17, alignment=TA_CENTER,
-                        spaceAfter=10)
+                        spaceAfter=2, textColor=blue)
+    cellh = ParagraphStyle("ch", parent=base, alignment=TA_LEFT, spaceAfter=0, leading=13, fontName=f["bold"])
     h2 = ParagraphStyle("h2", parent=base, fontName=f["bold"], alignment=TA_LEFT, spaceBefore=8, spaceAfter=3)
     cell = ParagraphStyle("c", parent=base, alignment=TA_LEFT, spaceAfter=0, leading=13)
     story = []
@@ -166,10 +200,24 @@ def build_pdf(blocks, title="Договор"):
         t = b["type"]
         if t == "title":
             story.append(Paragraph(xesc(b["text"]), h1))
+            story.append(HRFlowable(width="100%", thickness=1.2, color=blue, spaceBefore=0, spaceAfter=8))
         elif t == "section":
             story.append(Paragraph(xesc(b["text"]), h2))
         elif t == "para":
-            story.append(Paragraph(xesc(b["text"]), base))
+            story.append(Paragraph(xesc(b["text"]), tight if b.get("tight") else base))
+        elif t == "break":
+            story.append(PageBreak())
+        elif t == "grid":
+            n = max(len(r) for r in b["rows"])
+            data = [[Paragraph(xesc(c) or "&nbsp;", cellh if head else cell) for c in list(r) + [""] * (n - len(r))]
+                    for r, head in zip(b["rows"], b["header"])]
+            tbl = Table(data, colWidths=[170 * mm / n] * n)
+            style = [("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#8FAACC")), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                     ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]
+            style += [("BACKGROUND", (0, i), (-1, i), colors.HexColor("#" + GRID_HEAD))
+                      for i, head in enumerate(b["header"]) if head]
+            tbl.setStyle(TableStyle(style))
+            story += [Spacer(1, 2 * mm), tbl, Spacer(1, 2 * mm)]
         else:
             story.append(Spacer(1, 6 * mm))
             data = [[Paragraph(xesc(l) or "&nbsp;", cell), Paragraph(xesc(r) or "&nbsp;", cell)] for l, r in b["rows"]]
