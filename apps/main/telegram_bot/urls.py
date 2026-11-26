@@ -19,6 +19,9 @@ from apps.main.telegram_bot.views import (
     BotNotifyOwnerView,
     TelegramBotOwnerCodeView,
     TelegramBotOwnerCodeVerifyView,
+    TelegramBotDialogsView,
+    TelegramBotDialogDetailView,
+    TelegramBotSalesStatsView,
 )
 from apps.main.telegram_bot.views_public import TelegramWebhookPublicView
 
@@ -41,6 +44,9 @@ urlpatterns = [
     path("notify/shift-closed/", TelegramBotNotifyShiftClosedView.as_view(), name="telegram-bot-notify-shift-closed"),
     path("owner-code/", TelegramBotOwnerCodeView.as_view(), name="telegram-bot-owner-code"),
     path("owner-code/verify/", TelegramBotOwnerCodeVerifyView.as_view(), name="telegram-bot-owner-code-verify"),
+    path("dialogs/", TelegramBotDialogsView.as_view(), name="telegram-bot-dialogs"),  # bot2611
+    path("dialogs/<str:chat_id>/", TelegramBotDialogDetailView.as_view(), name="telegram-bot-dialog-detail"),
+    path("sales-stats/", TelegramBotSalesStatsView.as_view(), name="telegram-bot-sales-stats"),
     path("webhook/<uuid:bot_uuid>/", TelegramWebhookPublicView.as_view(), name="telegram-bot-webhook-under-bot"),
     path("webhook/", TelegramWebhookPublicView.as_view(), name="telegram-bot-webhook-under-bot-info"),
 ]

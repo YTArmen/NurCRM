@@ -68,9 +68,10 @@ def is_valid_store_info(val: str) -> bool:
     return True
 
 
-def get_customer_main_menu_keyboard(cart_count: int = 0, lang: str = "ru"):
-    """ТЗ-09 п. 2.1: Постоянное меню покупателя внизу экрана."""
+def get_customer_main_menu_keyboard(cart_count: int = 0, lang: str = "ru", extra_row=None):
+    """ТЗ-09 п. 2.1: Постоянное меню покупателя внизу экрана. bot2611: extra_row — «👤 Продавец»."""
     is_ky = (lang == "ky")
+    _rows_extra = [extra_row] if extra_row else []
     cart_label = f"🧺 Себет ({cart_count})" if is_ky else f"🧺 Корзина ({cart_count})" if cart_count > 0 else ("🧺 Себет" if is_ky else "🧺 Корзина")
     return {
         "keyboard": [
@@ -86,7 +87,7 @@ def get_customer_main_menu_keyboard(cart_count: int = 0, lang: str = "ru"):
                 {"text": "📍 Дарек жана убакыт" if is_ky else "📍 Адрес и время"},
                 {"text": "📞 Байланышуу" if is_ky else "📞 Связаться"},
             ],
-        ],
+        ] + _rows_extra,
         "resize_keyboard": True,
         "is_persistent": True,
     }
@@ -227,6 +228,13 @@ def link_client_by_start(company, chat_id: str, client_id_str: str) -> str:
     if len(_re0.sub(r"\D", "", clean_id)) >= 9:
         return CONTACT_REQUEST_TEXT
     return "Добро пожаловать! Чем мы можем вам помочь? Напишите интересующий вас товар."
+
+
+# bot2611: константы пропали из файла при правке 12.11 (NameError → ИИ без каталога и без истории); значения из deploy/all-2026-10-29
+CATALOG_CACHE_TTL = 180  # 3 минуты на компанию (ТЗ ч.7, 4.1.5)
+CATALOG_MAX_PRODUCTS = 3000
+CUSTOMER_HISTORY_TTL = 86400
+CUSTOMER_HISTORY_LEN = 8
 
 
 def _catalog_cache_key(company_id) -> str:
@@ -735,6 +743,66 @@ def start_product_card(settings, token, chat_id, company, product_id: str) -> No
         parse_mode="HTML", reply_markup=markup)
 
 
+def build_customer_system_instruction(settings, company, text, history, recent_user_texts=None, scfg=None):
+    """Системный промпт ИИ-консультанта покупателей (вынесено bot2611: тот же промпт для test-ai «как покупатель»)."""
+    from apps.main.telegram_bot.services import seller
+    scfg = scfg if scfg is not None else seller.get_config(settings)
+    if recent_user_texts is None:
+        recent_user_texts = [p.get("parts", [{}])[0].get("text", "") for p in history if p.get("role") == "user"]
+    try:
+        catalog_snippet, matched_catalog_items = build_catalog_context(company, user_text=text, recent_user_texts=recent_user_texts)
+    except Exception as exc:
+        logger.exception("build_catalog_context failed: %s", exc)
+        catalog_snippet = "Каталог временно недоступен — предложи покупателю позвонить в магазин."
+        matched_catalog_items = []
+
+    store_name = getattr(company, "name", "наш магазин")
+    address = getattr(company, "address", "") or ""
+    phone = settings.owner_phone or getattr(company, "phone", "") or ""
+
+    store_lines = [f"Ты вежливый, внимательный ИИ-консультант магазина «{store_name}»."]
+    if is_valid_store_info(address):
+        store_lines.append(f"Адрес магазина: {address}")
+    if is_valid_store_info(phone):
+        store_lines.append(f"Телефон для связи: {phone}")
+    store_info_block = "\n".join(store_lines)
+
+    scenarios_block = build_scenarios_context(company)
+
+    is_follow_up = len(history) > 0
+    greeting_rule = "Это продолжение диалога (не первое сообщение). Не здоровайся снова, не пиши 'Здравствуйте!' или 'Приветствую!'." if is_follow_up else "Это первое сообщение диалога, вежливо поздоровайся."
+
+    system_instruction = (
+        f"{store_info_block}\n\n"
+        f"КАТАЛОГ ТОВАРОВ МАГАЗИНА (название, варианты размеров и цветов, цена, статус наличия):\n"
+        f"{catalog_snippet}\n\n"
+        f"{scenarios_block}\n\n"
+        "СТРОГИЕ ПРАВИЛА БЕЗОПАСНОСТИ И КОНСУЛЬТАЦИИ:\n"
+        f"0. {greeting_rule}\n"
+        "1. Отвечай только на основе каталога. Цену называй строго из каталога без лишних нулей (например, '120 сом', '1 900 сом').\n"
+        "2. ВАРИАНТЫ (РАЗМЕРЫ И ЦВЕТА):\n"
+        "   - Если у товара в каталоге указаны размеры и цвета — называй только те, что есть в наличии, и обязательно уточни размер и цвет перед заказом; акционную цену варианта называй, только если она указана в каталоге.\n"
+        "   - Спросили про одежду и не назвали размер — сам перечисли размеры и цвета в наличии (коротко, по размерам) и спроси, какой нужен; нужного размера или цвета нет — предложи ближайший, который есть.\n"
+        "   - Не говори «свободный размер», если в каталоге указаны размеры.\n"
+        "3. ФОРМАТИРОВАНИЕ: отвечай ТОЛЬКО с HTML-тегами <b>, <i>. Никакого Markdown (НЕ используй **, *, _, #).\n"
+        "4. ДАННЫЕ МАГАЗИНА: если адреса или телефона нет в описании магазина выше, НЕ выдумывай их и не упоминай.\n"
+        "5. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО раскрывать: выручку магазина, продажи, прибыль, долги, точные складские остатки (говори только 'в наличии' или 'нет в наличии').\n"
+        "6. ОФОРМЛЕНИЕ ЗАКАЗА (Самовывоз):\n"
+        "   - Если у товара есть варианты, перед заказом ТЫ ОБЯЗАН УТОЧНИТЬ РАЗМЕР И ЦВЕТ.\n"
+        "   - Уточни имя и контактный телефон покупателя.\n"
+        "   - Спроси подтверждение: 'Оформить заказ на самовывоз?'\n"
+        "   - ТОЛЬКО когда покупатель явно подтвердил заказ (написал 'да', 'оформить', 'заказываю' и т.д.), добавь В САМЫЙ КОНЕЦ ответа строго следующую служебную строку:\n"
+        'ЗАКАЗ: {"name": "Имя", "phone": "+996...", "items": [{"title": "Название товара", "variant_id": "<variant_id из каталога>", "size": "32", "color": "синий", "qty": 1}], "comment": ""}\n'
+        "   (variant_id копируй из каталога ровно как есть; у товара без вариантов variant_id = null, size и color пустые).\n"
+        "   Вне этой ситуации строку ЗАКАЗ никогда не выводи.\n"
+        "Отвечай вежливо и кратко на языке покупателя (русский или кыргызский)."
+    )
+    rules = seller.prompt_rules(scfg)
+    if rules:
+        system_instruction += "\n\n" + rules
+    return system_instruction, matched_catalog_items
+
+
 def handle_customer_message(
     settings,
     chat_id: str,
@@ -797,8 +865,13 @@ def handle_customer_message(
     from apps.main.models import Product, ProductCategory, ShowcaseOrder
 
     lang = "ky" if (from_user.get("language_code", "").startswith("ky") or any(w in lower_text for w in ["салам", "кандай", "кыргызча", "жеткирүү", "баасы", "канча"])) else "ru"
+    # bot2611: бот-продавец Ф1 — фиксированный язык, кнопка «Продавец»
+    from apps.main.telegram_bot.services import seller
+    scfg = seller.get_config(settings)
+    seller_on = seller.is_on(scfg)
+    lang = seller.fixed_lang(scfg, lang)
     cart_count = get_cart_count(company.id, chat_id)
-    main_menu = get_customer_main_menu_keyboard(cart_count=cart_count, lang=lang)
+    main_menu = get_customer_main_menu_keyboard(cart_count=cart_count, lang=lang, extra_row=seller.menu_extra_row(scfg, lang))
 
     # ТЗ кассы 05.11 п.31 / Б-30: /stop, СТОП, STOP → служебные и рекламные выключены
     if lower_text.strip() in ("/stop", "стоп", "stop"):
@@ -840,6 +913,8 @@ def handle_customer_message(
             reply_text = f"Здравствуйте! Добро пожаловать в «{company_name}». Чем мы можем вам помочь?"
             if is_valid_store_info(phone):
                 reply_text += f"\nКонтакты магазина: {phone}"
+            if seller_on and (scfg.get("greeting") or "").strip():
+                reply_text = html.escape(scfg["greeting"].strip())  # bot2611: своё приветствие владельца
 
         telegram_api.send_message(token, chat_id, reply_text, parse_mode="HTML", reply_markup=main_menu)
         TelegramInquiry.objects.create(
@@ -956,6 +1031,15 @@ def handle_customer_message(
         )
         return
 
+    # bot2611: покупатель просит живого продавца (кнопка «👤 Продавец» или слова)
+    if seller_on and seller.wants_human(norm):
+        ho_reply = seller.start_handoff(settings, chat_id, from_user, "human", question=text, lang=lang)
+        if ho_reply:
+            telegram_api.send_message(token, chat_id, ho_reply, parse_mode=None, reply_markup=main_menu)
+            TelegramInquiry.objects.create(company=company, chat_id=str(chat_id), name=cust_name,
+                                           username=cust_username, text=text, reply=ho_reply, is_voice=is_voice)
+            return
+
     # 4. Проверка запрещённых финансовых вопросов (TZ 5.3)
     financial_keywords = ["выручка", "прибыль", "сколько зарабатываете", "доход", "себестоимость", "чужой долг"]
     if any(k in lower_text for k in financial_keywords):
@@ -997,56 +1081,13 @@ def handle_customer_message(
         history = get_customer_history(company.id, chat_id)
         recent_user_texts = [p.get("parts", [{}])[0].get("text", "") for p in history if p.get("role") == "user"]
 
+        system_instruction, matched_catalog_items = build_customer_system_instruction(
+            settings, company, text, history, recent_user_texts, scfg)
+        matched_ids = [m["id"] for m in matched_catalog_items]
         try:
-            catalog_snippet, matched_catalog_items = build_catalog_context(company, user_text=text, recent_user_texts=recent_user_texts)
-            matched_ids = [m["id"] for m in matched_catalog_items]
             candidate_products_for_photos = list(Product.objects.filter(id__in=matched_ids).prefetch_related("variants"))
-        except Exception as exc:
-            logger.exception("build_catalog_context failed: %s", exc)
-            catalog_snippet = "Каталог временно недоступен — предложи покупателю позвонить в магазин."
-            matched_catalog_items = []
-
-        store_name = getattr(company, "name", "наш магазин")
-        address = getattr(company, "address", "") or ""
-        phone = settings.owner_phone or getattr(company, "phone", "") or ""
-
-        store_lines = [f"Ты вежливый, внимательный ИИ-консультант магазина «{store_name}»."]
-        if is_valid_store_info(address):
-            store_lines.append(f"Адрес магазина: {address}")
-        if is_valid_store_info(phone):
-            store_lines.append(f"Телефон для связи: {phone}")
-        store_info_block = "\n".join(store_lines)
-
-        scenarios_block = build_scenarios_context(company)
-
-        is_follow_up = len(history) > 0
-        greeting_rule = "Это продолжение диалога (не первое сообщение). Не здоровайся снова, не пиши 'Здравствуйте!' или 'Приветствую!'." if is_follow_up else "Это первое сообщение диалога, вежливо поздоровайся."
-
-        system_instruction = (
-            f"{store_info_block}\n\n"
-            f"КАТАЛОГ ТОВАРОВ МАГАЗИНА (название, варианты размеров и цветов, цена, статус наличия):\n"
-            f"{catalog_snippet}\n\n"
-            f"{scenarios_block}\n\n"
-            "СТРОГИЕ ПРАВИЛА БЕЗОПАСНОСТИ И КОНСУЛЬТАЦИИ:\n"
-            f"0. {greeting_rule}\n"
-            "1. Отвечай только на основе каталога. Цену называй строго из каталога без лишних нулей (например, '120 сом', '1 900 сом').\n"
-            "2. ВАРИАНТЫ (РАЗМЕРЫ И ЦВЕТА):\n"
-            "   - Если у товара в каталоге указаны размеры и цвета — называй только те, что есть в наличии, и обязательно уточни размер и цвет перед заказом; акционную цену варианта называй, только если она указана в каталоге.\n"
-            "   - Спросили про одежду и не назвали размер — сам перечисли размеры и цвета в наличии (коротко, по размерам) и спроси, какой нужен; нужного размера или цвета нет — предложи ближайший, который есть.\n"
-            "   - Не говори «свободный размер», если в каталоге указаны размеры.\n"
-            "3. ФОРМАТИРОВАНИЕ: отвечай ТОЛЬКО с HTML-тегами <b>, <i>. Никакого Markdown (НЕ используй **, *, _, #).\n"
-            "4. ДАННЫЕ МАГАЗИНА: если адреса или телефона нет в описании магазина выше, НЕ выдумывай их и не упоминай.\n"
-            "5. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО раскрывать: выручку магазина, продажи, прибыль, долги, точные складские остатки (говори только 'в наличии' или 'нет в наличии').\n"
-            "6. ОФОРМЛЕНИЕ ЗАКАЗА (Самовывоз):\n"
-            "   - Если у товара есть варианты, перед заказом ТЫ ОБЯЗАН УТОЧНИТЬ РАЗМЕР И ЦВЕТ.\n"
-            "   - Уточни имя и контактный телефон покупателя.\n"
-            "   - Спроси подтверждение: 'Оформить заказ на самовывоз?'\n"
-            "   - ТОЛЬКО когда покупатель явно подтвердил заказ (написал 'да', 'оформить', 'заказываю' и т.д.), добавь В САМЫЙ КОНЕЦ ответа строго следующую служебную строку:\n"
-            'ЗАКАЗ: {"name": "Имя", "phone": "+996...", "items": [{"title": "Название товара", "variant_id": "<variant_id из каталога>", "size": "32", "color": "синий", "qty": 1}], "comment": ""}\n'
-            "   (variant_id копируй из каталога ровно как есть; у товара без вариантов variant_id = null, size и color пустые).\n"
-            "   Вне этой ситуации строку ЗАКАЗ никогда не выводи.\n"
-            "Отвечай вежливо и кратко на языке покупателя (русский или кыргызский)."
-        )
+        except Exception:
+            candidate_products_for_photos = []
 
         contents = list(history[-8:])
         contents.append({"role": "user", "parts": [{"text": text}]})
@@ -1061,8 +1102,14 @@ def handle_customer_message(
                     max_tokens=600,
                 )
 
+            # bot2611: служебная метка «ПРОДАВЕЦ: …» и выключенные заказы
+            ho_reason = None
+            if seller_on:
+                ho_reason, raw_ai_reply = seller.extract_handoff_tag(raw_ai_reply)
             # Проверяем, есть ли служебная строка заказа
             order_data, clean_ai_reply = extract_order_json(raw_ai_reply)
+            if order_data and seller_on and not scfg.get("orders_enabled", True):
+                order_data = None
             if order_data:
                 created_order, order_reply = create_order_from_ai_json(company, settings, order_data, chat_id)
                 if created_order is not None:
@@ -1076,6 +1123,20 @@ def handle_customer_message(
 
             if not reply_to_send:
                 reply_to_send = raw_ai_reply.strip()
+
+            if seller_on:
+                reply_to_send = seller.postprocess(scfg, reply_to_send, first_message=not history)
+                if ho_reason:
+                    ho_reply = seller.start_handoff(settings, chat_id, from_user, ho_reason, question=text, lang=lang)
+                    if ho_reply:
+                        reply_to_send = ho_reply
+                    order_data = order_data or {"_no_cache": True}
+                threshold = int(scfg.get("confirm_threshold") or 0)
+                if created_order is not None and threshold and created_order.total is not None and created_order.total >= threshold:
+                    ho_reply = seller.start_handoff(settings, chat_id, from_user, "big_order", question=text, lang=lang,
+                                                    order=created_order)
+                    if ho_reply:
+                        reply_to_send = f"{reply_to_send}\n\n{ho_reply}"
 
             if created_order is not None:
                 clear_customer_history(company.id, chat_id)

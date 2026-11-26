@@ -21,6 +21,9 @@ from core.api_compat import API_VERSION, client_label, company_flags, is_new_cli
 
 FEATURES = (
     "weight_line_total",  # wlt2611: pos/checkout items[].line_total — весовая строка «по сумме»
+    "bot_seller",  # bot2611: telegram-bot/settings seller_config — бот-продавец (тон/часы/языки/знания)
+    "bot_handoff",  # bot2611: передача диалога владельцу в Telegram, telegram-bot/dialogs/<chat_id>/ take|return
+    "bot_sales_stats",  # bot2611: telegram-bot/sales-stats/ и telegram-bot/dialogs/
     "billing_elqr",  # elqr1911: users/billing/* — оплата подписки ELQR (доступность — billing/config/)
     "shifts_month_filter",  # tab1911: construction/shifts/?month= и main/staff/timesheet/?month=
     "shift_report_v2", "cashbox_drawer_cash", "idempotency_lookup", "price_stable",

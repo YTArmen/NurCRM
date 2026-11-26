@@ -80,6 +80,8 @@ class TelegramBotSettings(models.Model):
     send_product_photos = models.BooleanField("Присылать фото товаров", default=True)
     last_update_at = models.DateTimeField("Последнее входящее обновление", blank=True, null=True)
     last_reply_at = models.DateTimeField("Последний ответ бота", blank=True, null=True)
+    # bot2611: бот-продавец Ф1 — тон, часы живого продавца, языки, знания, порог подтверждения (см. services/seller.py)
+    seller_config = models.JSONField("Настройки бота-продавца", default=dict, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -485,3 +487,41 @@ class TelegramCustomerOutbox(models.Model):
                                     name="uq_tg_cust_outbox_dedupe"),
         ]
         indexes = [models.Index(fields=["company", "client", "-created_at"], name="main_tgcob_client_idx")]
+
+
+class TelegramHandoff(models.Model):
+    """bot2611: передача диалога живому продавцу (владельцу в Telegram) и «перезвоните мне» вне часов."""
+
+    class Status(models.TextChoices):
+        WAITING = "waiting", "Ждёт продавца"
+        TAKEN = "taken", "У продавца"
+        RETURNED = "returned", "Возвращён боту"
+        EXPIRED = "expired", "Вернулся к боту по тишине"
+        CALLBACK = "callback", "Перезвонить (вне часов)"
+        LOGGED = "logged", "Только в отчёт"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="telegram_handoffs")
+    chat_id = models.CharField(max_length=64, db_index=True)
+    customer_name = models.CharField(max_length=255, blank=True, default="")
+    lang = models.CharField(max_length=2, default="ru")
+    reason = models.CharField(max_length=16, default="human")  # human|unknown|angry|big_order
+    question = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.WAITING, db_index=True)
+    order = models.ForeignKey("main.ShowcaseOrder", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    conversation_id = models.CharField(max_length=64, blank=True, default="")
+    card_chat_id = models.CharField(max_length=64, blank=True, default="")
+    card_message_id = models.BigIntegerField(null=True, blank=True)
+    phone = models.CharField(max_length=32, blank=True, default="")
+    note = models.TextField(blank=True, default="")
+    until = models.DateTimeField(null=True, blank=True)
+    taken_at = models.DateTimeField(null=True, blank=True)
+    taken_by = models.CharField(max_length=255, blank=True, default="")
+    first_answer_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "telegram_handoffs"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["company", "chat_id", "-created_at"], name="tg_handoff_chat_idx")]

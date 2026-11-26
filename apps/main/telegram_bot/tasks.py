@@ -195,6 +195,14 @@ def process_telegram_update(settings_id: str, update_data: dict, enqueued_at: fl
         is_owner = (settings.owner_chat_id and str(settings.owner_chat_id) == str(chat_id))
         audience = "owner" if is_owner else "customers"
 
+        # bot2611: владелец ответил (Reply) на карточку «позвать продавца» / пересланное сообщение → покупателю
+        if message.get("reply_to_message") and settings.owner_chat_id and str(chat_id) == str(settings.owner_chat_id):
+            from apps.main.telegram_bot.services import seller
+            if seller.on_owner_reply(settings, message):
+                from django.utils import timezone
+                TelegramBotSettings.objects.filter(id=settings.id).update(last_reply_at=timezone.now())
+                return
+
         # Аудит 12.11: покупатель поделился СВОИМ контактом → привязка к клиенту по телефону.
         if not is_owner and message.get("contact"):
             from apps.main.models import Client
@@ -231,7 +239,13 @@ def process_telegram_update(settings_id: str, update_data: dict, enqueued_at: fl
         # Ящик «Чаты» (ТЗ 26.10 Б-76): входящее покупателя пишем в диалог; в паузе после ответа человека бот молчит
         if not is_owner:
             from apps.inbox import bot_hooks
-            if bot_hooks.on_customer_message(settings, message):
+            _inbox_paused = bot_hooks.on_customer_message(settings, message)
+            # bot2611: диалог у живого продавца — пересылаем ему, бот молчит; вне часов — ловим телефон
+            if chat.get("type", "private") == "private":
+                from apps.main.telegram_bot.services import seller
+                if seller.on_customer_update(settings, chat_id, from_user, message):
+                    return
+            if _inbox_paused:
                 return
 
         # ТЗ ч.15, п. 5: фото накладной от владельца (photo или document-картинка)

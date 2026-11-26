@@ -96,6 +96,11 @@ def handle_callback_query(settings, cq: dict) -> None:
     message_id = message.get("message_id")
     data = cq.get("data") or ""
 
+    # bot2611: карточка «позвать продавца» — ho:t:<id> взять / ho:b:<id> вернуть боту
+    if data.startswith("ho:") and chat_id:  # отвечает на callback сам, с текстом
+        from apps.main.telegram_bot.services import seller
+        seller.handle_callback(settings, cq)
+        return
     # Немедленный ответ Telegram API
     telegram_api.answer_callback_query(token, cq_id)
 

@@ -106,6 +106,7 @@ class TelegramBotSettingsSerializer(serializers.ModelSerializer):
             "orders_last_error",
             "last_update_at",
             "last_reply_at",
+            "seller_config",
             "token",
             "ai_key",
         ]
@@ -113,6 +114,20 @@ class TelegramBotSettingsSerializer(serializers.ModelSerializer):
 
     def get_ai_source(self, obj):
         return obj.ai_source
+
+    def validate_seller_config(self, value):
+        # bot2611: частичное обновление настроек бота-продавца поверх текущих
+        from apps.main.telegram_bot.services import seller
+        try:
+            return seller.validate_config(value, getattr(self.instance, "seller_config", None) or {})
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        from apps.main.telegram_bot.services import seller
+        data["seller_config"] = seller.get_config(instance)  # bot2611: всегда полный набор с умолчаниями
+        return data
 
     def validate_orders_recipients(self, value):
         inst = self.instance

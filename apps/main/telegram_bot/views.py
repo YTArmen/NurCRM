@@ -246,6 +246,26 @@ class TelegramBotTestAIView(APIView):
             )
 
         question = (request.data.get("question") or "").strip()
+        if question and request.data.get("as") == "customer":
+            # bot2611: «Проверить бота» — ответ как покупателю (тот же промпт, заказ не создаётся, продавца не зовёт)
+            from apps.main.telegram_bot.services import seller
+            from apps.main.telegram_bot.services.customer_handler import build_customer_system_instruction, extract_order_json
+            try:
+                scfg = seller.get_config(settings)
+                system_instruction, matched = build_customer_system_instruction(settings, company, question, [], [], scfg)
+                with ai_service.CompanyAiConcurrencyLimit(company.id):
+                    raw, model = ai_service.generate_chat_response(
+                        api_key=ai_key, system_instruction=system_instruction,
+                        contents=[{"role": "user", "parts": [{"text": question}]}], temperature=0.3, max_tokens=600)
+                reason, raw = seller.extract_handoff_tag(raw) if seller.is_on(scfg) else (None, raw)
+                order_data, clean = extract_order_json(raw)
+                answer = ai_service.normalize_ai_output_for_telegram(seller.postprocess(scfg, clean or raw, True))
+                return Response({"ok": True, "answer": answer, "model": model, "functions_called": [],
+                                 "handoff": reason, "order_draft": order_data or None,
+                                 "catalog_matches": [m.get("id") for m in matched][:10]})
+            except Exception as exc:
+                logger.exception("test-ai customer failed: %s", exc)
+                return Response({"ok": False, "detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         if question:
             try:
                 answer, model, functions_called = ai_service.generate_owner_ai_response(
@@ -915,3 +935,216 @@ class TelegramBotOwnerCodeVerifyView(APIView):
             _sync_menu_quietly(company)
             return Response({"ok": True})
         return Response({"ok": False, "reason": reason}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# =========================================================================
+# bot2611: бот-продавец Ф1 — диалоги, передачи продавцу, отчёт
+# =========================================================================
+
+BOT_CAPABILITIES.update({"bot_seller": True, "bot_handoff": True, "bot_sales_stats": True})
+BOT_ORDER_SOURCES = ("telegram", "telegram_bot")
+
+
+def _period(request):
+    """?from=YYYY-MM-DD&to=YYYY-MM-DD (или date_from/date_to); по умолчанию последние 30 дней."""
+    from datetime import timedelta
+    from django.utils import timezone
+    qp = request.query_params
+    today = timezone.localdate()
+    df = parse_date(qp.get("from") or qp.get("date_from") or "") or (today - timedelta(days=29))
+    dt = parse_date(qp.get("to") or qp.get("date_to") or "") or today
+    if df > dt:
+        raise ValidationError({"from": "Дата «с» позже даты «по»."})
+    if (dt - df).days > 366:
+        raise ValidationError({"from": "Период не больше года."})
+    return df, dt
+
+
+def _dialog_status(h):
+    if h is None:
+        return "bot"
+    from django.utils import timezone
+    if h.status in ("waiting", "taken") and h.until and h.until > timezone.now():
+        return "needs_human" if h.status == "waiting" else "human"
+    if h.status == "callback" and not h.closed_at and h.created_at > timezone.now() - __import__("datetime").timedelta(days=3):
+        return "callback"
+    return "bot"
+
+
+def _handoff_json(h):
+    return {
+        "id": str(h.id), "reason": h.reason, "status": h.status, "question": h.question,
+        "phone": h.phone, "note": h.note, "taken_by": h.taken_by,
+        "created_at": h.created_at, "taken_at": h.taken_at, "first_answer_at": h.first_answer_at,
+        "until": h.until, "closed_at": h.closed_at,
+        "order": ({"id": str(h.order_id), "number": h.order.number, "total": str(h.order.total)} if h.order_id else None),
+    }
+
+
+class TelegramBotDialogsView(APIView):
+    """GET /api/main/telegram-bot/dialogs/?status=bot|needs_human|human|callback&from=&to=&page=&page_size=
+    Диалоги покупателей с ботом (по профилю чата): последняя активность, сообщения, заказы, статус передачи продавцу."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from django.db.models import OuterRef, Subquery
+        from apps.main.telegram_bot.models import TelegramHandoff
+        company = _get_company(request)
+        df, dt = _period(request)
+        want = request.query_params.get("status") or ""
+        if want and want not in ("bot", "needs_human", "human", "callback"):
+            raise ValidationError({"status": "bot, needs_human, human или callback"})
+        last_text = TelegramInquiry.objects.filter(company=company, chat_id=OuterRef("chat_id")).order_by("-created_at")
+        qs = (TelegramCustomerProfile.objects.filter(company=company, last_at__date__gte=df, last_at__date__lte=dt)
+              .annotate(last_text=Subquery(last_text.values("text")[:1]))
+              .order_by("-last_at"))
+        if want:
+            from django.utils import timezone
+            now = timezone.now()
+            live = TelegramHandoff.objects.filter(company=company)
+            if want == "needs_human":
+                chats = live.filter(status="waiting", until__gt=now)
+            elif want == "human":
+                chats = live.filter(status="taken", until__gt=now)
+            elif want == "callback":
+                chats = live.filter(status="callback", closed_at__isnull=True, created_at__gt=now - __import__("datetime").timedelta(days=3))
+            else:
+                chats = None
+            if chats is not None:
+                qs = qs.filter(chat_id__in=chats.values("chat_id"))
+            else:
+                busy = live.filter(Q(status__in=("waiting", "taken"), until__gt=now) | Q(status="callback", closed_at__isnull=True))
+                qs = qs.exclude(chat_id__in=busy.values("chat_id"))
+        pager = TelegramInquiryPagination()
+        page = pager.paginate_queryset(qs, request, view=self)
+        chat_ids = [p.chat_id for p in page]
+        latest = {}
+        for h in TelegramHandoff.objects.filter(company=company, chat_id__in=chat_ids).exclude(status="logged").order_by("chat_id", "-created_at"):
+            latest.setdefault(h.chat_id, h)
+        rows = [{
+            "chat_id": p.chat_id, "name": p.name, "username": p.username,
+            "client_id": str(p.client_id) if p.client_id else None,
+            "messages_count": p.messages_count, "orders_count": p.orders_count,
+            "last_at": p.last_at, "last_text": (p.last_text or "")[:200],
+            "status": _dialog_status(latest.get(p.chat_id)),
+            "handoff": _handoff_json(latest[p.chat_id]) if p.chat_id in latest else None,
+        } for p in page]
+        return pager.get_paginated_response(rows)
+
+
+class TelegramBotDialogDetailView(APIView):
+    """GET /api/main/telegram-bot/dialogs/<chat_id>/ — переписка (последние 200), заказы и передачи продавцу.
+    POST {"action": "take"|"return"} — взять диалог / вернуть боту из программы владельца."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get(self, request, chat_id):
+        company = _get_company(request)
+        profile = TelegramCustomerProfile.objects.filter(company=company, chat_id=str(chat_id)).first()
+        if profile is None:
+            raise NotFound("Диалог не найден.")
+        return company, profile
+
+    def get(self, request, chat_id):
+        from apps.main.telegram_bot.models import TelegramHandoff
+        from apps.main.models import ShowcaseOrder
+        company, p = self._get(request, chat_id)
+        msgs = list(TelegramInquiry.objects.filter(company=company, chat_id=p.chat_id)
+                    .select_related("order").order_by("-created_at")[:200])
+        msgs.reverse()
+        hs = list(TelegramHandoff.objects.filter(company=company, chat_id=p.chat_id).select_related("order")[:50])
+        orders = ShowcaseOrder.objects.filter(company=company, telegram_chat_id=p.chat_id).order_by("-created_at")[:20]
+        live = next((h for h in hs if h.status != "logged"), None)
+        return Response({
+            "chat_id": p.chat_id, "name": p.name, "username": p.username,
+            "client_id": str(p.client_id) if p.client_id else None,
+            "messages_count": p.messages_count, "orders_count": p.orders_count, "last_at": p.last_at,
+            "status": _dialog_status(live),
+            "messages": [{"at": m.created_at, "text": m.text, "reply": m.reply, "is_voice": m.is_voice,
+                          "order_number": m.order.number if m.order_id else None} for m in msgs],
+            "handoffs": [_handoff_json(h) for h in hs],
+            "orders": [{"id": str(o.id), "number": o.number, "total": str(o.total), "status": o.status,
+                        "created_at": o.created_at} for o in orders],
+        })
+
+    def post(self, request, chat_id):
+        from apps.main.telegram_bot.models import TelegramHandoff
+        from apps.main.telegram_bot.services import seller
+        company, p = self._get(request, chat_id)
+        if not _can_manage_bot_settings(request.user, company):
+            raise PermissionDenied("Недостаточно прав.")
+        action = request.data.get("action")
+        if action not in ("take", "return"):
+            raise ValidationError({"action": "take или return"})
+        bs = TelegramBotSettings.objects.select_related("company").filter(company=company).first()
+        if bs is None:
+            raise NotFound("Бот не подключён.")
+        h = seller.active_handoff(company, p.chat_id)
+        if action == "take":
+            if h is None:
+                h = TelegramHandoff.objects.create(company=company, chat_id=p.chat_id, customer_name=p.name[:255],
+                                                   reason="human", status="waiting")
+            by = getattr(request.user, "first_name", "") or getattr(request.user, "email", "") or "владелец"
+            seller.take(bs, h, by)
+        else:
+            from django.utils import timezone
+            n_cb = TelegramHandoff.objects.filter(company=company, chat_id=p.chat_id, status="callback",
+                                                  closed_at__isnull=True).update(closed_at=timezone.now())
+            if h is None:
+                return Response({"status": "bot", "changed": bool(n_cb)})
+            seller.give_back(bs, h)
+        return Response({"status": _dialog_status(h if action == "take" else None), "changed": True,
+                         "handoff": _handoff_json(h)})
+
+
+class TelegramBotSalesStatsView(APIView):
+    """GET /api/main/telegram-bot/sales-stats/?from=&to= — отчёт бота-продавца (Ф1: диалоги, заказы, передачи продавцу)."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from apps.main.telegram_bot.models import TelegramHandoff
+        from apps.main.models import ShowcaseOrder
+        company = _get_company(request)
+        df, dt = _period(request)
+        inq = TelegramInquiry.objects.filter(company=company, created_at__date__gte=df, created_at__date__lte=dt)
+        a = inq.aggregate(messages=Count("id"), people=Count("chat_id", distinct=True),
+                          ordered_people=Count("chat_id", distinct=True, filter=Q(order__isnull=False)))
+        orders = ShowcaseOrder.objects.filter(company=company, source__in=BOT_ORDER_SOURCES,
+                                              created_at__date__gte=df, created_at__date__lte=dt)
+        o = orders.aggregate(
+            n=Count("id"), sum_total=Coalesce(Sum("total"), Value(ZERO_MONEY, output_field=MONEY_FIELD)),
+            done=Count("id", filter=Q(status="done")),
+            done_total=Coalesce(Sum("total", filter=Q(status="done")), Value(ZERO_MONEY, output_field=MONEY_FIELD)),
+            canceled=Count("id", filter=Q(status="canceled")),
+        )
+        hs = list(TelegramHandoff.objects.filter(company=company, created_at__date__gte=df, created_at__date__lte=dt)
+                  .only("reason", "status", "created_at", "first_answer_at", "taken_at", "question", "chat_id"))
+        real = [h for h in hs if h.status != "logged"]
+        by_reason = {}
+        for h in real:
+            by_reason[h.reason] = by_reason.get(h.reason, 0) + 1
+        live_hours = [h for h in real if h.status != "callback"]
+        answered = [h for h in live_hours if h.first_answer_at or h.taken_at]
+        waits = sorted(((h.first_answer_at or h.taken_at) - h.created_at).total_seconds() for h in answered)
+        unknown = [h for h in hs if h.reason == "unknown"]
+        people = a["people"] or 0
+        n_orders = o["n"] or 0
+        return Response({
+            "from": df, "to": dt,
+            "dialogs": people, "messages": a["messages"] or 0, "people": people,
+            "orders": {"count": n_orders, "total": str(o["sum_total"]), "done": o["done"], "done_total": str(o["done_total"]),
+                       "canceled": o["canceled"],
+                       "avg_check": str((o["sum_total"] / n_orders).quantize(Decimal("0.01"))) if n_orders else "0.00"},
+            "conversion_percent": round(100.0 * (a["ordered_people"] or 0) / people, 1) if people else 0.0,
+            "funnel": {"dialogs": people, "handoffs": len(real), "orders": n_orders, "done": o["done"]},
+            "handoffs": {
+                "total": len(real), "by_reason": by_reason,
+                "callbacks": sum(1 for h in real if h.status == "callback"),
+                "answered": len(answered),
+                "unanswered": sum(1 for h in live_hours if not (h.first_answer_at or h.taken_at) and h.status in ("expired", "returned")),
+                "waiting_now": sum(1 for h in live_hours if h.status == "waiting"),
+                "avg_answer_seconds": int(sum(waits) / len(waits)) if waits else None,
+                "median_answer_seconds": int(waits[len(waits) // 2]) if waits else None,
+            },
+            "unknown_questions": [{"at": h.created_at, "chat_id": h.chat_id, "text": h.question[:300]}
+                                  for h in sorted(unknown, key=lambda x: x.created_at, reverse=True)[:30]],
+        })
