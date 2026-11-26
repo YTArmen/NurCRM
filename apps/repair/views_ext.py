@@ -37,6 +37,11 @@ TEXT_MAP = {"device": "device", "client_name": "customer_name", "client_phone": 
             "problem": "problem", "accessories": "accessories", "note": "condition_note"}
 
 
+def server_code(n):
+    """rp2-2711: код квитанции из серверного номера: Р-0001."""
+    return f"Р-{int(n):04d}"
+
+
 def public_enabled(company):
     return bool(company) and addon_on(company, "repair")
 
@@ -158,9 +163,31 @@ class RepairExternalAPIView(APIView):
                 o = RepairOrder(company=company, created_by=request.user, device_id=EXT_DEVICE, local_id=external_id.lower(),
                                 number=next_number(RepairOrder, company))
                 before = None
+                # rp2-2711: номер квитанции выдаёт сервер (server_number=true или касса не прислала ни code, ни number)
+                want_code = str(d.get("code") or "").strip()[:32] or (
+                    f"Р-{_digits(d.get('number')).zfill(4)}" if d.get("number") not in (None, "") and _digits(d.get("number")) else "")
+                if d.get("server_number") is True or not want_code:
+                    taken = set(RepairOrder.objects.filter(company=company, device_id=EXT_DEVICE)
+                                .exclude(local_number="").values_list("local_number", flat=True))
+                    while server_code(o.number) in taken:  # старые номера, выданные кассой
+                        o.number += 1
+                    d = {**d, "code": server_code(o.number)}
+                elif RepairOrder.objects.filter(company=company, device_id=EXT_DEVICE, local_number=want_code).exists():
+                    return err("number_conflict", f"Номер {want_code} уже занят другой квитанцией.", 409,
+                               suggested_number=o.number, suggested_code=server_code(o.number))
             else:
                 o = RepairOrder.objects.select_for_update().get(pk=o.pk)
                 before = _snapshot(o)
+                # rp2-2711: защита от затирания — касса шлёт base_updated_at (updated_at, который она видела)
+                base = parse_datetime(str(d.get("base_updated_at") or "")) if d.get("base_updated_at") else None
+                if base is not None and o.updated_at and o.updated_at > base + timedelta(milliseconds=5):
+                    return err("stale_version", "Квитанцию уже изменили на другом устройстве. Обновите и повторите.", 409,
+                               current=ext_payload(o))
+                new_code = str(d.get("code") or "").strip()[:32]
+                if new_code and new_code != o.local_number and RepairOrder.objects.filter(
+                        company=company, device_id=EXT_DEVICE, local_number=new_code).exclude(pk=o.pk).exists():
+                    return err("number_conflict", f"Номер {new_code} уже занят другой квитанцией.", 409,
+                               suggested_code=o.local_number or server_code(o.number))
             for src, dst in TEXT_MAP.items():
                 if src in d:
                     setattr(o, dst, str(d.get(src) or "").strip()[:4000 if dst in ("problem", "condition_note") else 255])

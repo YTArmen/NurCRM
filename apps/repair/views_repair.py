@@ -43,6 +43,11 @@ def payload(o, warranty=None):
         "notified_at": o.notified_at.isoformat() if o.notified_at else None,
         "issued_at": o.issued_at.isoformat() if o.issued_at else None,
         "created_at": o.created_at.isoformat() if o.created_at else None, "history": o.history,
+        # rp2-2711: для синхронизации касс/программы владельца/мобилки
+        "updated_at": o.updated_at.isoformat() if o.updated_at else None,
+        "source": "kassa" if o.device_id == "kassa-ext" else "server",
+        "external_id": o.local_id if o.device_id == "kassa-ext" else None,
+        "code": o.local_number or f"Р-{o.number:04d}",
     }
 
 
@@ -103,14 +108,29 @@ class RepairOrdersAPIView(APIView):
             qs = qs.filter(created_at__date__gte=d1)
         if d2:
             qs = qs.filter(created_at__date__lte=d2)
+        # rp2-2711: синхронизация между устройствами — ?updated_since=<ISO> (строго позже), по возрастанию updated_at
+        since_raw = (qp.get("updated_since") or "").strip()
+        since = None
+        if since_raw:
+            from django.utils.dateparse import parse_datetime
+            since = parse_datetime(since_raw.replace(" ", "+"))
+            if since is None:
+                return err("validation_error", "updated_since: дата-время ISO 8601.", fields={"updated_since": ["Неверный формат."]})
+            qs = qs.filter(updated_at__gt=since).order_by("updated_at", "id")
         try:
             page, size = max(1, int(qp.get("page") or 1)), min(200, max(1, int(qp.get("page_size") or 50)))
         except ValueError:
             page, size = 1, 50
         mode = warranty_mode(company)
         total = qs.count()
-        rows = [payload(o, mode) for o in qs[(page - 1) * size: page * size]]
-        return Response({"count": total, "page": page, "results": rows})
+        objs = list(qs[(page - 1) * size: page * size])
+        rows = [payload(o, mode) for o in objs]
+        out = {"count": total, "page": page, "results": rows}
+        if since is not None or qp.get("with_cursor") in ("1", "true"):
+            last = max((o.updated_at for o in objs), default=since)
+            out["next_since"] = last.isoformat() if last else None
+            out["has_more"] = page * size < total
+        return Response(out)
 
     def post(self, request):
         bad = guard(request, "repair", "repair.manage")
