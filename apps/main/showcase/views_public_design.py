@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 from django.conf import settings
 from django.core.cache import cache
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, Max, Prefetch, Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -24,10 +24,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.integrations.events import emit_event
+from core.api_compat import is_strict
 from apps.main.models import (
     Product,
     ProductCategory,
     ProductVariant,
+    ShowcaseCartLink,
     ShowcaseOrder,
     ShowcaseOrderItem,
     ShowcaseStats,
@@ -147,6 +149,35 @@ def _in_period(b: dict, now) -> bool:
     return True
 
 
+def telegram_state(company):
+    """(bot_username, mode, webhook_ok) серверного бота компании или None."""
+    from apps.main.telegram_bot.models import TelegramBotSettings
+
+    return TelegramBotSettings.objects.filter(company=company).values_list(
+        "bot_username", "mode", "webhook_ok").first()
+
+
+def build_telegram_block(company, doc: dict) -> dict:
+    """
+    ТЗ 01.11: {enabled, url, product_url_template, placement, label}. enabled только если бот в режиме
+    server + webhook установлен + владелец включил cart.telegram.enabled. Токена здесь нет и быть не может.
+    """
+    tg = (doc.get("cart") or {}).get("telegram") or {}
+    placement = list(tg.get("placement") or [])
+    label = tg.get("label") or {}
+    off = {"enabled": False, "url": None, "product_url_template": None, "placement": placement, "label": label}
+    row = telegram_state(company)
+    if not row:
+        return off
+    username, mode, webhook_ok = row
+    username = (username or "").strip().lstrip("@")
+    if not (tg.get("enabled") and mode == "server" and webhook_ok and re.fullmatch(r"[A-Za-z0-9_]{3,64}", username)):
+        return off
+    base = f"https://t.me/{username}"
+    return {"enabled": True, "url": base, "product_url_template": f"{base}?start=p_{{id}}",
+            "placement": placement, "label": label}
+
+
 def build_public_payload(company, snapshot: dict, doc: dict, version: int, request, catalog: svc.PublicCatalog,
                          preview: bool = False) -> dict:
     now = timezone.now()
@@ -195,6 +226,8 @@ def build_public_payload(company, snapshot: dict, doc: dict, version: int, reque
 
     payload = {"version": version}
     for key in ds.DOCUMENT_SECTIONS:
+        if key in ds.PRIVATE_SECTIONS:
+            continue
         payload[key] = doc.get(key)
     payload.update({
         "banners": banners,
@@ -202,6 +235,7 @@ def build_public_payload(company, snapshot: dict, doc: dict, version: int, reque
         "pages": pages,
         "media": media,
         "company": {"id": str(company.id), "name": company.name, "slug": company.slug},
+        "telegram": build_telegram_block(company, doc),
         "preview": preview,
     })
     return payload
@@ -226,7 +260,9 @@ class PublicCompanyShowcaseDesignAPIView(PublicAPIView):
         design_row = svc.ShowcaseDesign.objects.filter(company=company).values_list("version", "published_at").first()
         version = design_row[0] if design_row else 1
         stamp = design_row[1].timestamp() if design_row and design_row[1] else 0
-        cache_key = f"showcase:pubdesign:{company.id}:{version}:{stamp}:{company.slug}"
+        tg_row = telegram_state(company)  # бот включили/выключили — кэш обновится сам
+        tg_sig = hashlib.md5(repr(tg_row).encode("utf-8")).hexdigest()[:8]
+        cache_key = f"showcase:pubdesign:{company.id}:{version}:{stamp}:{company.slug}:{tg_sig}"
         cached = cache.get(cache_key)
         if cached is None:
             design = svc.get_design(company)
@@ -313,10 +349,10 @@ def _rate_limited(key: str, limit: int, window: int) -> bool:
 
 
 def _order_rate() -> tuple:
-    return tuple(getattr(settings, "SHOWCASE_ORDER_RATE", (10, 600)))
+    return tuple(getattr(settings, "SHOWCASE_ORDER_RATE", (10, 3600)))  # Б-34: 10 заказов в час с одного IP / номера
 
 
-def _price_lines(company, items_input, catalog: svc.PublicCatalog):
+def _price_lines(company, items_input, catalog: svc.PublicCatalog, strict: bool = True):
     """Позиции заказа/корзины с ценой и акцией как в кассе."""
     product_ids = [str(item["product"]) for item in items_input]
     products = {
@@ -330,6 +366,7 @@ def _price_lines(company, items_input, catalog: svc.PublicCatalog):
     variants_by_id = {str(v.id): v for v in ProductVariant.objects.filter(company=company, id__in=variant_ids)}
 
     lines = []
+    variant_asked: dict = {}
     items_total = Decimal("0.00")
     for idx, item in enumerate(items_input):
         pid = str(item["product"])
@@ -342,20 +379,52 @@ def _price_lines(company, items_input, catalog: svc.PublicCatalog):
         variant_obj = None
         if vid:
             variant_obj = variants_by_id.get(str(vid))
-            if not variant_obj or variant_obj.product_id != prod.id or not variant_obj.is_active:
-                raise ShowcaseFieldError(f"items[{idx}].variant", f"Вариант {vid} не найден для товара {prod.name}.", "variant_not_found")
+            if variant_obj is not None and variant_obj.product_id != prod.id:
+                # ТЗ Н-27: вариант чужого товара
+                raise ShowcaseFieldError(
+                    f"items[{idx}].variant", f"Вариант {vid} не относится к товару «{prod.name}».",
+                    "variant_mismatch", extra={"index": idx})
+            if not variant_obj or not variant_obj.is_active:
+                raise ShowcaseFieldError(
+                    f"items[{idx}].variant", f"Вариант {vid} не найден для товара {prod.name}.",
+                    "variant_not_found", extra={"index": idx})
         elif list(prod.variants.all()):
-            raise ShowcaseFieldError(f"items[{idx}].variant", f"Выберите размер и цвет для товара «{prod.name}».", "variant_required")
+            # variant_required — для всех клиентов, как было на сервере и до Б-02 (меняем только 409 → 400)
+            raise ShowcaseFieldError(
+                f"items[{idx}].variant", f"Выберите размер и цвет для товара «{prod.name}».",
+                "variant_required", extra={"index": idx})
         qty = Decimal(str(item["qty"]))
-        if not prod.is_weight and qty != qty.to_integral_value():
+        from apps.main.tz26.hw_units.units import order_line_unit, product_allows_fraction, to_base_line
+
+        ounit = order_line_unit(prod, item, idx, variant_obj)  # ТЗ 26.10 Б-53 п.8: единица продажи
+        if not prod.is_weight and qty != qty.to_integral_value() and not product_allows_fraction(prod, ounit):
             raise ShowcaseFieldError(f"items[{idx}].qty", f"Товар «{prod.name}» продаётся только целыми штуками.")
+        if variant_obj is not None:
+            # ТЗ Н-27: хватает ли остатка (с учётом одинаковых вариантов в разных строках корзины)
+            asked = variant_asked.get(variant_obj.id, Decimal("0")) + qty
+            variant_asked[variant_obj.id] = asked
+            have = max(Decimal(str(variant_obj.quantity or 0)), Decimal("0"))
+            if asked > have:
+                raise ShowcaseFieldError(
+                    f"items[{idx}].variant",
+                    f"Недостаточно остатка «{name_with_variant(prod.name, variant_obj)}»: доступно {have:g}.",
+                    "variant_out_of_stock" if strict else "not_enough_stock",
+                    status_code=status.HTTP_409_CONFLICT if strict else status.HTTP_400_BAD_REQUEST,
+                    extra={"index": idx, "available": int(have) if have == have.to_integral_value() else str(have)})
         unit_price = variant_prices(variant_obj, prod)[0] if variant_obj is not None else Decimal(str(prod.price or 0))
+        name_suffix = ""
+        if ounit is not None:  # цена единицы; в строку и резерв идут базовые единицы
+            from apps.main.tz26.hw_units.units import effective_unit_price
+
+            unit_price = effective_unit_price(prod, ounit)
         gross, line_discount, net, tier = svc.kassa_line(prod, unit_price, qty, company)
+        if ounit is not None:
+            qty, unit_price, name_suffix = to_base_line(ounit, qty, unit_price)
         items_total += net
         lines.append({
             "product": prod,
             "variant": variant_obj,
-            "product_name": name_with_variant(prod.name, variant_obj),
+            "product_name": name_with_variant(prod.name, variant_obj) + name_suffix,
             "qty": qty,
             "price": _money(unit_price),
             "gross": gross,
@@ -397,17 +466,24 @@ def _whatsapp_url(company, cart: dict, order, lines) -> Optional[str]:
     return f"https://wa.me/{phone}?text={quote(chr(10).join(rows))}"
 
 
-def _order_response(order, whatsapp_url=None) -> dict:
-    return {
+def _order_response(order, whatsapp_url=None, replayed=False) -> dict:
+    data = {
         "id": str(order.id),
         "number": order.number,
         "status": order.status,
         "total": str(order.total),
         "delivery_fee": str(order.delivery_fee),
         "source": order.source,
+        "source_detail": order.source_detail,
+        "pickup_code": order.pickup_code,  # ТЗ Н-33
         "whatsapp_url": whatsapp_url,
         "created_at": order.created_at.isoformat(),
     }
+    if getattr(order, "delivery_type", "") == "try_on":  # ТЗ кассы 05.11 п.38 / Б-94
+        data["delivery"] = {"type": "try_on", "hold_until": order.hold_until.isoformat() if order.hold_until else None}
+    if replayed:
+        data["replayed"] = True  # Б-34: повтор «Оформить» тем же ключом — тот же заказ
+    return data
 
 
 class PublicCompanyShowcaseCartQuoteAPIView(PublicAPIView):
@@ -420,7 +496,7 @@ class PublicCompanyShowcaseCartQuoteAPIView(PublicAPIView):
         ser.is_valid(raise_exception=True)
         catalog = svc.get_public_catalog(company)
         cart = svc.published_document(company)["cart"]
-        lines, items_total = _price_lines(company, ser.validated_data["items"], catalog)
+        lines, items_total = _price_lines(company, ser.validated_data["items"], catalog, strict=is_strict(request, company))
         dtype = ((request.data.get("delivery") or {}).get("type")) if isinstance(request.data.get("delivery"), dict) else "pickup"
         fee = _delivery_fee(cart, dtype or "pickup", items_total)
         min_total = cart.get("min_order_total")
@@ -451,7 +527,17 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
             existing = ShowcaseOrder.objects.filter(company=company, idempotency_key=idempotency_key).first()
             if existing:
                 lines = [{"product_name": it.product_name, "qty": it.qty, "total": it.total} for it in existing.items.all()]
-                return Response(_order_response(existing, _whatsapp_url(company, cart, existing, lines)), status=status.HTTP_200_OK)
+                return Response(_order_response(existing, _whatsapp_url(company, cart, existing, lines), replayed=True), status=status.HTTP_200_OK)
+
+        # ТЗ 01.11: один cart_token — один заказ; повтор возвращает тот же заказ (200)
+        cart_token = ""
+        if isinstance(request.data, dict):
+            cart_token = str(request.data.get("cart_token") or "").strip()[:64]
+        if cart_token:
+            existing = ShowcaseOrder.objects.filter(company=company, cart_token=cart_token).first()
+            if existing:
+                lines = [{"product_name": it.product_name, "qty": it.qty, "total": it.total} for it in existing.items.all()]
+                return Response(_order_response(existing, _whatsapp_url(company, cart, existing, lines), replayed=True), status=status.HTTP_200_OK)
 
         # Защита от спама: скрытое поле-ловушка + лимит заказов с одного IP / номера.
         if isinstance(request.data, dict) and (request.data.get("website") or request.data.get("hp")):
@@ -463,6 +549,9 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
         customer = data["customer"]
         delivery = data.get("delivery") or {}
         fields = cart.get("fields") or {}
+        cart_token = data.get("cart_token") or ""
+        if cart_token and not ShowcaseCartLink.objects.filter(company=company, token=cart_token).exists():
+            raise ShowcaseFieldError("cart_token", "Ссылка на корзину не найдена.", "cart_link_not_found")
 
         limit, window = _order_rate()
         ip = _client_ip(request)
@@ -488,18 +577,33 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
             raise ShowcaseFieldError("delivery.type", "Самовывоз недоступен.", "invalid")
         if dtype == "delivery" and not dset.get("delivery"):
             raise ShowcaseFieldError("delivery.type", "Доставка недоступна.", "invalid")
+        if dtype == "try_on" and dset.get("try_on") is False:  # ТЗ кассы 05.11 п.38: можно выключить в настройках корзины
+            raise ShowcaseFieldError("delivery.type", "Примерка в магазине недоступна.", "invalid")
         address = (delivery.get("address") or "").strip()
         if (dtype == "delivery" or fields.get("address") == "required") and not address:
             raise ShowcaseFieldError("delivery.address", "Укажите адрес доставки.", "required")
 
         catalog = svc.get_public_catalog(company)
-        lines, items_total = _price_lines(company, data["items"], catalog)
+        lines, items_total = _price_lines(company, data["items"], catalog, strict=is_strict(request, company))
         min_total = cart.get("min_order_total")
         if min_total is not None and items_total < Decimal(str(min_total)):
             raise ShowcaseFieldError("items", f"Минимальная сумма заказа — {min_total} сом.", "min_order_total")
         fee = _delivery_fee(cart, dtype, items_total)
         total = _money(items_total + fee)
+        total = __import__("apps.main.showcase_promo", fromlist=["x"]).apply_to_order(request, company, items_total, total)  # П2-5 p2514
 
+        try:
+            order = self._create_order(request, company, data, customer, dtype, address, fee, total, lines,
+                                       idempotency_key, cart_token)
+        except IntegrityError:
+            # гонка по cart_token: заказ уже создан параллельным запросом
+            existing = ShowcaseOrder.objects.filter(company=company, cart_token=cart_token).first() if cart_token else None
+            if existing is None:
+                raise
+            return Response(_order_response(existing, None, replayed=True), status=status.HTTP_200_OK)
+        return self._finish(request, company, cart, order, lines)
+
+    def _create_order(self, request, company, data, customer, dtype, address, fee, total, lines, idempotency_key, cart_token):
         with transaction.atomic():
             last_num = (
                 ShowcaseOrder.objects.filter(company=company).select_for_update().aggregate(m=Max("number"))["m"] or 0
@@ -513,10 +617,17 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
                 delivery_type=dtype,
                 delivery_address=address,
                 source=data.get("source") or "showcase",
+                source_detail=data.get("source_detail") or ("site_cart" if cart_token else ""),
+                cart_token=cart_token or None,
+                telegram_chat_id=(data.get("telegram_chat_id") or "") if data.get("source") == "telegram_bot" else "",
                 comment=data.get("comment", ""),
                 total=total,
                 delivery_fee=fee,
                 idempotency_key=idempotency_key or None,
+                hold_until=(
+                    timezone.now() + timedelta(hours=int(getattr(settings, "SHOWCASE_TRY_ON_HOLD_HOURS", 24)))
+                    if dtype == "try_on" else None
+                ),
             )
             ShowcaseOrderItem.objects.bulk_create([
                 ShowcaseOrderItem(
@@ -530,9 +641,19 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
             try:
                 reserve_stock(lines)
             except InsufficientStock as exc:
+                # гонка: остаток разобрали между проверкой и резервом
+                if is_strict(request, company):
+                    raise ShowcaseFieldError("items", str(exc), "variant_out_of_stock", status_code=status.HTTP_409_CONFLICT)
                 raise ShowcaseFieldError("items", str(exc), "not_enough_stock")
             order.stock_reserved = True
             order.save(update_fields=["stock_reserved"])
+        return order
+
+    def _finish(self, request, company, cart, order, lines):
+        # ТЗ Б-22: сообщение владельцу / в группу заказов (после коммита, не больше одного на заказ)
+        from apps.main.telegram_bot.services import order_notify
+
+        order_notify.notify_after_commit(order.id)
 
         whatsapp_url = _whatsapp_url(company, cart, order, lines)
         webhook_data = {
@@ -542,8 +663,11 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
             "total": str(order.total),
             "delivery_fee": str(order.delivery_fee),
             "source": order.source,
+            "source_detail": order.source_detail,
             "customer": {"name": order.customer_name, "phone": order.customer_phone},
-            "delivery": {"type": order.delivery_type, "address": order.delivery_address},
+            "delivery": {"type": order.delivery_type, "address": order.delivery_address,
+                         **({"hold_until": order.hold_until.isoformat() if order.hold_until else None}
+                            if order.delivery_type == "try_on" else {})},
             "comment": order.comment,
             "items": [
                 {
@@ -565,14 +689,139 @@ class PublicCompanyShowcaseOrderCreateAPIView(PublicAPIView):
         except Exception:
             pass
 
+        try:  # Б-80: заказ из чата (source=whatsapp|instagram|web_chat + conversation_id) — ссылка в диалоге
+            from apps.inbox.actions import link_public_order
+            link_public_order(order, request.data)
+        except Exception:
+            pass
         return Response(_order_response(order, whatsapp_url), status=status.HTTP_201_CREATED)
+
+
+class PublicCompanyShowcaseCartLinkAPIView(PublicAPIView):
+    """
+    ТЗ 01.11. POST /public/companies/{slug}/cart-link/ {"items":[{"product","variant","qty"}]} → {"token", "expires_at"}.
+    Корзина сайта уходит в Telegram-бота ссылкой t.me/<bot>?start=c_<token>. Цены в токен не кладутся —
+    бот берёт их из базы. Токен действует 7 дней, до 20 ссылок в час с одного IP.
+    """
+
+    TTL_DAYS = 7
+
+    def post(self, request, slug: str):
+        import secrets
+        from apps.main.showcase.serializers_design import ShowcaseCartLinkSerializer
+
+        company = resolve_public_company(slug, request)
+        ip = _client_ip(request)
+        if _rate_limited(f"showcase:cartlink:{company.id}:{ip}", 20, 3600):
+            return Response({"detail": "Слишком много запросов. Попробуйте позже.", "code": "throttled"},
+                            status=status.HTTP_429_TOO_MANY_REQUESTS)
+        ser = ShowcaseCartLinkSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        items = ser.validated_data["items"]
+
+        catalog = svc.get_public_catalog(company)
+        products = {str(p.id): p for p in Product.objects.filter(company=company, id__in=[str(i["product"]) for i in items])}
+        clean = []
+        for idx, it in enumerate(items):
+            pid = str(it["product"])
+            prod = products.get(pid)
+            if prod is None or pid in catalog.hidden_products or (
+                prod.category_id and str(prod.category_id) in catalog.hidden_categories
+            ):
+                raise ShowcaseFieldError(f"items[{idx}].product", "Товар не найден.", "product_not_found")
+            vid = it.get("variant")
+            if vid:
+                v = ProductVariant.objects.filter(id=vid, product_id=prod.id, is_active=True).first()
+                if v is None:
+                    raise ShowcaseFieldError(f"items[{idx}].variant", "Вариант не найден.", "variant_not_found")
+            clean.append({"product": pid, "variant": str(vid) if vid else None, "qty": str(it["qty"])})
+
+        expires = timezone.now() + timedelta(days=self.TTL_DAYS)
+        link = ShowcaseCartLink.objects.create(
+            company=company, token=secrets.token_urlsafe(16), items=clean, expires_at=expires, client_ip=ip[:64])
+        try:
+            track_event(company, "cart_link", None, _session_key(request, None))
+        except Exception:
+            pass
+        return Response({"token": link.token, "expires_at": expires.isoformat()}, status=status.HTTP_201_CREATED)
+
+
+class PublicCompanyShowcaseNotifyAPIView(PublicAPIView):
+    """
+    ТЗ Н-27. POST /public/companies/{slug}/showcase/{product_id}/notify/
+    {"variant": "<uuid>", "phone": "+996…" | "telegram_chat_id": "…"} — «сообщить о поступлении».
+    До 5 заявок в сутки на номер/chat id и на IP. Повтор той же заявки возвращает существующую (200).
+    """
+
+    def post(self, request, slug: str, product_id):
+        from apps.main.models import ShowcaseStockRequest
+
+        company = resolve_public_company(slug, request)
+        data = request.data if isinstance(request.data, dict) else {}
+        product = Product.objects.filter(company=company, id=product_id).first()
+        if product is None:
+            raise ShowcaseFieldError("product", "Товар не найден.", "product_not_found", status_code=status.HTTP_404_NOT_FOUND)
+        catalog = svc.get_public_catalog(company)
+        if str(product.id) in catalog.hidden_products or (
+            product.category_id and str(product.category_id) in catalog.hidden_categories
+        ):
+            raise ShowcaseFieldError("product", "Товар скрыт с витрины.", "product_hidden", status_code=status.HTTP_404_NOT_FOUND)
+
+        phone = re.sub(r"[^\d+]", "", str(data.get("phone") or ""))[:64]
+        chat_id = str(data.get("telegram_chat_id") or "").strip()[:64]
+        if len(re.sub(r"\D", "", phone)) < 9:
+            phone = ""
+        if not phone and not chat_id:
+            raise ShowcaseFieldError("phone", "Укажите телефон или Telegram.", "required")
+
+        vid = data.get("variant")
+        variant = None
+        if vid:
+            try:
+                variant = ProductVariant.objects.filter(id=vid, is_active=True).first()
+            except Exception:
+                variant = None
+            if variant is None:
+                raise ShowcaseFieldError("variant", "Вариант не найден.", "variant_not_found")
+            if variant.product_id != product.id:
+                raise ShowcaseFieldError("variant", "Вариант не относится к товару.", "variant_mismatch")
+        elif product.variants.filter(is_active=True).exists():
+            raise ShowcaseFieldError("variant", "Выберите размер и цвет.", "variant_required")
+
+        in_stock = (variant.quantity if variant is not None else product.quantity) or 0
+        if in_stock > 0:
+            raise ShowcaseFieldError("variant", "Товар уже есть в наличии.", "already_in_stock")
+
+        existing = ShowcaseStockRequest.objects.filter(
+            company=company, product=product, variant=variant, status=ShowcaseStockRequest.Status.OPEN
+        )
+        existing = existing.filter(phone=phone) if phone else existing.filter(telegram_chat_id=chat_id)
+        row = existing.first()
+        if row is not None:
+            return Response({"id": str(row.id), "status": row.status}, status=status.HTTP_200_OK)
+
+        ip = _client_ip(request)
+        contact = phone or chat_id
+        if _rate_limited(f"showcase:notify:ip:{company.id}:{ip}", 5, 86400) or _rate_limited(
+            f"showcase:notify:ct:{company.id}:{contact}", 5, 86400
+        ):
+            return Response(
+                {"detail": "Слишком много заявок. Попробуйте завтра.", "code": "throttled"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        row = ShowcaseStockRequest.objects.create(
+            company=company, product=product, variant=variant, phone=phone, telegram_chat_id=chat_id, client_ip=ip[:64]
+        )
+        return Response({"id": str(row.id), "status": row.status}, status=status.HTTP_201_CREATED)
 
 
 # ======================================================================
 # 6.14 События статистики
 # ======================================================================
 
-EVENT_TYPES = ("view", "product_view", "banner_click", "add_to_cart")
+EVENT_TYPES = ("view", "product_view", "banner_click", "add_to_cart",
+               "assistant_open", "assistant_message", "telegram_click", "cart_link")
+_COUNTER_EVENTS = ("assistant_open", "assistant_message", "telegram_click", "cart_link")
 
 
 def _session_key(request, explicit: Optional[str]) -> str:
@@ -599,6 +848,8 @@ def track_event(company, event_type: str, obj_id: Optional[str], session: str) -
             stats.views += 1
         elif event_type == "add_to_cart":
             stats.add_to_cart += 1
+        elif event_type in _COUNTER_EVENTS:
+            setattr(stats, event_type, (getattr(stats, event_type) or 0) + 1)
         elif event_type == "product_view":
             pv = dict(stats.product_views or {})
             pv[obj_id] = pv.get(obj_id, 0) + 1
@@ -612,7 +863,7 @@ def track_event(company, event_type: str, obj_id: Optional[str], session: str) -
 
 
 class PublicCompanyShowcaseEventsAPIView(PublicAPIView):
-    """POST {type: view|product_view|banner_click|add_to_cart, id?, session?}."""
+    """POST {type: view|product_view|banner_click|add_to_cart|assistant_open|assistant_message|telegram_click|cart_link, id?, session?}."""
 
     def post(self, request, slug: str):
         company = resolve_public_company(slug, request)

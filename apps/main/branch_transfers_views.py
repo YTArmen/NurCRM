@@ -118,13 +118,20 @@ class BranchTransferListCreateAPIView(generics.ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         idempotency_key = request.headers.get("Idempotency-Key") or request.META.get("HTTP_IDEMPOTENCY_KEY")
+        if not idempotency_key and isinstance(request.data, dict):
+            idempotency_key = str(request.data.get("idempotency_key") or "").strip()[:128] or None  # ТЗ 01.11
+        # ТЗ кассы 05.11 п.17: повтор с тем же ключом — тот же документ и replayed: true
+        replayed = bool(idempotency_key) and BranchTransfer.objects.filter(
+            company=self._company(), idempotency_key=str(idempotency_key).strip()
+        ).exists()
         transfer = create_and_execute_branch_transfer(
             user=request.user,
             data=request.data,
             idempotency_key=idempotency_key,
         )
         serializer = BranchTransferDetailSerializer(transfer, context={"request": request})
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response({**serializer.data, "replayed": replayed},
+                        status=status.HTTP_200_OK if replayed else status.HTTP_201_CREATED)
 
 
 class BranchTransferDetailAPIView(generics.RetrieveAPIView):

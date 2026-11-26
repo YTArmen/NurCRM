@@ -21,7 +21,8 @@ from apps.ekassa.serializers import (
 )
 from apps.ekassa.sale_bridge import _som_to_tyiyun_int
 from apps.ekassa.services import client_for, get_integration, inject_fiscal_number
-from apps.users.permissions import IsCompanyOwnerOrAdmin
+# eko1811: eKassa — только владелец компании (и суперпользователь)
+from apps.users.permissions import IsCompanyOwner
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class EkassaSettingsView(APIView):
     PATCH — обновление; пароль передавайте только при смене.
     """
 
-    permission_classes = [IsAuthenticated, IsCompanyOwnerOrAdmin]
+    permission_classes = [IsAuthenticated, IsCompanyOwner]
 
     def get(self, request):
         company = _resolve_company(request.user)
@@ -110,7 +111,7 @@ class EkassaTestReceiptView(APIView):
     Права: владелец/админ компании; интеграция eKassa должна быть настроена (как для receipt/).
     """
 
-    permission_classes = [IsAuthenticated, IsCompanyOwnerOrAdmin]
+    permission_classes = [IsAuthenticated, IsCompanyOwner]
 
     def post(self, request):
         if not _ekassa_test_receipt_allowed():
@@ -192,7 +193,7 @@ class EkassaPingView(APIView):
     Не требует включённой интеграции — используется URL из настроек компании или дефолт из settings.
     """
 
-    permission_classes = [IsAuthenticated, IsCompanyOwnerOrAdmin]
+    permission_classes = [IsAuthenticated, IsCompanyOwner]
 
     def get(self, request):
         company = _resolve_company(request.user)
@@ -234,76 +235,76 @@ def _proxy_post(request, path: str, body: dict[str, Any] | None = None):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_pos(request):
     """POST /api/get_pos_by_fiscal_number"""
     return _proxy_post(request, "/api/get_pos_by_fiscal_number", request.data)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_catalogue(request):
     """POST /api/get_base_catalogue_by_fiscal_number"""
     return _proxy_post(request, "/api/get_base_catalogue_by_fiscal_number", request.data)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_shift_state(request):
     return _proxy_post(request, "/api/shift_state_by_fiscal_number", request.data)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_shift_open(request):
     return _proxy_post(request, "/api/shift_open_by_fiscal_number", request.data)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_shift_close(request):
     return _proxy_post(request, "/api/shift_close_by_fiscal_number", request.data)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_shift_control(request):
     return _proxy_post(request, "/api/shift_control_by_fiscal_number", request.data)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_cash_operation(request):
     return _proxy_post(request, "/api/cash_operation_by_fiscal_number", request.data)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_receipt(request):
     """POST /api/v2/receipt — новый чек или переотправка (см. документацию)."""
     return _proxy_post(request, "/api/v2/receipt", request.data)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_duplicate(request):
     return _proxy_post(request, "/api/duplicate", request.data)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_customers(request):
     return _proxy_post(request, "/api/customers", request.data)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_xpay_getqr(request):
     return _proxy_post(request, "/api/xpay/getqr", request.data)
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_xpay_status(request):
     return _proxy_post(request, "/api/xpay/status", request.data)
 
@@ -324,43 +325,43 @@ def _proxy_get(request, path: str):
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_info_tax_systems(request):
     return _proxy_get(request, "/api/info/tax-systems")
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_info_tax_rates(request):
     return _proxy_get(request, "/api/info/tax-rates")
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_info_gns_departments(request):
     return _proxy_get(request, "/api/info/gns-departments")
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_info_entrepreneurship_objects(request):
     return _proxy_get(request, "/api/info/entrepreneurship-objects")
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_info_calc_item_attributes(request):
     return _proxy_get(request, "/api/info/calc-item-attributes")
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_info_business_activities(request):
     return _proxy_get(request, "/api/info/business-activities")
 
 
 @api_view(["GET"])
-@permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
 def ekassa_logout(request):
     """Завершить сессию токена на стороне eKassa (документация: GET /api/logout)."""
     company = _resolve_company(request.user)
@@ -377,3 +378,19 @@ def ekassa_logout(request):
     finally:
         cli.invalidate_token()
     return Response(data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsCompanyOwner])
+def ekassa_retry(request):
+    """Повторно отправить в eKassa чеки продаж и возвратов, которые не дошли (status error/pending)."""
+    company = _resolve_company(request.user)
+    if company is None or get_integration(company) is None:
+        return _disabled_response()
+    from apps.ekassa.sale_bridge import retry_failed_for_company
+
+    try:
+        limit = max(1, min(int(request.data.get("limit") or 50), 200))
+    except (TypeError, ValueError):
+        limit = 50
+    return Response(retry_failed_for_company(company, limit=limit))

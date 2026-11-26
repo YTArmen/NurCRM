@@ -105,7 +105,7 @@ def resolve_cashbox(
                 raise DRFValidationError({"detail": "Касса находится в архиве.", "code": "cashbox_inactive"})
             return cb
         if require_cashbox:
-            raise DRFValidationError({"detail": "Касса не найдена или не принадлежит компании.", "code": "cashbox_inactive"})
+            raise DRFValidationError({"detail": "Касса не найдена или не принадлежит компании.", "code": "cashbox_not_found"})
 
     # Debt payments use the company debt cashbox if configured.  Resolving the
     # shift is deliberately left to create_auto_cashflow so drawer accounting
@@ -124,9 +124,12 @@ def resolve_cashbox(
         if cb:
             return cb
 
+    # ТЗ 29.10 Б-13: приход «вне смены» — ни смена, ни касса филиала не подставляются, берём «Основную кассу»
+    detached = bool(ctx.get("detached"))
+
     # 2. Open shift check
-    shift_obj = ctx.get("shift")
-    shift_id = ctx.get("shift_id")
+    shift_obj = None if detached else ctx.get("shift")
+    shift_id = None if detached else ctx.get("shift_id")
     if shift_obj and getattr(shift_obj, "cashbox", None) and getattr(shift_obj.cashbox, "is_active", True):
         return shift_obj.cashbox
     if shift_id:
@@ -134,7 +137,7 @@ def resolve_cashbox(
         if sh and sh.cashbox and sh.cashbox.is_active:
             return sh.cashbox
 
-    u = ctx.get("user") or user
+    u = None if detached else (ctx.get("user") or user)
     if u and getattr(u, "is_authenticated", False):
         sh_user_qs = CashShift.objects.filter(
             company=company,
@@ -151,7 +154,7 @@ def resolve_cashbox(
     # 3. POS operations: pos_sale, pos_prepayment, debt_repayment
     if source_kind in POS_SOURCE_KINDS or not source_kind:
         # 3a. Branch cashbox
-        b_id = ctx.get("branch_id")
+        b_id = None if detached else ctx.get("branch_id")
         if b_id:
             cb = (
                 Cashbox.objects.filter(company=company, branch_id=b_id, role=Cashbox.CashboxRole.POS_BRANCH, is_active=True)
@@ -162,7 +165,7 @@ def resolve_cashbox(
                 return cb
             cb = (
                 Cashbox.objects.filter(company=company, branch_id=b_id, is_active=True)
-                .exclude(role__in=[Cashbox.CashboxRole.EXPENSE_VARIABLE, Cashbox.CashboxRole.EXPENSE_FIXED])
+                .exclude(role__in=[Cashbox.CashboxRole.EXPENSE_VARIABLE, Cashbox.CashboxRole.EXPENSE_FIXED, Cashbox.CashboxRole.SAFE, Cashbox.CashboxRole.BANK])  # ТЗ Н-33: сейф и р/с не ящик кассы
                 .order_by("-created_at")
                 .first()
             )
@@ -188,7 +191,7 @@ def resolve_cashbox(
 
         cb = (
             Cashbox.objects.filter(company=company, is_active=True)
-            .exclude(role__in=[Cashbox.CashboxRole.EXPENSE_VARIABLE, Cashbox.CashboxRole.EXPENSE_FIXED])
+            .exclude(role__in=[Cashbox.CashboxRole.EXPENSE_VARIABLE, Cashbox.CashboxRole.EXPENSE_FIXED, Cashbox.CashboxRole.SAFE, Cashbox.CashboxRole.BANK])  # ТЗ Н-33: сейф и р/с не ящик кассы
             .order_by("created_at")
             .first()
         )
@@ -338,6 +341,7 @@ def create_auto_cashflow(
     affects_shift_drawer: Optional[bool] = None,
     idempotency_key: Optional[str] = None,
     payment_method: Optional[str] = None,
+    detached: bool = False,
 ) -> Optional[CashFlow]:
     """
     Creates an auto-cashflow record within the transaction.
@@ -381,6 +385,8 @@ def create_auto_cashflow(
             raise DRFValidationError({"detail": "Касса находится в архиве.", "code": "cashbox_inactive"})
     else:
         ctx = dict(context or {})
+        if detached:
+            ctx["detached"] = True  # ТЗ 29.10 Б-13
         if cashbox_id:
             ctx["cashbox_id"] = cashbox_id
         if cashbox_role:
@@ -398,19 +404,25 @@ def create_auto_cashflow(
         if user:
             ctx["user"] = user
 
-        cashbox = resolve_cashbox(
-            company=company,
-            context=ctx,
-            source_kind=source_kind,
-            amount=amount_dec,
-            require_cashbox=True,
-        )
+        from apps.construction.batch_cache import memo, ref
+        _key = ("cashbox", ref(company), source_kind, amount_dec > 0 if amount_dec is not None else None,
+                tuple(sorted((k, ref(v)) for k, v in ctx.items())))
+        cashbox = memo(_key, lambda: resolve_cashbox(
+                company=company,
+                context=ctx,
+                source_kind=source_kind,
+                amount=amount_dec,
+                require_cashbox=True,
+            ))
 
     actual_branch = branch or (cashbox.branch if cashbox else None)
 
     # Shift & cashier logic
     actual_shift = None
-    if source_kind not in EXPENSE_VARIABLE_KINDS:
+    if detached:
+        # ТЗ 29.10 Б-13: деньги принял владелец «в руки» — ни в одну смену не попадают (shift=NULL)
+        pass
+    elif source_kind not in EXPENSE_VARIABLE_KINDS:
         actual_shift = shift
         if actual_shift is None and shift_id:
             actual_shift = CashShift.objects.filter(id=shift_id, company=company).first()
@@ -427,6 +439,10 @@ def create_auto_cashflow(
                 cashier=user,
                 status=CashShift.Status.OPEN,
             ).first() if (user and getattr(user, "is_authenticated", False)) else None
+    elif shift is not None and affects_shift_drawer and cashbox and shift.cashbox_id == cashbox.id:
+        # Явная оплата из ящика открытой смены (закупка «из кассы смены», ТЗ Н-03):
+        # один расход, привязанный к смене и входящий в expected_cash.
+        actual_shift = shift
 
     actual_cashier = (
         user
@@ -468,6 +484,11 @@ def create_auto_cashflow(
 
     final_name = (name or "").strip() or default_names.get(source_kind, "Авто-операция")
     legacy_op_id = source_business_operation_id or default_names.get(source_kind, "Авто-операция")
+
+    if category is None:
+        from apps.construction.categories import category_for_source
+
+        category = category_for_source(company, source_kind)
 
     cf = CashFlow(
         company=company,

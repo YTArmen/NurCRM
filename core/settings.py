@@ -85,6 +85,10 @@ DEFAULT_CORS_ORIGINS = DEV_CORS_ORIGINS
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-dev-only-change-me")
+# ТЗ 29.10 Б-96: секрет подписи списка покупок (пусто — выводится из SECRET_KEY)
+PURCHASES_SIGNING_KEY = os.getenv("PURCHASES_SIGNING_KEY", "")
+# Ключ support.nurcrm.kg для конструктора тарифа «По договору» (apps/users/support_views.py). Пусто — выключено.
+NURCRM_SUPPORT_TOKEN = os.getenv("NURCRM_SUPPORT_TOKEN", "")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 ALLOWED_HOSTS = _get_list_env("DJANGO_ALLOWED_HOSTS", DEFAULT_ALLOWED_HOSTS)
@@ -128,14 +132,22 @@ INSTALLED_APPS = [
     'apps.ekassa',
     'apps.onec',
     'apps.releases',
+    'apps.possync',
     'apps.integrations',
     'apps.support',
+    'apps.repair',  # П2-1 p2115: ремонт и trade-in
     'apps.clientapp',
+    'apps.inbox',  # ТЗ 26.10 Б-73…Б-87
+    'apps.insiders',  # ins2411: инсайдеры support.nurcrm.kg
     # 'apps.crm',
 ]
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
+    # ТЗ-28 §2.4: сжатие JSON > 200 байт (каталог 10 000 товаров ~12 МБ → ~1,5 МБ).
+    'django.middleware.gzip.GZipMiddleware',
+    # ТЗ-28 §11.2–11.4: X-Request-Id, X-Server-Time, журнал медленных запросов.
+    'core.middleware.RequestMetaMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -143,6 +155,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'apps.main.stock_ledger.StockLedgerContextMiddleware',  # 14.11.2026 П0-4 К-1
 ]
 
 ROOT_URLCONF = 'core.urls'
@@ -248,6 +261,12 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 SWAGGER_SETTINGS = {
     'USE_SESSION_AUTH': False,
+    'DEFAULT_SPEC_RENDERERS': [
+        'drf_yasg.renderers.SwaggerYAMLRenderer',
+        'drf_yasg.renderers.SwaggerJSONRenderer',
+        'drf_yasg.renderers.OpenAPIRenderer',
+        'core.swagger_renderers.OpenAPIJsonRenderer',
+    ],
     'SECURITY_DEFINITIONS': {
         'Token': {
             'type': 'apiKey',
@@ -271,10 +290,14 @@ CLIENT_ZIP_URL = os.getenv(
 )
 CLIENT_RELEASE_NOTES = os.getenv("CLIENT_RELEASE_NOTES", "Первый релиз")
 
+# ТЗ-28 §11.4: порог журнала медленных запросов, мс
+SLOW_REQUEST_MS = _get_int_env("SLOW_REQUEST_MS", 1000)
+
 REST_FRAMEWORK = {
     'EXCEPTION_HANDLER': 'core.exceptions.api_exception_handler',
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # 06.11.2026: JWT + 401 session_revoked для отключённого устройства (слоты)
+        'apps.users.auth_session.SessionAwareJWTAuthentication',
         'apps.integrations.authentication.ApiKeyAuthentication',
     ),
     'DEFAULT_THROTTLE_CLASSES': [
@@ -302,10 +325,13 @@ REST_FRAMEWORK = {
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=_get_int_env('JWT_ACCESS_TOKEN_MINUTES', 15)),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=_get_int_env('JWT_REFRESH_TOKEN_DAYS', 7)),
-    # По умолчанию False: при True без приложения token_blacklist и миграций refresh
-    # часто падает с ошибкой БД (OutstandingToken и т.п.). Включайте через env осознанно.
-    'ROTATE_REFRESH_TOKENS': _get_bool_env('JWT_ROTATE_REFRESH_TOKENS', False),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=_get_int_env('JWT_REFRESH_DAYS', 30)),
+    # 06.11.2026: новые имена JWT_REFRESH_DAYS / JWT_ROTATE_REFRESH — старые JWT_REFRESH_TOKEN_DAYS=7 и
+    # JWT_ROTATE_REFRESH_TOKENS=False сидят в окружении gunicorn (systemd EnvironmentFile) и kill -HUP их не меняет.
+    # 06.11.2026: True — каждый refresh выдаёт новый refresh (вход продлевается при работе).
+    # Обновление идёт через apps/users/auth_session.py без outstand()/чёрного списка,
+    # поэтому таблицы token_blacklist не нужны. Предел без пароля — JWT_REFRESH_MAX_AGE_DAYS (90).
+    'ROTATE_REFRESH_TOKENS': _get_bool_env('JWT_ROTATE_REFRESH', True),
     # Avoid 500 on /auth/refresh when token_blacklist app is not installed.
     # Can be enabled explicitly via env when blacklist app is configured.
     'BLACKLIST_AFTER_ROTATION': _get_bool_env('JWT_BLACKLIST_AFTER_ROTATION', False),
@@ -344,6 +370,11 @@ CELERY_IMPORTS = (
     'apps.main.telegram_bot.tasks',
     'apps.main.recommendations_tasks',
     'apps.main.rentals_tasks',
+    'apps.main.tz26.ai_stock.tasks',  # ТЗ 26.10 Б-65
+    'apps.main.tz26.pos_print.tasks',  # ТЗ 26.10 Б-69
+    'apps.inbox.tasks',  # ТЗ 26.10 Б-73…Б-87
+    'apps.main.tz26.staff.tasks',  # ТЗ 26.10 Б-62
+    'apps.main.tz31_tryon_tasks',  # ТЗ кассы 05.11 п.38 / Б-94
     'apps.consalting.tasks',
     'apps.construction.tasks',
     'apps.integrations.tasks',
@@ -362,6 +393,33 @@ CONSALTING_FUNNEL_STRICT = False
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
+    'staff-task-reminders': {'task': 'apps.main.tz26.staff.tasks.send_due_task_reminders', 'schedule': crontab()},  # ТЗ 26.10 Б-62: напоминания по задачам
+    # ТЗ 26.10 Б-75…Б-77: ящик «Чаты»
+    'inbox-sweep-webhooks': {'task': 'apps.inbox.tasks.sweep_webhook_events', 'schedule': crontab(minute='*/2')},
+    'inbox-sweep-outbound': {'task': 'apps.inbox.tasks.sweep_outbound', 'schedule': crontab(minute='*/2')},
+    'inbox-wake-snoozed': {'task': 'apps.inbox.tasks.wake_snoozed', 'schedule': crontab(minute='*/5')},
+    'inbox-alert-unanswered': {'task': 'apps.inbox.tasks.alert_unanswered', 'schedule': crontab(minute='*/15')},
+    'inbox-cleanup': {'task': 'apps.inbox.tasks.cleanup_old_data', 'schedule': crontab(hour=4, minute=10)},
+    'telegram-customer-outbox-flush': {  # ТЗ кассы 05.11 п.31 / Б-30: отложенные сообщения покупателям (тихие часы)
+        'task': 'apps.main.telegram_bot.tasks.flush_customer_outbox',
+        'schedule': crontab(minute='*/5'),
+    },
+    'showcase-try-on-expire': {  # ТЗ кассы 05.11 п.38 / Б-94: автоотмена просроченных броней «Примерить в магазине»
+        'task': 'apps.main.tz31_tryon_tasks.cancel_expired_try_on_orders',
+        'schedule': crontab(minute='*/10'),
+    },
+    'tz1029-expire-bonuses': {  # ТЗ 29.10 Б-99: сгорание бонусов по сроку
+        'task': 'apps.main.tz1029_bonus_tasks.expire_bonuses',
+        'schedule': crontab(hour=3, minute=50),
+    },
+    'tz26-print-jobs-purge': {  # ТЗ 26.10 Б-69: задания печати хранятся 7 дней
+        'task': 'apps.main.tz26.pos_print.tasks.purge_print_jobs',
+        'schedule': crontab(hour=3, minute=40),
+    },
+    'tz26-ai-actions-purge': {  # ТЗ 26.10 Б-65: журнал действий ИИ хранится 180 дней
+        'task': 'apps.main.tz26.ai_stock.tasks.purge_ai_actions',
+        'schedule': crontab(hour=3, minute=30),
+    },
     'support-daily-digest': {
         'task': 'apps.support.tasks.send_daily_support_digest',
         'schedule': crontab(hour=9, minute=0),
@@ -414,10 +472,11 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.consalting.tasks.scan_sla_breach',
         'schedule': crontab(minute='*/30'),
     },
-    'consalting-scan-unanswered-leads': {
-        'task': 'apps.consalting.tasks.scan_unanswered_leads',
-        'schedule': crontab(minute='*'),
-    },
+    # 03.11.2026: «Лид без ответа» выключено по просьбе
+#    'consalting-scan-unanswered-leads': {
+#        'task': 'apps.consalting.tasks.scan_unanswered_leads',
+#        'schedule': crontab(minute='*'),
+#    },
     'consalting-send-inbound-lead-reminders': {
         'task': 'apps.consalting.tasks.send_inbound_lead_reminders',
         'schedule': crontab(minute='*/5'),
@@ -551,6 +610,7 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     'x-requested-with',
     'x-pos-device',
     'idempotency-key',
+    'x-nurmarket-client',  # Б-01: сайт витрины шлёт site/<версия> (заказ с вариантом, Б-34)
     'sentry-trace',
     'baggage',
     'cache-control',
@@ -558,7 +618,13 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     'sec-ch-ua',
     'sec-ch-ua-mobile',
     'sec-ch-ua-platform',
+    # 03.11 front-market: окно PIN (X-Pin-Token) и правка накладных с If-Match / ETag
+    'x-pin-token',
+    'if-match',
+    'if-none-match',
 ]
+# 03.11 front-market: фронт на другом домене (Vercel) читает эти заголовки ответа
+CORS_EXPOSE_HEADERS = ['Retry-After', 'ETag', 'Content-Disposition']
 
 CORS_ALLOW_METHODS = (
     "DELETE",
@@ -619,6 +685,11 @@ LOGGING = {
         },
     },
     'loggers': {
+        'nurcrm.slow_requests': {
+            'handlers': ['console'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
         'nurcrm.websocket.auth': {
             'handlers': ['console'],
             'level': _WS_LOG_LEVEL,
@@ -683,3 +754,12 @@ WAZZUP_DEFAULT_CHANNEL_ID = os.getenv("WAZZUP_DEFAULT_CHANNEL_ID", "")
 # Consulting CRM tenant provision default sector (Sector 'Магазин' / 'Маркет')
 CONSULTING_DEFAULT_CRM_SECTOR_ID = os.getenv("CONSULTING_DEFAULT_CRM_SECTOR_ID", "e9f05beb-5e14-4153-b523-4e1600c9b2e0")
 
+
+# ТЗ Н-32: квота медиа-хранилища на компанию (МБ) и шаблон ссылки на электронный чек
+COMPANY_MEDIA_QUOTA_MB = int(os.getenv("COMPANY_MEDIA_QUOTA_MB", "500"))
+RECEIPT_PUBLIC_URL_TEMPLATE = os.getenv("RECEIPT_PUBLIC_URL_TEMPLATE", "https://market.nurcrm.kg/receipt/{token}")
+RECEIPT_SHARE_URL_TEMPLATE = os.getenv("RECEIPT_SHARE_URL_TEMPLATE", "https://app.nurcrm.kg/r/{token}")  # ТЗ 30.10 №9
+
+# WhatsApp компаний через Evolution API (09.11.2026); пусто = выключено
+EVOLUTION_API_URL = os.getenv("EVOLUTION_API_URL", "")
+EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY", "")

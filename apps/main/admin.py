@@ -798,3 +798,20 @@ class ShowcaseStatsAdmin(admin.ModelAdmin):
     list_filter = ("date", "company")
     search_fields = ("company__name",)
 
+
+
+# ТЗ кассы 05.11 п.33 / Б-48: каталог тем и видов кассы
+from django.core.cache import cache as _themes_cache  # noqa: E402
+from apps.main.models import MarketplaceTheme  # noqa: E402
+
+
+@admin.register(MarketplaceTheme)
+class MarketplaceThemeAdmin(admin.ModelAdmin):
+    list_display = ("slug", "kind", "price", "version", "position", "is_active")
+    list_editable = ("price", "position", "is_active")
+    list_filter = ("kind", "is_active")
+    search_fields = ("slug",)
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        _themes_cache.delete("public:marketplace-themes:v1")

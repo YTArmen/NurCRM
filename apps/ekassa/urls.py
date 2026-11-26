@@ -20,6 +20,7 @@ urlpatterns = [
     path("shift/control/", views.ekassa_shift_control, name="ekassa-shift-control"),
     path("cash-operation/", views.ekassa_cash_operation, name="ekassa-cash-operation"),
     path("receipt/", views.ekassa_receipt, name="ekassa-receipt"),
+    path("retry/", views.ekassa_retry, name="ekassa-retry"),
     path("duplicate/", views.ekassa_duplicate, name="ekassa-duplicate"),
     path("customers/", views.ekassa_customers, name="ekassa-customers"),
     path("xpay/getqr/", views.ekassa_xpay_getqr, name="ekassa-xpay-getqr"),
@@ -43,3 +44,7 @@ urlpatterns = [
         name="ekassa-info-business",
     ),
 ]
+
+# 20.11.2026 fis2011: сведения о ККМ для любого сотрудника
+from apps.ekassa.status_view import EkassaStatusAPIView  # noqa: E402
+urlpatterns += [path("status/", EkassaStatusAPIView.as_view(), name="ekassa-status")]

@@ -126,7 +126,12 @@ def build_receipt_payload(sale, cashier_name=None, *, ensure_number: bool = True
             default=0
         ))
         line_disc = _to_float(getattr(it, "line_discount", 0))
-        line_total = qty * price - line_disc
+        # rcp2611: сумма строки по правилу чека (весовая — вниз до шага весов, остальные — до копейки), без хвостов float
+        try:
+            from apps.main.models import line_total_like_check
+            line_total = float(line_total_like_check(it))
+        except Exception:
+            line_total = round(qty * price - line_disc, 2)
         price_manually_edited = bool(getattr(it, "price_manually_edited", False))
         price_override_reason = "manual" if price_manually_edited else ("discount" if line_disc > 0 else None)
         items.append(

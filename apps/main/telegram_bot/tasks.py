@@ -195,6 +195,30 @@ def process_telegram_update(settings_id: str, update_data: dict, enqueued_at: fl
         is_owner = (settings.owner_chat_id and str(settings.owner_chat_id) == str(chat_id))
         audience = "owner" if is_owner else "customers"
 
+        # Аудит 12.11: покупатель поделился СВОИМ контактом → привязка к клиенту по телефону.
+        if not is_owner and message.get("contact"):
+            from apps.main.models import Client
+            from apps.main.telegram_bot.services.customer_handler import (
+                get_customer_main_menu_keyboard, link_client_by_verified_contact,
+            )
+            reply = link_client_by_verified_contact(settings.company, chat_id, from_user, message.get("contact"))
+            linked = Client.objects.filter(company=settings.company, telegram_chat_id=str(chat_id)).first()
+            if linked:
+                from apps.main.telegram_bot.models import TelegramCustomerProfile
+                TelegramCustomerProfile.objects.filter(company=settings.company, chat_id=str(chat_id)).update(client=linked)
+            if settings.token:
+                telegram_api.send_message(settings.token, chat_id, reply, parse_mode=None,
+                                          reply_markup=get_customer_main_menu_keyboard())
+            return
+
+        # ТЗ Н-23 (2): 6 цифр от не-владельца — возможно, код подтверждения владельца
+        if not is_owner and text and not message.get("voice"):
+            from apps.main.telegram_bot.services import owner_notify
+            if owner_notify.try_bind_owner_from_message(settings, chat_id, from_user, chat_title, text):
+                from django.utils import timezone
+                TelegramBotSettings.objects.filter(id=settings.id).update(last_reply_at=timezone.now())
+                return
+
         # Логируем для detect-owner-chat
         TelegramMessageLog.objects.create(
             bot_settings=settings,
@@ -203,6 +227,12 @@ def process_telegram_update(settings_id: str, update_data: dict, enqueued_at: fl
             sender_name=sender_name,
             text=text if not is_voice else "[Голосовое сообщение]",
         )
+
+        # Ящик «Чаты» (ТЗ 26.10 Б-76): входящее покупателя пишем в диалог; в паузе после ответа человека бот молчит
+        if not is_owner:
+            from apps.inbox import bot_hooks
+            if bot_hooks.on_customer_message(settings, message):
+                return
 
         # ТЗ ч.15, п. 5: фото накладной от владельца (photo или document-картинка)
         image_part, image_mime = None, "image/jpeg"
@@ -483,3 +513,26 @@ def queue_probe(enqueued_at: float):
     if latency > QUEUE_ALERT_SECONDS:
         _queue_alert(f"⚠ Очередь ботов: задача ждала {latency:.0f} с (порог {QUEUE_ALERT_SECONDS} с).")
     return round(latency, 3)
+
+
+@shared_task(name="apps.main.telegram_bot.tasks.send_order_notification")
+def send_order_notification(order_id: str):
+    """ТЗ Б-22: уведомление о новом заказе витрины."""
+    from apps.main.telegram_bot.services import order_notify
+
+    order_notify.notify_new_order(order_id)
+
+
+@shared_task(name="apps.main.telegram_bot.tasks.retry_order_notification")
+def retry_order_notification(order_id: str, attempt: int):
+    """Повтор после ошибки отправки: через 1, 5, 30 минут."""
+    from apps.main.telegram_bot.services import order_notify
+
+    order_notify.notify_new_order(order_id, attempt=int(attempt))
+
+
+@shared_task(name="apps.main.telegram_bot.tasks.flush_customer_outbox")
+def flush_customer_outbox():
+    """ТЗ кассы 05.11 п.31 / Б-30: отправить отложенные (тихие часы) сообщения покупателям."""
+    from apps.main.telegram_bot.services.customer_notify import flush_deferred
+    return flush_deferred()

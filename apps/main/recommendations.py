@@ -822,9 +822,9 @@ class SalesTargetAPIView(APIView):
         if branch is not None:
             sales_qs = sales_qs.filter(branch=branch)
             returns_qs = returns_qs.filter(sale__branch=branch)
-        sold = (sales_qs.aggregate(s=Sum("total"))["s"] or ZERO_MONEY) - (
-            returns_qs.aggregate(s=Sum("returned_amount"))["s"] or ZERO_MONEY
-        )
+        # Аудит 12.11: total частично возвращённого чека уже уменьшен, полностью возвращённый — canceled
+        # и сюда не попадает; вычитать SaleReturn второй раз нельзя.
+        sold = sales_qs.aggregate(s=Sum("total"))["s"] or ZERO_MONEY
 
         upsell_revenue = compute_upsell_revenue(company, branch, start, end)[0]
 

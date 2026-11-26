@@ -153,6 +153,43 @@ class ErrorReportsBatchSerializer(serializers.Serializer):
     )
 
 
+def _clip_report(raw):
+    """Обрезать слишком длинные строки до лимитов полей: отчёт о сбое лучше принять урезанным."""
+    if not isinstance(raw, dict):
+        return raw
+    out = dict(raw)
+    for name, field in ErrorReportItemSerializer().fields.items():
+        limit = getattr(field, "max_length", None)
+        if limit and isinstance(out.get(name), str) and len(out[name]) > limit:
+            out[name] = out[name][:limit]
+    return out
+
+
+def _validate_reports_tolerant(data):
+    """30.10.2026: раньше один плохой отчёт отклонял всю пачку (400), касса слала её снова и снова.
+    Теперь: длинное обрезаем, плохие отчёты пропускаем, хорошие принимаем. Все плохие — 400."""
+    import logging
+
+    reports = data.get("reports") if isinstance(data, dict) else None
+    if not isinstance(reports, list) or not reports:
+        raise exceptions.ValidationError({"reports": "Нужен непустой список отчётов."})
+    if len(reports) > MAX_BATCH:
+        raise exceptions.ValidationError({"reports": f"Не больше {MAX_BATCH} отчётов в пачке."})
+    items, rejected = [], []
+    for i, raw in enumerate(reports):
+        ser = ErrorReportItemSerializer(data=_clip_report(raw))
+        if ser.is_valid():
+            items.append(ser.validated_data)
+        else:
+            rejected.append({"index": i, "errors": ser.errors})
+    if rejected:
+        logging.getLogger(__name__).warning("error-reports: пропущено %s из %s: %s",
+                                            len(rejected), len(reports), rejected[:3])
+    if not items:
+        raise exceptions.ValidationError({"reports": rejected[:10]})
+    return items, rejected
+
+
 class ErrorReportListCreateAPIView(APIView):
     """
     POST /api/support/error-reports/ — пачка до 50 отчётов.
@@ -166,9 +203,7 @@ class ErrorReportListCreateAPIView(APIView):
     parser_classes = [JSONParser]
 
     def post(self, request):
-        ser = ErrorReportsBatchSerializer(data=request.data)
-        ser.is_valid(raise_exception=True)
-        items = ser.validated_data["reports"]
+        items, invalid = _validate_reports_tolerant(request.data)
 
         user = request.user
         is_auth = bool(user and user.is_authenticated)
@@ -244,7 +279,7 @@ class ErrorReportListCreateAPIView(APIView):
         if inserted_ids:
             transaction.on_commit(lambda ids=inserted_ids: _enqueue(ids))
 
-        body = {"accepted": len(inserted_ids), "duplicates": duplicates}
+        body = {"accepted": len(inserted_ids), "duplicates": duplicates, "invalid": len(invalid)}
         if rejected:
             body["rejected"] = rejected
             body["detail"] = f"Превышен лимит отчётов ({limit}/час на устройство)."

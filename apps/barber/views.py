@@ -46,6 +46,7 @@ from .serializers import (
 
 
 # ---- DocumentFilter ----
+from apps.users.permissions import read_only_guard  # noqa: E402
 class DocumentFilter(filters.FilterSet):
     name = filters.CharFilter(lookup_expr="icontains")
     folder = filters.UUIDFilter(field_name="folder__id")
@@ -325,6 +326,16 @@ class BarberClientPagination(PageNumberPagination):
     page_size = 5000
     page_size_query_param = "page_size"
     max_page_size = 10000
+    # 30.10.2026: «Записи» на nurcrm.kg берут клиентов одной страницей page_size=1000 и дальше
+    # не листают — у компаний с 1000+ клиентами остальные не находились при записи.
+    # page_size от 1000 считаем просьбой «все» (до max_page_size).
+    all_from = 1000
+
+    def get_page_size(self, request):
+        size = super().get_page_size(request)
+        if size and size >= self.all_from:
+            return self.max_page_size
+        return size
 
 
 class ClientListCreateView(CompanyQuerysetMixin, generics.ListCreateAPIView):
@@ -1304,6 +1315,7 @@ class DocumentRetrieveUpdateDestroyView(
 
 
 
+@read_only_guard("can_edit_salary")
 class PayoutListCreateView(CompanyQuerysetMixin, generics.ListCreateAPIView):
     """
     GET  /api/barber/payouts/        – список выплат (по компании/филиалу, с фильтрами)
@@ -1333,6 +1345,7 @@ class PayoutListCreateView(CompanyQuerysetMixin, generics.ListCreateAPIView):
     ordering = ["-created_at"]
 
 
+@read_only_guard("can_edit_salary")
 class PayoutRetrieveUpdateDestroyView(
     CompanyQuerysetMixin,
     generics.RetrieveUpdateDestroyAPIView,

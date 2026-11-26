@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 from uuid import UUID
 
@@ -15,7 +15,7 @@ from .models import Cart, CartItem, Sale, SaleItem, Product
 
 
 def _money(x: Decimal | None) -> Decimal:
-    return (x or Decimal("0")).quantize(Decimal("0.01"))
+    return (x or Decimal("0")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 @dataclass(frozen=True)

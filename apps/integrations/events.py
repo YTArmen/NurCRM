@@ -26,6 +26,29 @@ EVENTS = (
     "company.updated",
     "appointment.created",
     "order.created",
+    # ТЗ Н-31: новые типы ленты изменений (apps.main.change_feed)
+    "debt_paid",
+    "client_changed",  # ТЗ 29.10 Б-102
+    "bonus_changed",
+    "staff_changed",
+    "cash_moved",
+    "debt_created",
+    "app_settings_changed",
+    "product_changed",
+    "stock_changed",
+    "rental_created",
+    "rental_updated",
+    "rental_extended",
+    "supplier_debt_changed",
+    "features_changed",
+    "pos_request_changed",
+    "receipt_changed",  # ТЗ редактор накладных 30.10
+    # ТЗ 26.10 (Б-62, Б-69, Б-72, Б-60)
+    "task.assigned",
+    "task.reminder",
+    "print_job_created",
+    "scanner_scan",
+    "customer_order_ready",
 )
 
 
@@ -65,6 +88,18 @@ def _dispatch(company_id, event: str, data: dict) -> None:
     from .models import WebhookEndpoint
     from .tasks import deliver_webhook
 
+    # ТЗ Н-31: частые типы ленты — не ходим в БД за подписками каждый раз (кэш на 30 с)
+    from apps.main.change_feed import NEW_EVENT_TYPES
+    if event in NEW_EVENT_TYPES:
+        from django.core.cache import cache
+        key = f"wh_has_eps:{company_id}"
+        has = cache.get(key)
+        if has is None:
+            has = WebhookEndpoint.objects.filter(company_id=company_id, is_active=True).exists()
+            cache.set(key, has, 30)
+        if not has:
+            return
+
     endpoints = [
         ep for ep in WebhookEndpoint.objects.filter(company_id=company_id, is_active=True).only("id", "events")
         if event in (ep.events or [])
@@ -85,6 +120,13 @@ def _dispatch(company_id, event: str, data: dict) -> None:
 def emit_event(company_id, event: str, data: dict) -> None:
     if not company_id or event not in EVENTS:
         return
+
+    # ТЗ Н-31: каждое событие попадает в ленту изменений (одна вставка после коммита)
+    try:
+        from apps.main.change_feed import record_from_emit
+        record_from_emit(company_id, event, data)
+    except Exception:
+        logger.exception("change feed emit failed: %s", event)
 
     def _send():
         try:

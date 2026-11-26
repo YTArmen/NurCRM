@@ -1,5 +1,6 @@
 # apps/cafe/permissions.py
 from rest_framework import permissions
+from rest_framework.exceptions import APIException
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
@@ -135,3 +136,96 @@ class IsPlatformAdmin(permissions.BasePermission):
             and u.is_authenticated
             and getattr(u, "is_platform_admin", False) is True
         )
+
+
+# ─────────────────────────────────────────────────────────────
+# «Только смотреть» (ТЗ «Бухгалтер», п. 1)
+# ─────────────────────────────────────────────────────────────
+READ_ONLY_FIELDS = (
+    "can_edit_cashbox", "can_edit_products", "can_edit_procurement", "can_edit_documents",
+    "can_edit_clients", "can_edit_salary", "can_edit_employees", "can_edit_settings",
+)
+_SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def is_read_only_for(user, field: str) -> bool:
+    """True, если права «менять» раздела явно отключены (field=False). owner/admin/superuser — никогда."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_superuser", False):
+        return False
+    if getattr(user, "role", None) == "admin":
+        # 11.11: «Добавлять и менять сотрудников» у администратора владелец может выключить (can_edit_employees=False);
+        # остальные «только смотреть» админа не касаются
+        return field == "can_edit_employees" and getattr(user, field, None) is False
+    if getattr(user, "role", None) == "owner":
+        return False
+    if getattr(user, "owned_company_id", None):
+        return False
+    return getattr(user, field, None) is False
+
+
+class ReadOnlyError(APIException):
+    """403 {"detail", "code": "read_only"} — без зависимости от core.exceptions.ApiError (ТЗ-28)."""
+
+    status_code = 403
+    default_code = "read_only"
+
+
+def read_only_permission(field: str):
+    """Класс permission: при field=False запрещает POST/PATCH/PUT/DELETE (403 code=read_only)."""
+
+    class _ReadOnlyGuard(permissions.BasePermission):
+        def has_permission(self, request, view):
+            if request.method in _SAFE_METHODS:
+                return True
+            if is_read_only_for(request.user, field):
+                raise ReadOnlyError(
+                    {"detail": "Недостаточно прав: у вас доступ к разделу только для просмотра.", "code": "read_only"}
+                )
+            return True
+
+    _ReadOnlyGuard.__name__ = f"ReadOnlyGuard_{field}"
+    return _ReadOnlyGuard
+
+
+def read_only_guard(field: str):
+    """Декоратор класса view: добавляет проверку «только смотреть» к permission_classes."""
+
+    def deco(view_cls):
+        view_cls.permission_classes = [*list(view_cls.permission_classes), read_only_permission(field)]
+        return view_cls
+
+    return deco
+
+
+# ─────────────────────────────────────────────────────────────
+# ТЗ редактор накладных 30.10: «Редактор документов закупок»
+# ─────────────────────────────────────────────────────────────
+PURCHASE_EDIT_FIELD = "can_edit_purchase_documents"
+
+
+def can_edit_purchase_documents(user) -> bool:
+    """Владелец и администратор — всегда да; остальные — только явно выданное (владельцем или админом) True.
+    01.11 (Умар): у кого право есть — правит любые приходы без ограничения по времени, пока право не снимут."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    from apps.warehouse.op_permissions import is_company_owner
+
+    if is_company_owner(user) or getattr(user, "role", None) == "admin":
+        return True
+    return getattr(user, PURCHASE_EDIT_FIELD, None) is True
+
+
+# 21.11.2026 hist2111: «Удалять товары»
+def can_delete_products(user) -> bool:
+    """Владелец и администратор — всегда; остальные — только явно выданное True."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_superuser", False):
+        return True
+    from apps.warehouse.op_permissions import is_company_owner
+
+    if is_company_owner(user) or getattr(user, "role", None) == "admin":
+        return True
+    return getattr(user, "can_delete_products", None) is True

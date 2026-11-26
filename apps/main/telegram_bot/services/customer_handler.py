@@ -162,6 +162,53 @@ def get_customer_debt(company, chat_id: str) -> str:
         return f"В магазине «{company_name}» у вас нет задолженности. Спасибо, что вы с нами!"
 
 
+CONTACT_REQUEST_TEXT = (
+    "Чтобы получать уведомления и видеть свой долг, подтвердите номер: "
+    "нажмите кнопку «📱 Поделиться номером» внизу."
+)
+CONTACT_KEYBOARD = {
+    "keyboard": [[{"text": "📱 Поделиться номером", "request_contact": True}]],
+    "resize_keyboard": True,
+    "one_time_keyboard": True,
+}
+
+
+def link_client_by_verified_contact(company, chat_id: str, from_user: dict, contact: dict) -> str:
+    """Аудит 12.11: привязка по телефону — только по контакту, который Telegram подтвердил
+    как номер самого отправителя (contact.user_id == from.id). Раньше /start <чужой телефон>
+    открывал чужой долг и чеки."""
+    if not contact or str(contact.get("user_id") or "") != str((from_user or {}).get("id") or "-"):
+        return "Можно подтвердить только свой номер: нажмите кнопку «📱 Поделиться номером»."
+    return _link_client_by_phone(company, chat_id, contact.get("phone_number") or "") or (
+        "Номер подтверждён, но покупатель с таким номером в магазине не найден. Обратитесь к продавцу."
+    )
+
+
+def _link_client_by_phone(company, chat_id: str, phone: str):
+    from apps.main.models import Client
+    import re as _re
+    digits = _re.sub(r"\D", "", phone or "")
+    if len(digits) < 9:
+        return None
+    tail = digits[-9:]
+    matches = [
+        c for c in Client.objects.filter(company=company, phone__contains=tail[-6:])[:50]
+        if _re.sub(r"\D", "", c.phone or "")[-9:] == tail
+    ]
+    if len(matches) != 1:
+        return None
+    return _bind_client(company, chat_id, matches[0])
+
+
+def _bind_client(company, chat_id: str, client) -> str:
+    client.telegram_chat_id = str(chat_id)
+    client.save(update_fields=["telegram_chat_id"])
+    from apps.main.tz31_consents import set_client_consents
+    set_client_consents(client, service=True, source="bot_start")
+    company_name = getattr(company, "name", "")
+    return f"✅ Вы успешно подписались на уведомления магазина {company_name}! Теперь вы можете проверять долг командой /dolg."
+
+
 def link_client_by_start(company, chat_id: str, client_id_str: str) -> str:
     """Привязывает Client к telegram_chat_id при команде /start <client_id>."""
     from apps.main.models import Client
@@ -173,23 +220,13 @@ def link_client_by_start(company, chat_id: str, client_id_str: str) -> str:
     except Exception:
         pass
 
-    if not client:
-        # Попробуем по номеру телефона
-        client = Client.objects.filter(company=company, phone__icontains=clean_id).first()
-
     if client:
-        client.telegram_chat_id = str(chat_id)
-        client.save(update_fields=["telegram_chat_id"])
-        company_name = getattr(company, "name", "")
-        return f"✅ Вы успешно подписались на уведомления магазина {company_name}! Теперь вы можете проверять долг командой /dolg."
-
+        return _bind_client(company, chat_id, client)
+    # Аудит 12.11: по одному лишь тексту-телефону больше не привязываем — просим контакт.
+    import re as _re0
+    if len(_re0.sub(r"\D", "", clean_id)) >= 9:
+        return CONTACT_REQUEST_TEXT
     return "Добро пожаловать! Чем мы можем вам помочь? Напишите интересующий вас товар."
-
-
-CATALOG_CACHE_TTL = 180  # 3 минуты на компанию (ТЗ ч.7, 4.1.5)
-CATALOG_MAX_PRODUCTS = 3000
-CUSTOMER_HISTORY_TTL = 86400
-CUSTOMER_HISTORY_LEN = 8
 
 
 def _catalog_cache_key(company_id) -> str:
@@ -543,6 +580,7 @@ def create_order_from_ai_json(company, settings, order_data: dict, chat_id: str)
                 customer_phone=phone,
                 delivery_type=ShowcaseOrder.DeliveryType.PICKUP,
                 source="telegram",
+                telegram_chat_id=str(chat_id),
                 comment=f"[Telegram-бот chat_id={chat_id}] {comment}".strip(),
                 total=total_amount,
             )
@@ -574,23 +612,12 @@ def create_order_from_ai_json(company, settings, order_data: dict, chat_id: str)
             telegram_api.send_message(settings.token, settings.owner_chat_id, alert)
         return None, "Не удалось оформить заказ автоматически. Менеджер свяжется с вами в ближайшее время."
 
-    # 3. Оповещение владельца: «Джинсы мужские — 32, синий × 1»
-    if settings.owner_chat_id:
-        items_summary = "\n".join(
-            f"  • {html.escape(d['product_name'])} × {format_qty(d['qty'])} = {d['total']} сом"
-            for d in items_to_create
-        )
-        owner_msg = (
-            f"🛒 <b>Новый заказ из бота №{order.number}!</b>\n"
-            f"👤 Покупатель: {html.escape(name)} ({html.escape(phone)})\n"
-            f"💰 Сумма: <b>{order.total} сом</b>\n"
-            f"📦 Товары:\n{items_summary}\n"
-            f"📍 Тип: Самовывоз"
-        )
-        try:
-            telegram_api.send_message(settings.token, settings.owner_chat_id, owner_msg, parse_mode="HTML")
-        except Exception as exc:
-            logger.warning("Owner order notification failed: %s", exc)
+    # 3. Оповещение владельца / группы заказов (ТЗ Б-22)
+    try:
+        from apps.main.telegram_bot.services import order_notify
+        order_notify.notify_new_order(order.id)
+    except Exception as exc:
+        logger.warning("Order notification failed: %s", exc)
 
     reply_for_customer = (
         f"✅ <b>Ваш заказ №{order.number} успешно оформлен!</b>\n"
@@ -628,6 +655,84 @@ def clear_customer_history(company_id, chat_id) -> None:
         cache.delete(_customer_history_key(company_id, chat_id))
     except Exception:
         pass
+
+
+def start_cart_link(token, chat_id, company, link_token: str, from_user: dict) -> None:
+    """ТЗ 01.11: /start c_<token> — показать корзину сайта (названия/цены из базы) и дать оформить заказ."""
+    from apps.main.models import ShowcaseCartLink, ShowcaseOrder, Product, ProductVariant
+    from apps.main.telegram_bot.services.callback_handler import _send_order_summary
+    from apps.main.variant_utils import name_with_variant, variant_prices
+    from django.core.cache import cache
+    import uuid as _uuid
+
+    done = ShowcaseOrder.objects.filter(company=company, cart_token=link_token).first()
+    if done:
+        telegram_api.send_message(token, chat_id, f"Этот заказ уже оформлен: №{done.number}.")
+        return
+    link = ShowcaseCartLink.objects.filter(company=company, token=link_token).first()
+    if link is None or link.expires_at < timezone.now():
+        telegram_api.send_message(token, chat_id, "Ссылка на корзину устарела. Соберите корзину на сайте заново.")
+        return
+    items, skipped = [], 0
+    for it in link.items or []:
+        prod = Product.objects.filter(company=company, id=it.get("product")).first()
+        if prod is None:
+            skipped += 1
+            continue
+        variant = None
+        if it.get("variant"):
+            variant = ProductVariant.objects.filter(id=it["variant"], product=prod, is_active=True).first()
+            if variant is None:
+                skipped += 1
+                continue
+        price = variant_prices(variant, prod)[0] if variant is not None else (prod.price or 0)
+        items.append({
+            "product_id": str(prod.id),
+            "variant_id": str(variant.id) if variant is not None else None,
+            "title": name_with_variant(prod.name, variant),
+            "price": str(price),
+            "qty": str(it.get("qty") or "1"),
+        })
+    if not items:
+        telegram_api.send_message(token, chat_id, "Товары из корзины больше недоступны.")
+        return
+    if skipped:
+        telegram_api.send_message(token, chat_id, "Часть товаров из корзины больше недоступна, они убраны.")
+    draft_id = f"d_{_uuid.uuid4().hex[:8]}"
+    draft = {
+        "items": items,
+        "delivery_type": "pickup",
+        "user_name": f"{from_user.get('first_name', '')} {from_user.get('last_name', '')}".strip() or from_user.get("username", "Покупатель"),
+        "phone": "",
+        "cart_token": link_token,
+    }
+    cache.set(f"tg_draft:{company.id}:{draft_id}", draft, timeout=3600)
+    _send_order_summary(token, chat_id, company, draft_id, draft)
+
+
+def start_product_card(settings, token, chat_id, company, product_id: str) -> None:
+    """ТЗ 01.11: /start p_<id> — карточка товара с кнопками «в корзину / оформить»."""
+    from apps.main.models import Product
+    from apps.main.telegram_bot.services.callback_handler import make_product_card_markup
+    from apps.main.telegram_bot.services.photo_service import format_price_display, send_single_product_photo
+
+    try:
+        prod = Product.objects.filter(company=company, id=product_id).prefetch_related("variants").first()
+    except Exception:
+        prod = None
+    if prod is None:
+        telegram_api.send_message(token, chat_id, "Товар не найден. Откройте каталог: /catalog")
+        return
+    variants = [v for v in prod.variants.all() if v.is_active]
+    markup = make_product_card_markup(prod.id, has_variants=bool(variants), variants=variants)
+    try:
+        if send_single_product_photo(settings, chat_id, prod, reply_markup=markup):
+            return
+    except Exception:  # нет фото/поля — отправим текстом
+        logger.warning("product card photo failed for %s", prod.id)
+    telegram_api.send_message(
+        token, chat_id, f"<b>{html.escape(prod.name)}</b>\n💰 {format_price_display(prod.price)}",
+        parse_mode="HTML", reply_markup=markup)
 
 
 def handle_customer_message(
@@ -695,12 +800,36 @@ def handle_customer_message(
     cart_count = get_cart_count(company.id, chat_id)
     main_menu = get_customer_main_menu_keyboard(cart_count=cart_count, lang=lang)
 
+    # ТЗ кассы 05.11 п.31 / Б-30: /stop, СТОП, STOP → служебные и рекламные выключены
+    if lower_text.strip() in ("/stop", "стоп", "stop"):
+        from apps.main.telegram_bot.services.customer_notify import STOP_REPLY
+        from apps.main.tz31_consents import stop_client_by_chat
+        stop_client_by_chat(company, chat_id)
+        stop_lang = (linked_client.language if linked_client and linked_client.language else lang)
+        telegram_api.send_message(token, chat_id, STOP_REPLY.get(stop_lang, STOP_REPLY["ru"]), parse_mode=None)
+        return
+
     # 3. Специальные команды покупателя и кнопки постоянного меню
     if lower_text.startswith("/start"):
         parts = norm.split(maxsplit=1)
-        if len(parts) > 1 and parts[1].strip():
+        start_arg = parts[1].strip() if len(parts) > 1 else ""
+        after_start = None
+        if re.match(r"^c_[A-Za-z0-9_-]{1,55}$", start_arg):
+            # ТЗ 01.11: корзина с сайта (/start c_<token>)
+            reply_text = "🧺 Корзина с сайта. Проверьте состав и подтвердите заказ."
+            after_start = lambda: start_cart_link(token, chat_id, company, start_arg[2:], from_user)
+        elif re.match(r"^p_[0-9a-fA-F-]{32,36}$", start_arg):
+            # ТЗ 01.11: карточка товара с сайта (/start p_<id>)
+            reply_text = "Вы открыли товар с сайта."
+            after_start = lambda: start_product_card(settings, token, chat_id, company, start_arg[2:])
+        elif re.match(r"^w_[A-Za-z0-9_-]{20,40}$", start_arg):
+            # ТЗ 01.11: продолжение чата витрины (/start w_<токен>) — склейка в inbox, не телефон и не id клиента
+            reply_text = "Здравствуйте! Продолжаем разговор из чата на сайте. Напишите ваш вопрос."
+        elif len(parts) > 1 and parts[1].strip():
             # /start <client_id>
             reply_text = link_client_by_start(company, chat_id, parts[1].strip())
+            if reply_text == CONTACT_REQUEST_TEXT:
+                main_menu = CONTACT_KEYBOARD
             linked_client = Client.objects.filter(company=company, telegram_chat_id=str(chat_id)).first()
             if linked_client:
                 profile.client = linked_client
@@ -722,6 +851,11 @@ def handle_customer_message(
             reply=reply_text,
             is_voice=is_voice,
         )
+        if after_start:
+            try:
+                after_start()
+            except Exception:
+                logger.exception("start deep link failed")
         return
 
     # Меню: Каталог

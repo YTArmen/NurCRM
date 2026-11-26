@@ -189,12 +189,47 @@ class WarehouseProductGroupSerializer(CompanyBranchReadOnlyMixin, serializers.Mo
         allow_null=True,
         required=False,
     )
-    products_count = serializers.IntegerField(read_only=True)
+    # products_count — товары в группе И во всех вложенных (как в 1С);
+    # products_count_direct — только непосредственно в этой группе.
+    products_count = serializers.SerializerMethodField()
+    products_count_direct = serializers.SerializerMethodField()
 
     class Meta:
         model = m.WarehouseProductGroup
-        fields = ["id", "company", "branch", "warehouse", "name", "parent", "products_count"]
+        fields = ["id", "company", "branch", "warehouse", "name", "parent", "products_count", "products_count_direct"]
         read_only_fields = ["id", "company", "branch"]
+
+    def _group_totals(self, warehouse_id):
+        """{group_id: (direct, total_with_descendants)} по складу; считается один раз на запрос."""
+        cache = self.context.setdefault("_group_totals_cache", {})
+        if warehouse_id in cache:
+            return cache[warehouse_id]
+        from django.db.models import Count
+
+        rows = list(
+            m.WarehouseProductGroup.objects.filter(warehouse_id=warehouse_id)
+            .annotate(c=Count("products", distinct=True))
+            .values_list("id", "parent_id", "c")
+        )
+        direct = {gid: c for gid, _pid, c in rows}
+        parent = {gid: pid for gid, pid, _c in rows}
+        total = dict(direct)
+        for gid, c in direct.items():
+            seen = {gid}
+            pid = parent.get(gid)
+            while pid is not None and pid in total and pid not in seen:
+                total[pid] += c
+                seen.add(pid)
+                pid = parent.get(pid)
+        out = {gid: (direct[gid], total[gid]) for gid in direct}
+        cache[warehouse_id] = out
+        return out
+
+    def get_products_count(self, obj):
+        return self._group_totals(obj.warehouse_id).get(obj.pk, (0, 0))[1]
+
+    def get_products_count_direct(self, obj):
+        return self._group_totals(obj.warehouse_id).get(obj.pk, (0, 0))[0]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -613,7 +648,7 @@ class WarehouseProductSerializer(StockQuantityGuardMixin, CompanyBranchReadOnlyM
         data = super().to_representation(instance)
         data["alternate_barcodes"] = [
             {"barcode": item.barcode, "name": item.name, "quantity": item.quantity}
-            for item in instance.alternate_barcodes.order_by("barcode")
+            for item in sorted(instance.alternate_barcodes.all(), key=lambda x: x.barcode or "")  # perf1311b
         ]
         return data
 

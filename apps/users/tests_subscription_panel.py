@@ -87,7 +87,7 @@ class CompanySubscriptionPanelTests(APITestCase):
         limits = data["limits"]
         self.assertIn("employees", limits)
         self.assertEqual(limits["employees"]["used"], 2)  # owner + cashier
-        self.assertIsNone(limits["employees"]["max"])  # Standard = unlimited
+        self.assertEqual(limits["employees"]["max"], 10)  # «Стандарт» — до 10 сотрудников (26.10.2026)
 
     def test_non_owner_sees_redacted_financial_info(self):
         """§7: Не-владелец не видит цену, currency, last_payment, next_payment_at, auto_renew, cashier_password."""

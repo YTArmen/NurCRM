@@ -432,7 +432,7 @@ def scan_unanswered_leads(threshold_minutes=15):
                     company=lead.company,
                     type="unanswered_lead_alert",
                     data__lead_id=str(lead.id),
-                    created_at__gte=now - timedelta(minutes=15)
+                    created_at__gte=last_msg.created_at,  # одно напоминание на одно входящее
                 ).exists()
 
                 if recent_notif:

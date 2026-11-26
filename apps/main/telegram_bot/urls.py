@@ -9,12 +9,16 @@ from apps.main.telegram_bot.views import (
     TelegramBotCustomersView,
     TelegramBotNotifyShiftClosedView,
     TelegramBotQueueHealthView,
+    TelegramBotOutboxView,
     TelegramBotScenarioListCreateView,
     TelegramBotScenarioDetailView,
     TelegramBotScenarioTestView,
     TelegramBotScenarioSyncMenuView,
     TelegramBotAuditListView,
     TelegramBotCapabilitiesView,
+    BotNotifyOwnerView,
+    TelegramBotOwnerCodeView,
+    TelegramBotOwnerCodeVerifyView,
 )
 from apps.main.telegram_bot.views_public import TelegramWebhookPublicView
 
@@ -32,8 +36,11 @@ urlpatterns = [
     path("scenarios/test/", TelegramBotScenarioTestView.as_view(), name="telegram-bot-scenarios-test"),
     path("scenarios/sync-menu/", TelegramBotScenarioSyncMenuView.as_view(), name="telegram-bot-scenarios-sync-menu"),
     path("audit/", TelegramBotAuditListView.as_view(), name="telegram-bot-audit-list"),
+    path("outbox/", TelegramBotOutboxView.as_view(), name="telegram-bot-outbox"),
     path("queue-health/", TelegramBotQueueHealthView.as_view(), name="telegram-bot-queue-health"),
     path("notify/shift-closed/", TelegramBotNotifyShiftClosedView.as_view(), name="telegram-bot-notify-shift-closed"),
+    path("owner-code/", TelegramBotOwnerCodeView.as_view(), name="telegram-bot-owner-code"),
+    path("owner-code/verify/", TelegramBotOwnerCodeVerifyView.as_view(), name="telegram-bot-owner-code-verify"),
     path("webhook/<uuid:bot_uuid>/", TelegramWebhookPublicView.as_view(), name="telegram-bot-webhook-under-bot"),
     path("webhook/", TelegramWebhookPublicView.as_view(), name="telegram-bot-webhook-under-bot-info"),
 ]

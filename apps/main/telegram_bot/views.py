@@ -486,18 +486,62 @@ class TelegramBotNotifyShiftClosedView(APIView):
 # ТЗ-07 1.1.3 Мониторинг очереди ботов (для команды, не для клиентов)
 # =========================================================================
 
+class TelegramBotOutboxView(APIView):
+    """
+    GET /api/main/telegram-bot/outbox/?client=<uuid>&status=&kind=&page_size=≤100&page=
+    ТЗ кассы 05.11 п.31 / Б-30: журнал сообщений покупателям (отправлено, отложено, пропущено и почему).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from apps.main.telegram_bot.models import TelegramCustomerOutbox
+        company = _get_company(request)
+        if not _can_manage_bot_settings(request.user, company):
+            raise PermissionDenied("Недостаточно прав.")
+        qs = TelegramCustomerOutbox.objects.filter(company=company).select_related("client")
+        p = request.query_params
+        if p.get("client"):
+            try:
+                import uuid as _uuid
+                qs = qs.filter(client_id=_uuid.UUID(p["client"]))
+            except ValueError:
+                raise ValidationError({"client": "Недопустимый id."})
+        if p.get("status"):
+            qs = qs.filter(status=p["status"])
+        if p.get("kind"):
+            qs = qs.filter(kind=p["kind"])
+        try:
+            size = max(1, min(int(p.get("page_size", 50)), 100))
+            page = max(1, int(p.get("page", 1)))
+        except ValueError:
+            raise ValidationError({"page": "Недопустимое значение."})
+        total = qs.count()
+        rows = qs.order_by("-created_at")[(page - 1) * size: page * size]
+        return Response({"count": total, "page": page, "page_size": size, "results": [{
+            "id": str(r.id), "client": {"id": str(r.client_id), "full_name": r.client.full_name} if r.client_id else None,
+            "kind": r.kind, "category": r.category, "language": r.language, "text": r.text, "status": r.status,
+            "reason": r.reason or None, "error": r.error or None, "dedupe_key": r.dedupe_key or None,
+            "send_after": r.send_after.isoformat() if r.send_after else None,
+            "sent_at": r.sent_at.isoformat() if r.sent_at else None, "created_at": r.created_at.isoformat(),
+        } for r in rows]})
+
+
 class TelegramBotQueueHealthView(APIView):
     """
     GET /api/main/telegram-bot/queue-health/
     Длина очереди, задержка последней пробы и последнего обновления, боты с ошибками вебхука.
     """
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         import time
         from django.core.cache import cache
         from apps.main.telegram_bot.tasks import QUEUE_METRICS_KEY, QUEUE_ALERT_SECONDS
 
+        # ТЗ Н-23 (6): доступно владельцу/админу компании (раньше только is_staff → 403)
+        company = _get_company(request)
+        if not _can_manage_bot_settings(request.user, company):
+            raise PermissionDenied("Недостаточно прав.")
         metrics = cache.get(QUEUE_METRICS_KEY) or {}
         server_bots = TelegramBotSettings.objects.filter(mode=TelegramBotSettings.Mode.SERVER)
         probe_sent = metrics.get("probe_sent_at") or 0
@@ -820,3 +864,54 @@ class TelegramBotAuditListView(APIView):
         qs = TelegramBotAudit.objects.filter(company=company).order_by("-created_at")[:limit]
         serializer = TelegramBotAuditSerializer(qs, many=True)
         return Response(serializer.data)
+
+
+# =========================================================================
+# ТЗ Н-23 (1), (2): уведомление владельцу и коды подтверждения владельца
+# =========================================================================
+
+class BotNotifyOwnerView(APIView):
+    """POST /api/main/bot/notify-owner/ {text, buttons?, dedupe_key?}"""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        from apps.main.telegram_bot.services import owner_notify
+        company = _get_company(request)
+        text = str(request.data.get("text") or "").strip()
+        if not text:
+            raise ValidationError({"text": "Обязательное поле."})
+        code, payload = owner_notify.notify_owner(
+            company, text, buttons=request.data.get("buttons"),
+            dedupe_key=request.data.get("dedupe_key") or "",
+        )
+        return Response(payload, status=code)
+
+
+class TelegramBotOwnerCodeView(APIView):
+    """POST /api/main/telegram-bot/owner-code/ — владелец/админ получает одноразовый код (10 мин)."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        from apps.main.telegram_bot.services import owner_notify
+        company = _get_company(request)
+        if not _can_manage_bot_settings(request.user, company):
+            raise PermissionDenied("Недостаточно прав.")
+        code, expires_at = owner_notify.issue_owner_code(company, request.user)
+        return Response({"code": code, "expires_at": expires_at, "ttl_seconds": 600}, status=status.HTTP_201_CREATED)
+
+
+class TelegramBotOwnerCodeVerifyView(APIView):
+    """POST /api/main/telegram-bot/owner-code/verify/ {code, chat_id, from_id?, chat_title?}"""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        from apps.main.telegram_bot.services import owner_notify
+        company = _get_company(request)
+        ok, reason = owner_notify.verify_owner_code(
+            company, request.data.get("code"), str(request.data.get("chat_id") or ""),
+            str(request.data.get("from_id") or ""), str(request.data.get("chat_title") or ""),
+        )
+        if ok:
+            _sync_menu_quietly(company)
+            return Response({"ok": True})
+        return Response({"ok": False, "reason": reason}, status=status.HTTP_400_BAD_REQUEST)

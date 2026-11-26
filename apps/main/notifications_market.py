@@ -60,6 +60,12 @@ def fmt_money(value) -> str:
 
 def owner_like_users(company, branch=None, exclude=None):
     """Владельцы и администраторы компании (опционально — своего филиала)."""
+    from apps.construction.batch_cache import memo, ref
+    key = ("owners", ref(company), ref(branch), tuple(sorted(ref(u) for u in (exclude or []) if u is not None)))
+    return memo(key, lambda: _owner_like_users(company, branch, exclude))
+
+
+def _owner_like_users(company, branch=None, exclude=None):
     from apps.users.models import User
 
     if not company:

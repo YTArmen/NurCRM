@@ -55,6 +55,7 @@ QTY = DecimalField(max_digits=14, decimal_places=3)
 ZERO_QTY = V(Decimal("0.000"), output_field=QTY)
 
 
+from apps.users.permissions import read_only_guard  # noqa: E402
 class SalaryPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = "page_size"
@@ -426,6 +427,7 @@ class ProductionSalarySummaryAPIView(_SalaryBase):
 # ─────────────────────────────────────────────────────────────
 # Выплаты
 # ─────────────────────────────────────────────────────────────
+@read_only_guard("can_edit_salary")
 class ProductionPayoutListCreateAPIView(_SalaryBase):
     """GET /payouts/ — история выплат; POST — выплатить (FIFO + расход кассы)."""
 

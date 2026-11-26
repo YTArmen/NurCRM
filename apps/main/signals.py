@@ -381,6 +381,44 @@ def product_bot_cache_invalidation(sender, instance: Product, **kwargs):
             pass
 
 
+from django.db.models.signals import pre_save  # noqa: E402
+
+
+@receiver(pre_save, sender=ProductVariant)
+def product_variant_keep_stock_on_first(sender, instance: ProductVariant, **kwargs):
+    """
+    09.11: при первом активном варианте остаток товара заменялся суммой вариантов (обычно 0) —
+    товар «пропадал» без следа. Теперь первый вариант без своего остатка забирает остаток товара,
+    а в журнал движения склада пишется запись: сумма по товару не меняется.
+    """
+    if not instance._state.adding or not instance.is_active or (instance.quantity or 0) != 0:
+        return
+    product_id = getattr(instance, "product_id", None)
+    if not product_id or ProductVariant.objects.filter(product_id=product_id, is_active=True).exists():
+        return
+    try:
+        product = Product.objects.filter(pk=product_id).only("id", "quantity", "company_id", "branch_id", "name").first()
+        qty = Decimal(product.quantity or 0) if product else Decimal("0")
+        if qty <= 0:
+            return
+        instance.quantity = qty
+        from django.db import transaction
+        from apps.main.models import StockMovement, record_stock_movement
+
+        author = getattr(product.company, "owner", None)
+        if author is not None:
+            with transaction.atomic():  # сбой записи журнала не ломает сохранение варианта
+                record_stock_movement(
+                    company=product.company, branch=product.branch, type=StockMovement.Type.ADJUSTMENT,
+                    object_id=product.id, product_name=product.name, warehouse="finished_goods",
+                    created_by=author, qty_before=qty, change=Decimal("0"), qty_after=qty,
+                    comment=f"Автоматически: остаток товара ({qty}) перенесён в первый вариант",
+                    ref_type="variant_first",
+                )
+    except Exception:
+        logger.exception("Failed to carry product stock into first variant for product %s", product_id)
+
+
 @receiver(post_save, sender=ProductVariant)
 @receiver(post_delete, sender=ProductVariant)
 def product_variant_sync_product_stock_and_cache(sender, instance: ProductVariant, **kwargs):
@@ -443,3 +481,15 @@ def _connect_market_analytics_invalidation():
 
 
 _connect_market_analytics_invalidation()
+
+
+@receiver(post_save, sender=ProductVariant)
+def tz_n27_variant_back_in_stock(sender, instance, **kwargs):
+    """ТЗ Н-27: остаток варианта стал > 0 — заявки «сообщить о поступлении» помечаются ready."""
+    if instance.is_active and (instance.quantity or 0) > 0:
+        from apps.main.variant_utils import notify_variants_in_stock
+
+        try:
+            notify_variants_in_stock([instance.id])
+        except Exception:  # не мешаем сохранению варианта
+            logger.exception("notify_variants_in_stock failed")

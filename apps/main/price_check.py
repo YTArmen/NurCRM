@@ -30,6 +30,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Product
+from core.http_cache import ETagMixin
 from .views import CompanyBranchRestrictedMixin, _barcode_lookup_variants, _filter_products_company_only
 
 FILTERS = ("all", "loss", "lowMargin", "noCost", "negativeStock")
@@ -313,7 +314,7 @@ class ProductPriceCheckView(CompanyBranchRestrictedMixin, APIView):
         return resp
 
 
-class ProductCatalogVersionView(CompanyBranchRestrictedMixin, APIView):
+class ProductCatalogVersionView(ETagMixin, CompanyBranchRestrictedMixin, APIView):
     """
     GET /api/main/products/catalog-version/ → {"version", "updated_at", "products_total"}
 

@@ -125,11 +125,14 @@ class BranchTransferListSerializer(serializers.ModelSerializer):
 class BranchTransferDetailSerializer(BranchTransferListSerializer):
     seller = serializers.SerializerMethodField()
     items = BranchTransferItemSerializer(many=True, read_only=True)
+    # ТЗ кассы 05.11 п.17: в схеме POST (можно и заголовком Idempotency-Key)
+    idempotency_key = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=128)
 
     class Meta(BranchTransferListSerializer.Meta):
         fields = BranchTransferListSerializer.Meta.fields + [
             "seller",
             "items",
+            "idempotency_key",
         ]
 
     def get_seller(self, obj):

@@ -7,3 +7,4 @@ class MainConfig(AppConfig):
 
     def ready(self):
         import apps.main.signals
+        import apps.main.change_feed  # ТЗ Н-31

@@ -794,8 +794,8 @@ class FeatureAdmin(admin.ModelAdmin):
 
 @admin.register(SubscriptionPlan)
 class SubscriptionPlanAdmin(admin.ModelAdmin):
-    list_display = ("name", "price", "features_display")
-    search_fields = ("name",)
+    list_display = ("name", "code", "price", "features_display")
+    search_fields = ("name", "code")
     filter_horizontal = ("features",)
 
     def features_display(self, obj):
@@ -931,3 +931,46 @@ class FeatureActivationKeyAdmin(admin.ModelAdmin):
     search_fields = ("key", "code", "used_by_company__name", "note")
     raw_id_fields = ("used_by_company", "used_by_user")
     readonly_fields = ("used_by_company", "used_by_user", "used_at", "created_at")
+
+
+# ТЗ кассы 05.11 п.32 / Б-39: прайс пакетов и заявки тарифа «Своё»
+from django.core.cache import cache as _tariff_cache  # noqa: E402
+from apps.users.models import TariffCustomOrder, TariffPack  # noqa: E402
+
+
+@admin.register(TariffPack)
+class TariffPackAdmin(admin.ModelAdmin):
+    list_display = ("code", "group", "activation_fee", "monthly_fee", "trial_days", "position", "is_active")
+    list_editable = ("activation_fee", "monthly_fee", "position", "is_active")
+    search_fields = ("code",)
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        _tariff_cache.delete("public:tariffs:v1")
+
+
+@admin.register(TariffCustomOrder)
+class TariffCustomOrderAdmin(admin.ModelAdmin):
+    list_display = ("created_at", "company", "packs", "amount_monthly", "amount_once", "status")
+    list_filter = ("status",)
+    search_fields = ("company__name",)
+    readonly_fields = ("company", "created_by", "packs", "period", "amount_monthly", "amount_once", "created_at", "updated_at")
+
+
+# elqr1911: счета ELQR (только просмотр)
+from apps.users.models import BillingInvoice as _BillingInvoice
+
+
+@admin.register(_BillingInvoice)
+class BillingInvoiceAdmin(admin.ModelAdmin):
+    list_display = ("created_at", "company", "plan_code", "months", "amount", "status", "provider", "paid_at")
+    list_filter = ("status", "provider", "created_at")
+    search_fields = ("company__name", "id", "bank_txn_id")
+    readonly_fields = [f.name for f in _BillingInvoice._meta.fields if f.name != "note"]
+    exclude = ("qr_image",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

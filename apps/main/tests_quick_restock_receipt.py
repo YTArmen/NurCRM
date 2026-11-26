@@ -75,6 +75,9 @@ class QuickRestockPurchaseBatchTests(TestCase):
         self.product.refresh_from_db()
         self.assertEqual(self.product.quantity, Decimal("110"))  # 10 + 100
         self.assertEqual(self.product.purchase_price, Decimal("50.00"))
+        # Цена продажи при оприходовании не меняется (раньше затиралась закупочной)
+        self.assertEqual(self.product.price, Decimal("60.00"))
+        self.assertEqual(self.product.markup_percent, Decimal("20.00"))  # (60-50)/50
 
         # 3. Проверка привязки поставщика
         self.assertEqual(self.product.client, self.supplier)

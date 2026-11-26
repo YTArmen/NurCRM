@@ -9,6 +9,8 @@ from rest_framework.views import APIView
 
 from apps.main.kassa_views import _company
 from apps.main.models import Product, ProductAlternateBarcode
+from core.exceptions import ApiError, api_exception_handler
+from apps.users.permissions_flags import PosAccess
 
 
 class BarcodeDuplicatesAPIView(APIView):
@@ -60,14 +62,15 @@ class PosCheckoutBatchAPIView(APIView):
     Повтор с тем же ключом — status 200 и уже созданная продажа.
     """
 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, PosAccess]  # ТЗ Н-16
     MAX_ITEMS = 50
 
     def post(self, request):
         from django.http import Http404
         from rest_framework.exceptions import APIException, ValidationError
 
-        from apps.main.kassa_views import PosQuickCheckoutAPIView
+        # ТЗ Н-15: тот же класс, что у pos/checkout/ (упаковки sale_package_id, лимиты долга, график, ответ с остатками)
+        from apps.possync.views import PosQuickCheckoutGuardedAPIView as PosQuickCheckoutAPIView
 
         items = request.data.get("items") if isinstance(request.data, dict) else None
         if not isinstance(items, list) or not items:
@@ -76,6 +79,7 @@ class PosCheckoutBatchAPIView(APIView):
             raise ValidationError({"items": f"Не больше {self.MAX_ITEMS} продаж за запрос."})
 
         view = PosQuickCheckoutAPIView()
+        view.request = request  # ТЗ 26.10: крючки строк (шаг Б-52, цены Б-55) видят заголовок клиента
         results = []
         for raw in items:
             key = str((raw or {}).get("idempotency_key") or "").strip() if isinstance(raw, dict) else ""
@@ -96,7 +100,11 @@ class PosCheckoutBatchAPIView(APIView):
             except Http404:
                 row = {"idempotency_key": key, "status": 404, "detail": {"detail": "Не найдено."}}
             except APIException as e:
-                row = {"idempotency_key": key, "status": e.status_code, "detail": e.detail}
+                detail = e.detail
+                if isinstance(e, ApiError):
+                    # ТЗ Н-15: code/errors[]/total_mismatch и т.п. — как в обычном ответе
+                    detail = api_exception_handler(e, {}).data
+                row = {"idempotency_key": key, "status": e.status_code, "detail": detail}
             results.append(row)
         return Response({"results": results})
 

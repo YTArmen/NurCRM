@@ -33,6 +33,24 @@ class TelegramBotSettings(models.Model):
     owner_chat_id = models.CharField("Chat ID владельца", max_length=64, blank=True, null=True, db_index=True)
     owner_chat_title = models.CharField("Название чата владельца", max_length=255, blank=True, null=True)
     owner_phone = models.CharField("Телефон владельца", max_length=32, blank=True, null=True)
+    # ТЗ Н-23 (2): владелец определяется по from.id Telegram, общий для всех касс компании
+    owner_user_id = models.CharField("Telegram from.id владельца", max_length=64, blank=True, default="", db_default="")
+
+    # ТЗ Б-31/Б-22: «группа заказов» — куда слать уведомления о новых заказах
+    class OrdersRecipients(models.TextChoices):
+        OWNER = "owner", "Владельцу"
+        GROUP = "group", "В группу"
+        BOTH = "both", "Владельцу и в группу"
+
+    orders_chat_id = models.CharField("Chat ID группы заказов", max_length=64, blank=True, null=True, db_index=True)
+    orders_chat_title = models.CharField("Название группы заказов", max_length=255, blank=True, default="")
+    orders_chat_bound_at = models.DateTimeField("Группа заказов привязана", blank=True, null=True)
+    orders_recipients = models.CharField(
+        "Кому слать заказы", max_length=8, choices=OrdersRecipients.choices, default=OrdersRecipients.OWNER,
+    )
+    orders_show_amount = models.BooleanField("Показывать сумму заказа в Telegram", default=False)
+    orders_show_phone = models.BooleanField("Показывать телефон покупателя в Telegram", default=True)
+    orders_last_error = models.CharField("Последняя ошибка отправки заказа", max_length=255, blank=True, default="")
 
     shift_summary_enabled = models.BooleanField("Сводка при закрытии смены", default=True)
     commands_enabled = models.BooleanField("Команды владельца включены", default=True)
@@ -312,6 +330,7 @@ class TelegramBotAudit(models.Model):
         SCENARIO_UPDATE = "scenario_update", "Обновление сценария"
         SCENARIO_DELETE = "scenario_delete", "Удаление сценария"
         AI_ADVICE_APPLY = "ai_advice_apply", "Применение совета ИИ"
+        ORDER_NOTIFIED = "order_notified", "Уведомление о заказе"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(
@@ -347,3 +366,122 @@ class TelegramBotAudit(models.Model):
 
     def __str__(self):
         return f"TelegramBotAudit({self.company_id}, {self.action}, {self.created_at})"
+
+
+# ТЗ Н-23 (1): журнал уведомлений владельцу с ключом идемпотентности
+class TelegramOwnerNotification(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(
+        "users.Company", on_delete=models.CASCADE, related_name="telegram_owner_notifications",
+    )
+    dedupe_key = models.CharField("Ключ идемпотентности", max_length=128, blank=True, default="")
+    text = models.TextField("Текст", blank=True, default="")
+    ok = models.BooleanField("Отправлено", default=False)
+    error = models.CharField("Ошибка", max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "telegram_owner_notifications"
+        indexes = [models.Index(fields=["company", "dedupe_key", "-created_at"], name="main_tgown_notif_idx")]
+
+
+# ТЗ Н-23 (2): одноразовый код подтверждения владельца (хранится хешем)
+class TelegramOwnerCode(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(
+        "users.Company", on_delete=models.CASCADE, related_name="telegram_owner_codes",
+    )
+    code_hash = models.CharField(max_length=64)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    created_by = models.ForeignKey(
+        django_settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "telegram_owner_codes"
+        indexes = [models.Index(fields=["company", "-created_at"], name="main_tgown_code_idx")]
+
+
+# ТЗ Н-24 (5): журнал звонков голосового агента
+class VoiceCall(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="voice_calls")
+    client = models.ForeignKey(
+        "main.Client", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    phone = models.CharField("Номер звонящего", max_length=32, blank=True, default="")
+    duration_seconds = models.PositiveIntegerField(default=0)
+    language = models.CharField(max_length=8, blank=True, default="")
+    outcome = models.CharField("Итог", max_length=32, blank=True, default="", db_index=True)
+    transcript = models.TextField(blank=True, default="")
+    recording_url = models.URLField(max_length=500, blank=True, default="")
+    cost = models.DecimalField(max_digits=10, decimal_places=4, default=Decimal("0"))
+    callback_needed = models.BooleanField("Нужно перезвонить", default=False, db_index=True)
+    callback_done = models.BooleanField(default=False)
+    idempotency_key = models.CharField(max_length=128, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "voice_calls"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["company", "-created_at"], name="main_voicecall_co_idx")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["company", "idempotency_key"], name="main_voicecall_idem_uniq",
+                condition=models.Q(idempotency_key__isnull=False),
+            ),
+        ]
+# ТЗ Б-22: журнал уведомлений о заказах витрины (не больше одного на заказ и чат)
+class TelegramOrderNotice(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="telegram_order_notices")
+    order = models.ForeignKey("main.ShowcaseOrder", on_delete=models.CASCADE, related_name="telegram_notices")
+    chat_id = models.CharField(max_length=64)
+    ok = models.BooleanField(default=False)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    gave_up = models.BooleanField("Не доставлено (повторы закончились)", default=False)
+    error = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "telegram_order_notices"
+        constraints = [models.UniqueConstraint(fields=["order", "chat_id"], name="uniq_tg_order_notice")]
+
+
+# ТЗ кассы 05.11 п.31 / Б-30: журнал сообщений покупателям (очередь и история)
+class TelegramCustomerOutbox(models.Model):
+    class Status(models.TextChoices):
+        QUEUED = "queued", "В очереди"
+        DEFERRED = "deferred", "Отложено (тихие часы)"
+        SENT = "sent", "Отправлено"
+        SKIPPED = "skipped", "Не отправлено"
+        FAILED = "failed", "Ошибка"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="telegram_customer_outbox")
+    client = models.ForeignKey("main.Client", on_delete=models.SET_NULL, null=True, blank=True, related_name="telegram_outbox")
+    chat_id = models.CharField(max_length=64, blank=True, default="")
+    kind = models.CharField("Событие", max_length=32, default="other")  # receipt|debt_changed|debt_paid|rental_due|order_ready|marketing|other
+    category = models.CharField("Категория", max_length=10, default="service")  # service | marketing
+    language = models.CharField(max_length=2, default="ru")
+    text = models.TextField(blank=True, default="")
+    dedupe_key = models.CharField(max_length=128, blank=True, default="")
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.QUEUED, db_index=True)
+    reason = models.CharField("Причина", max_length=64, blank=True, default="")
+    send_after = models.DateTimeField(null=True, blank=True, db_index=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    error = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "telegram_customer_outbox"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["company", "dedupe_key"], condition=~models.Q(dedupe_key=""),
+                                    name="uq_tg_cust_outbox_dedupe"),
+        ]
+        indexes = [models.Index(fields=["company", "client", "-created_at"], name="main_tgcob_client_idx")]

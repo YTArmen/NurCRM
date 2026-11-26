@@ -8,10 +8,15 @@ from django.utils.text import slugify
 import logging
 
 from rest_framework import generics, permissions, status
+from core.http_cache import ETagMixin
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from apps.users.permissions import read_only_guard
+from apps.users.permissions_flags import EmployeesListAccess, denied  # ТЗ Н-16
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.throttling import SimpleRateThrottle
+from rest_framework.exceptions import Throttled, NotFound, PermissionDenied, ValidationError
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -54,6 +59,7 @@ from .serializers import (
     slug_format_error,
     slug_taken_by_other,
     UserUiPreferencesSerializer,
+    _check_dismissal_allowed,
 )
 from .permissions import IsCompanyOwner, IsCompanyOwnerOrAdmin, IsCompanyOwnerOrAdminOrSupervisor, IsPlatformAdmin
 
@@ -255,6 +261,65 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
     permission_classes = [AllowAny]
 
+    # Аудит 12.11: лимит НЕУДАЧНЫХ входов на email (X-Forwarded-For подменяется, общий anon-лимит обходился).
+    LOGIN_FAIL_LIMIT = 10
+    LOGIN_FAIL_WINDOW = 15 * 60
+
+    @staticmethod
+    def _fail_key(request):
+        import hashlib
+        data = getattr(request, "data", {}) or {}
+        ident = str(data.get("email") or data.get("username") or data.get("phone") or "").strip().lower()
+        return "login_fail:" + hashlib.sha256(ident.encode()).hexdigest()[:32] if ident else None
+
+    def _count_fail(self, fkey):
+        if not fkey:
+            return
+        from django.core.cache import cache
+        try:
+            if not cache.add(fkey, 1, self.LOGIN_FAIL_WINDOW):
+                cache.incr(fkey)
+        except Exception:
+            pass
+
+    def post(self, request, *args, **kwargs):
+        from django.core.cache import cache
+        from rest_framework.exceptions import AuthenticationFailed as _AF
+        from apps.users.auth_session import DeviceSlotTaken
+
+        fkey = self._fail_key(request)
+        if fkey and (cache.get(fkey) or 0) >= self.LOGIN_FAIL_LIMIT:
+            return Response(
+                {"code": "too_many_attempts", "detail": "Слишком много неверных попыток входа. Подождите 15 минут или восстановите пароль."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+                headers={"Retry-After": str(self.LOGIN_FAIL_WINDOW)},
+            )
+        try:
+            response = super().post(request, *args, **kwargs)
+        except DeviceSlotTaken as exc:  # 06.11.2026: слот этого типа занят другим устройством
+            return Response(exc.as_payload(), status=status.HTTP_409_CONFLICT)
+        except _AF:
+            self._count_fail(fkey)
+            raise
+        if response.status_code in (400, 401):
+            self._count_fail(fkey)
+        elif response.status_code == 200 and fkey:
+            cache.delete(fkey)
+        if response.status_code == 200:
+            # журнал действий (ТЗ п.8): вход в систему
+            try:
+                from apps.construction.audit import log_change
+
+                ident = request.data.get("email") or request.data.get("username")
+                u = User.objects.filter(email__iexact=str(ident).strip()).select_related("company").first() if ident else None
+                company = (getattr(u, "company", None) or getattr(u, "owned_company", None)) if u else None
+                if company is not None:
+                    log_change(company=company, user=u, action="login", object_type="user", object_id=u.pk,
+                               object_name=(f"{u.first_name} {u.last_name}".strip() or u.email), request=request)
+            except Exception:
+                pass
+        return response
+
 
 class CustomTokenRefreshView(TokenRefreshView):
     """
@@ -286,9 +351,27 @@ class CustomTokenRefreshView(TokenRefreshView):
                 except (TokenError, InvalidToken):
                     pass
 
-            return super().post(request, *args, **kwargs)
+            # 06.11.2026: продление входа и коды причин 401 (apps/users/auth_session.py)
+            from apps.users.auth_session import RefreshRejected, rotate_refresh
+            from apps.users.plan_mini import PlanError, check_client, client_blocked
+
+            if raw_token and client_blocked(request):  # mini2011
+                try:
+                    _uid = RefreshToken(raw_token).payload.get("user_id")
+                    _u = User.objects.filter(pk=_uid).select_related("company", "company__subscription_plan").first() if _uid else None
+                    if _u is not None:
+                        check_client(request, _u)
+                except PlanError as exc:
+                    return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+                except (TokenError, InvalidToken):
+                    pass
+
+            try:
+                return Response(rotate_refresh(raw_token), status=status.HTTP_200_OK)
+            except RefreshRejected as rej:
+                return Response(rej.as_payload(), status=status.HTTP_401_UNAUTHORIZED)
         except (TokenError, InvalidToken):
-            return Response({"detail": "Token is invalid or expired"}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response({"detail": "Token is invalid or expired", "code": "token_invalid"}, status=status.HTTP_401_UNAUTHORIZED)
         except PermissionDenied as exc:
             return Response(
                 {"detail": str(exc.detail) if hasattr(exc, "detail") else str(exc)},
@@ -322,9 +405,76 @@ class CustomTokenRefreshView(TokenRefreshView):
 # employees
 # =========================
 
-class EmployeeListAPIView(generics.ListAPIView):
+class EmployeePagination(PageNumberPagination):
+    """ТЗ 29.10 Б-101: ?page_size=200 отдаёт до 200 сотрудников за запрос."""
+    page_size = 100
+    page_size_query_param = "page_size"
+    max_page_size = 500
+
+
+def _emit_employee_changed(request, employee, action, fields=None):
+    """ТЗ 29.10 Б-101: событие employee_changed в ленту main/changes/ (после коммита, без исключений)."""
+    try:
+        from apps.main.change_feed import record_change
+
+        record_change(
+            employee.company_id, "employee_changed", actor_id=getattr(request.user, "pk", None),
+            entity="employee", entity_id=employee.pk,
+            data={"action": action, "fields": sorted(fields or []), "is_active": employee.is_active},
+        )
+    except Exception:
+        logger.exception("employee_changed not recorded")
+
+
+class _EmployeeThrottled(Throttled):
+    custom_code = "too_many_requests"
+    default_detail = "Слишком много изменений сотрудников. Повторите попытку позже."
+
+
+class EmployeeWriteThrottle(SimpleRateThrottle):
+    """ТЗ 29.10 Б-101 п.6: не больше 30 изменений сотрудников в минуту на компанию."""
+
+    scope = "employee_write"
+    rate = "30/minute"
+
+    def get_cache_key(self, request, view):
+        user = request.user
+        if not user or not user.is_authenticated:
+            return None
+        company = _get_company(user)
+        ident = f"c{company.pk}" if company else f"u{user.pk}"
+        return self.cache_format % {"scope": self.scope, "ident": ident}
+
+    def allow_request(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return super().allow_request(request, view)
+
+    def throttle_failure(self):
+        return False
+
+
+class EmployeeWriteThrottleMixin:
+    def get_throttles(self):
+        return super().get_throttles() + [EmployeeWriteThrottle()]
+
+    def throttled(self, request, wait):
+        raise _EmployeeThrottled(wait=wait)
+
+
+class EmployeeWriteDeniedMixin(EmployeeWriteThrottleMixin):
+    """ТЗ 29.10 Б-101: отказ в правах на сотрудников — 403 permission_denied, required=can_edit_employees."""
+
+    def permission_denied(self, request, message=None, code=None):
+        if request.authenticators and not request.successful_authenticator:
+            return super().permission_denied(request, message, code)
+        raise denied("can_edit_employees", "Недостаточно прав для управления сотрудниками.")
+
+
+class EmployeeListAPIView(ETagMixin, generics.ListAPIView):
     serializer_class = UserListSerializer
-    permission_classes = [IsAuthenticated]
+    pagination_class = EmployeePagination
+    permission_classes = [IsAuthenticated, EmployeesListAccess]  # ТЗ Н-16
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
@@ -335,7 +485,13 @@ class EmployeeListAPIView(generics.ListAPIView):
         if not company:
             return User.objects.none()
 
-        base_qs = _employees_qs(company).filter(is_active=True, deleted_at__isnull=True)
+        base_qs = _employees_qs(company).filter(deleted_at__isnull=True)
+        # ТЗ 29.10 Б-101: ?is_active=all|true|false; по умолчанию — только активные, как раньше
+        flt = (self.request.query_params.get("is_active") or "true").strip().lower()
+        if flt in ("false", "0"):
+            base_qs = base_qs.filter(is_active=False)
+        elif flt != "all":
+            base_qs = base_qs.filter(is_active=True)
         if getattr(user, "is_consulting_salesperson", False):
             base_qs = base_qs.filter(id=user.id)
         elif getattr(user, "is_consulting_supervisor", False):
@@ -349,7 +505,23 @@ class EmployeeListAPIView(generics.ListAPIView):
                 ]
                 base_qs = base_qs.filter(id__in=matching_ids)
 
-        return _apply_branch_filter_to_users(self.request, company, base_qs)
+        return _apply_branch_filter_to_users(self.request, company, base_qs.order_by("first_name", "last_name", "id"))
+
+
+class EmployeeLiteAPIView(APIView):
+    """ТЗ 29.10 Б-101: GET users/employees/lite/ -> [{id, name, role}] только активные,
+    без телефонов и прав; доступен любому вошедшему сотруднику компании."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        company = _get_company(request.user)
+        if not company:
+            return Response([])
+        qs = company.employees.filter(is_active=True, deleted_at__isnull=True).order_by("first_name", "last_name", "id")
+        return Response([
+            {"id": str(u.pk), "name": u.get_full_name(), "role": u.role}
+            for u in qs.only("id", "first_name", "last_name", "email", "role")
+        ])
 
 
 class CurrentUserAPIView(generics.RetrieveUpdateAPIView):
@@ -365,18 +537,27 @@ class CurrentUserAPIView(generics.RetrieveUpdateAPIView):
             .get()
         )
 
+    def retrieve(self, request, *args, **kwargs):  # 13.11: ETag — версия профиля и прав
+        from core.etag import etag_response
 
-class EmployeeCreateAPIView(generics.CreateAPIView):
+        data = self.get_serializer(self.get_object()).data
+        return etag_response(request, data)
+
+
+@read_only_guard("can_edit_employees")
+class EmployeeCreateAPIView(EmployeeWriteDeniedMixin, generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = EmployeeCreateSerializer
     permission_classes = [IsAuthenticated, IsCompanyOwnerOrAdminOrSupervisor]
 
     def perform_create(self, serializer):
-        serializer.save()
+        obj = serializer.save()
+        _emit_employee_changed(self.request, obj, "created")
 
 
 # ✅ SOFT DELETE
-class EmployeeDestroyAPIView(generics.DestroyAPIView):
+@read_only_guard("can_edit_employees")
+class EmployeeDestroyAPIView(EmployeeWriteDeniedMixin, generics.DestroyAPIView):
     queryset = User.objects.all()
     serializer_class = UserListSerializer
     permission_classes = [IsAuthenticated, IsCompanyOwner]
@@ -404,11 +585,14 @@ class EmployeeDestroyAPIView(generics.DestroyAPIView):
         if getattr(employee, "deleted_at", None):
             return Response(status=status.HTTP_204_NO_CONTENT)
 
+        _check_dismissal_allowed(request, employee)  # ТЗ 29.10 Б-101: 409 last_admin / open_shift
         employee.soft_delete(by_user=request.user)
+        _emit_employee_changed(request, employee, "deleted")
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
+@read_only_guard("can_edit_employees")
+class EmployeeDetailAPIView(EmployeeWriteDeniedMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = User.objects.all()
     serializer_class = EmployeeUpdateSerializer
     permission_classes = [IsAuthenticated, IsCompanyOwnerOrAdminOrSupervisor]
@@ -424,9 +608,11 @@ class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
 
         base_qs = (
             _employees_qs(company)
-            .filter(is_active=True, deleted_at__isnull=True)
+            .filter(deleted_at__isnull=True)
             .exclude(id=user.id)
         )
+        if self.request.method == "DELETE":
+            base_qs = base_qs.filter(is_active=True)
         if getattr(user, "is_consulting_supervisor", False):
             my_regions = user.get_consulting_region_codes()
             matching_ids = [
@@ -438,6 +624,26 @@ class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
             return User.objects.none()
 
         return _apply_branch_filter_to_users(self.request, company, base_qs)
+
+    def perform_update(self, serializer):
+        # журнал действий (ТЗ п.8): изменение прав и роли сотрудника
+        from apps.construction.audit import log_request, user_rights
+
+        before = user_rights(serializer.instance)
+        was_active = serializer.instance.is_active
+        changed = list(serializer.validated_data.keys())
+        with transaction.atomic():
+            obj = serializer.save()
+        action = "updated"
+        if "is_active" in changed and obj.is_active != was_active:
+            action = "restored" if obj.is_active else "dismissed"
+        _emit_employee_changed(self.request, obj, action, changed)
+        try:
+            log_request(self.request, "rights_change", "user", obj.pk,
+                        (f"{obj.first_name} {obj.last_name}".strip() or obj.email),
+                        before=before, after=user_rights(obj))
+        except Exception:
+            pass
 
     def destroy(self, request, *args, **kwargs):
         if getattr(request.user, "role", None) == "supervisor":
@@ -454,7 +660,9 @@ class EmployeeDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
         if getattr(employee, "deleted_at", None):
             return Response(status=status.HTTP_204_NO_CONTENT)
 
+        _check_dismissal_allowed(request, employee)  # ТЗ 29.10 Б-101: 409 last_admin / open_shift
         employee.soft_delete(by_user=request.user)
+        _emit_employee_changed(request, employee, "deleted")
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -516,7 +724,8 @@ def _emit_company_updated(company, changed_fields):
         )
 
 
-class CompanyDetailAPIView(generics.RetrieveUpdateAPIView):
+@read_only_guard("can_edit_settings")
+class CompanyDetailAPIView(ETagMixin, generics.RetrieveUpdateAPIView):
     """
     GET   /api/users/company/
     PATCH /api/users/company/  — только владелец (например {"market_sphere": "clothing"})
@@ -585,10 +794,18 @@ class ChangePasswordView(generics.UpdateAPIView):
         return Response({"detail": "Пароль успешно изменён."}, status=status.HTTP_200_OK)
 
 
+@read_only_guard("can_edit_settings")
 class CompanyUpdateAPIView(generics.RetrieveUpdateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = CompanyUpdateSerializer
     queryset = Company.objects.none()
+
+    def get_permissions(self):
+        # ТЗ 12.18: читать могут все сотрудники, менять данные компании - владелец или администратор
+        # (на сайте вкладку «Компания» видят обе роли).
+        if self.request.method in ("GET", "HEAD", "OPTIONS"):
+            return [IsAuthenticated()]
+        return [IsAuthenticated(), IsCompanyOwnerOrAdmin()]
 
     def get_object(self):
         company = _get_company(self.request.user)
@@ -617,7 +834,9 @@ class CompanyAddonListAPIView(APIView):
         company = _get_company(request.user)
         if company is None:
             raise NotFound("Вы не принадлежите ни к одной компании.")
-        return Response(company_addons_payload(company))
+        from core.etag import etag_response
+
+        return etag_response(request, company_addons_payload(company))
 
 
 class CompanyCheckSlugAPIView(APIView):
@@ -644,7 +863,7 @@ class CompanyCheckSlugAPIView(APIView):
 # roles
 # =========================
 
-class RoleListAPIView(generics.ListAPIView):
+class RoleListAPIView(ETagMixin, generics.ListAPIView):
     serializer_class = CustomRoleSerializer
     permission_classes = [IsAuthenticated]
 
@@ -662,18 +881,20 @@ class RoleListAPIView(generics.ListAPIView):
         return Response(data)
 
 
+@read_only_guard("can_edit_employees")
 class CustomRoleCreateAPIView(generics.CreateAPIView):
     serializer_class = CustomRoleSerializer
-    permission_classes = [IsAuthenticated, IsCompanyOwner]
+    permission_classes = [IsAuthenticated, IsCompanyOwnerOrAdmin]
 
     def perform_create(self, serializer):
         company = _get_company(self.request.user)
         serializer.save(company=company)
 
 
+@read_only_guard("can_edit_employees")
 class CustomRoleDetailAPIView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = CustomRoleSerializer
-    permission_classes = [IsAuthenticated, IsCompanyOwner]
+    permission_classes = [IsAuthenticated, IsCompanyOwnerOrAdmin]
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
@@ -786,10 +1007,8 @@ class CompanyListAPIView(generics.ListAPIView):
 
         user = self.request.user
 
-        if user.is_superuser:
-            return Company.objects.all()
-
-        if getattr(user, "role", None) == "admin":
+        # Аудит 12.11: role=="admin" — это администратор ВНУТРИ компании, а не платформы.
+        if user.is_superuser or getattr(user, "is_platform_admin", False):
             return Company.objects.all()
 
         if getattr(user, "owned_company_id", None):
@@ -808,7 +1027,7 @@ class CompanySubscriptionAdminAPIView(generics.RetrieveUpdateAPIView):
     def get_queryset(self):
         user = self.request.user
 
-        if user.is_superuser or getattr(user, "role", None) == "admin":
+        if user.is_superuser or getattr(user, "is_platform_admin", False):
             return Company.objects.all()
 
         if getattr(user, "owned_company_id", None):
@@ -817,9 +1036,10 @@ class CompanySubscriptionAdminAPIView(generics.RetrieveUpdateAPIView):
         return Company.objects.none()
 
     def perform_update(self, serializer):
+        # Аудит 12.11: подписку меняет только платформа (владелец сам себе не продлевает).
         user = self.request.user
-        if not (user.is_superuser or getattr(user, "role", None) == "admin" or getattr(user, "owned_company_id", None)):
-            raise PermissionDenied("У вас нет прав изменять подписку компании.")
+        if not (user.is_superuser or getattr(user, "is_platform_admin", False)):
+            raise PermissionDenied("Подписку меняет только администратор платформы.")
         serializer.save()
 
 
@@ -853,3 +1073,51 @@ class UserUiPreferencesAPIView(APIView):
     def put(self, request, *args, **kwargs):
         return self.patch(request, *args, **kwargs)
 
+
+
+class AuthDevicesAPIView(APIView):
+    """06.11.2026: GET users/auth/devices/ — мои устройства по слотам (живые входы), current — это устройство."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.utils import timezone as _tz
+
+        from apps.users.auth_session import SID_CLAIM, SLOTS, device_payload
+        from apps.users.models import AuthSession
+
+        current = None
+        try:
+            current = request.auth.payload.get(SID_CLAIM) if request.auth is not None else None
+        except AttributeError:
+            current = None
+        rows = AuthSession.objects.filter(user=request.user, revoked_at__isnull=True,
+                                          expires_at__gt=_tz.now()).order_by("slot", "-last_seen_at")
+        results = []
+        for s in rows:
+            item = device_payload(s)
+            item["current"] = str(s.id) == str(current)
+            results.append(item)
+        return Response({"slots": list(SLOTS), "results": results})
+
+
+class AuthDeviceDetailAPIView(APIView):
+    """06.11.2026: DELETE users/auth/devices/{id}/ — выйти с этого устройства (своего)."""
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk):
+        from apps.users.auth_session import SID_CLAIM, SLOT_TITLES, revoke_sessions
+        from apps.users.models import AuthSession
+
+        sess = AuthSession.objects.filter(pk=pk, user=request.user, revoked_at__isnull=True).first()
+        if sess is None:
+            return Response({"detail": "Устройство не найдено.", "code": "device_not_found"}, status=status.HTTP_404_NOT_FOUND)
+        by = ""
+        try:
+            cur_id = request.auth.payload.get(SID_CLAIM) if request.auth is not None else None
+            cur = AuthSession.objects.filter(pk=cur_id).first() if cur_id else None
+            if cur is not None:
+                by = cur.device_name or SLOT_TITLES.get(cur.slot, "")
+        except (AttributeError, ValueError):
+            pass
+        revoke_sessions([sess], "logged_out_remotely", by)
+        return Response(status=status.HTTP_204_NO_CONTENT)

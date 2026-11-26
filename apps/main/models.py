@@ -28,13 +28,49 @@ from apps.consalting.models import ServicesConsalting
 # from apps.construction.models import Department   # УДАЛЕНО: отделы больше не используются
 
 _Q2 = Decimal("0.01")
+_Q4 = Decimal("0.0001")
 def _money(x: Decimal) -> Decimal:
     return (x or Decimal("0")).quantize(_Q2, rounding=ROUND_HALF_UP)
+
+
+def _cost4(x: Decimal) -> Decimal:
+    """ТЗ 31.10 п.19: себестоимость/закупка за единицу — 4 знака (деньги округляются уже в итоге)."""
+    return Decimal(str(x or 0)).quantize(_Q4, rounding=ROUND_HALF_UP)
+
+
+class PreciseDecimalField(models.DecimalField):
+    """
+    ТЗ 31.10 п.19: цена закупки с 4 знаками на больших таблицах (товары, строки продаж).
+    На Postgres колонка — numeric без ограничения точности: смена numeric(11,3) → numeric
+    не переписывает таблицу (только каталог), а numeric(14,4) переписал бы сотни МБ под
+    эксклюзивной блокировкой. Поэтому округление до decimal_places делает Django при записи
+    (save, update, bulk_create). В миграциях поле выглядит как обычный DecimalField.
+    """
+
+    def get_db_prep_value(self, value, connection, prepared=False):
+        if value is not None and not hasattr(value, "resolve_expression"):
+            try:
+                value = Decimal(str(value)).quantize(Decimal(1).scaleb(-self.decimal_places), rounding=ROUND_HALF_UP)
+            except Exception:
+                pass
+        return super().get_db_prep_value(value, connection, prepared)
+
+    def deconstruct(self):
+        name, _path, args, kwargs = super().deconstruct()
+        return name, "django.db.models.DecimalField", args, kwargs
 
 
 def product_image_upload_to(instance, filename: str) -> str:
     # всегда сохраняем в .webp с новым именем
     return f"products/{instance.product_id}/{uuid.uuid4().hex}.webp"
+
+
+def product_image_thumb_upload_to(instance, filename: str) -> str:
+    # 03.11 front-market: миниатюра рядом с оригиналом, в подпапке thumbs
+    return f"products/{instance.product_id}/thumbs/{uuid.uuid4().hex}.webp"
+
+
+PRODUCT_THUMB_SIZE = 320  # px по большей стороне
 
 
 # ==========================
@@ -227,6 +263,15 @@ class Task(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # --- ТЗ 26.10 Б-62 задача (каркас tz26; логика — в apps/main/tz26/) ---
+    priority = models.CharField(max_length=10, default="normal", db_default="normal")  # low|normal|high
+    remind_at = models.DateTimeField(null=True, blank=True)
+    reminded_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_tasks")
+    completed_at = models.DateTimeField(null=True, blank=True)
+    report = models.TextField(blank=True, default="", db_default="")
+    source = models.CharField(max_length=20, blank=True, default="", db_default="")  # web|pos|mobile|voice_ai|telegram
+
     class Meta:
         verbose_name = 'Задача'
         verbose_name_plural = 'Задачи'
@@ -399,6 +444,8 @@ class GlobalProduct(models.Model):
     brand = models.ForeignKey(GlobalBrand, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
     category = models.ForeignKey(GlobalCategory, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
     created_at = models.DateTimeField(auto_now_add=True)
+    # ТЗ 29.10 Б-97: для выгрузки справочника пачками (?since=)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True, db_index=True)
 
     class Meta:
         verbose_name = "Глобальный товар"
@@ -742,6 +789,8 @@ class Product(models.Model):
     article = models.CharField("Артикул", max_length=64, blank=True)
 
     name = models.CharField("Название", max_length=255)
+    # ТЗ Н-33: таблица размеров для публичной карточки витрины
+    size_chart = models.ForeignKey("SizeChart", on_delete=models.SET_NULL, null=True, blank=True, related_name="products")
     description = models.TextField("Описание", blank=True, null=True)
     barcode = models.CharField("Штрихкод", max_length=64, null=True, blank=True)
 
@@ -802,10 +851,11 @@ class Product(models.Model):
     )
 
     # ---- Цены / наценка / скидка ----
-    purchase_price = models.DecimalField(
+    # ТЗ 31.10 п.19: 4 знака (было 3), колонка на Postgres — numeric без ограничения, см. PreciseDecimalField
+    purchase_price = PreciseDecimalField(
         "Цена закупки",
-        max_digits=11,
-        decimal_places=3,
+        max_digits=14,
+        decimal_places=4,
         default=0,
         help_text=(
             "За одну учётную единицу товара (как в поле «Количество/Остаток» и unit). "
@@ -879,6 +929,10 @@ class Product(models.Model):
         null=True,
         help_text="Номер ПЛУ для весов (можно не заполнять)",
     )
+    # 13.11.2026: электроника — серийные номера и гарантия
+    track_serials = models.BooleanField("Учёт серийных номеров", default=False, db_default=False)
+    warranty_months = models.PositiveSmallIntegerField("Гарантия, мес.", null=True, blank=True)
+    vat_rate = models.DecimalField("Ставка НДС, %", max_digits=5, decimal_places=2, null=True, blank=True)  # 13.11.2026 П0-1
 
     # ---- Страна и прочее ----
     country = models.CharField(
@@ -929,6 +983,13 @@ class Product(models.Model):
     created_at = models.DateTimeField("Создан", auto_now_add=True)
     updated_at = models.DateTimeField("Обновлён", auto_now=True)
 
+    # --- ТЗ 26.10 Б-52, Б-57 товар (каркас tz26; логика — в apps/main/tz26/) ---
+    unit_code = models.CharField("Единица (код)", max_length=8, blank=True, default="", db_default="")
+    quantity_step = models.DecimalField("Шаг количества", max_digits=12, decimal_places=3, null=True, blank=True)
+    min_sale_quantity = models.DecimalField("Минимум продажи", max_digits=12, decimal_places=3, null=True, blank=True)
+    quantity_decimals = models.PositiveSmallIntegerField("Знаков в количестве", null=True, blank=True)
+    attributes = models.JSONField("Атрибуты", default=list, blank=True)
+
     objects = ProductQuerySet.as_manager()
 
     # ---- Порядковый номер для стабильной пагинации ----
@@ -945,6 +1006,8 @@ class Product(models.Model):
         db_index=True,
         help_text="Автоинкремент внутри компании для стабильной сортировки/пагинации.",
     )
+
+    is_test = models.BooleanField("Тестовые данные", default=False, db_default=False)  # П0-4 К-18 Product
 
     class Meta:
         verbose_name = "Товар"
@@ -1012,8 +1075,26 @@ class Product(models.Model):
             if sm_rel and sm_rel.exists():
                 has_history = True
         if has_history:
+            # Удалённый товар освобождает PLU и штрихкоды: их можно сразу отдать другому товару
+            # (в строках чеков штрихкод сохранён в barcode_snapshot).
+            # Через update(), а не save(): save() выдал бы весовому товару новый PLU.
+            from django.core.cache import cache
+
+            old_plu = self.plu
+            old_barcodes = [self.barcode, *self.alternate_barcodes.values_list("barcode", flat=True)]
             self.status = self.Status.ARCHIVED
-            self.save(update_fields=["status", "updated_at"])
+            self.plu = None
+            self.barcode = None
+            self.updated_at = timezone.now()
+            Product.objects.filter(pk=self.pk).update(
+                status=self.status, plu=None, barcode=None, updated_at=self.updated_at
+            )
+            self.alternate_barcodes.all().delete()
+            if old_plu is not None:
+                cache.delete(f"product_plu:{self.company_id}:{old_plu}")
+            for bc in old_barcodes:
+                if (bc or "").strip():
+                    cache.delete(f"product_barcode:{self.company_id}:{bc.strip()}")
             # Для кассы архивный товар — удалённый: убирает его из каталога при синхронизации.
             ProductDeletion.objects.create(company_id=self.company_id, product_id=self.pk)
             return 1, {self._meta.label: 1}
@@ -1038,6 +1119,9 @@ class Product(models.Model):
     
     # --------- внутренние методы ---------
     def _auto_generate_plu(self):
+        if self.status == self.Status.ARCHIVED:  # 13.11: архивный товар не держит PLU
+            self.plu = None
+            return
         if not self.is_weight:
             return
         if self.plu is not None or not self.company_id:
@@ -1082,22 +1166,46 @@ class Product(models.Model):
         self.seq = max_seq + 1
 
     def _recalc_price(self):
+        """
+        Б-06 (27.10.2026): цена продажи (price) — источник истины. Сервер никогда не
+        пересчитывает её сам при сохранении существующего товара: раньше любой save()
+        с markup_percent > 0 перезаписывал price = purchase_price × (1 + наценка), и после
+        смены закупки (PATCH purchase_price, приход) касса продавала по «новой» цене
+        (150→160 при наценке 30 % давало 195→205). Теперь:
+          - существующий товар: price только квантуется; пересчёт из наценки — только
+            если код-путь явно выставил `_recalc_price_from_markup = True`
+            (PATCH {"recalc_price": true}, строка прихода с recalc_price);
+          - новый товар: как раньше — если задана наценка, а цена нет, цена считается
+            из закупки и наценки (так создают карточки импорт и create-by-barcode).
+        """
         base = self.purchase_price or Decimal("0")
         percent = self.markup_percent or Decimal("0")
+
+        def _q(v):
+            return Decimal(v).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        if getattr(self, "_recalc_price_from_markup", False):
+            self.price = _q(base * (Decimal("1") + percent / Decimal("100")))
+            return
 
         # Если цена задана вручную в конкретном код-пути (например create-manual),
         # не пересчитываем её из наценки, чтобы не появлялись «копейки» из-за округлений.
         if getattr(self, "_manual_price", False) and self.price is not None:
-            self.price = Decimal(self.price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            self.price = _q(self.price)
             return
 
         # ✅ уважай ручную цену даже если price=0
         if self.price is not None and percent == Decimal("0"):
-            self.price = Decimal(self.price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            self.price = _q(self.price)
             return
 
-        result = base * (Decimal("1") + percent / Decimal("100"))
-        self.price = result.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if not self._state.adding:
+            # Существующий товар: цену не трогаем.
+            if self.price is not None:
+                self.price = _q(self.price)
+            return
+
+        self.price = _q(base * (Decimal("1") + percent / Decimal("100")))
 
     def clean(self):
         if self.kind != self.Kind.PRODUCT:
@@ -1144,6 +1252,19 @@ class Product(models.Model):
                 assert_barcode_unique_in_company(
                     self.company_id, self.barcode, exclude_product_id=self.pk, branch_id=self.branch_id
                 )
+            if kwargs.get("update_fields") is not None:
+                update_fields = set(kwargs["update_fields"])
+                if self.seq is not None:
+                    update_fields.add("seq")
+                if self.code is not None:
+                    update_fields.add("code")
+                if self.plu is not None or old_plu is not None:  # 13.11: архив пишет plu=None
+                    update_fields.add("plu")
+                # Б-46 (27.10.2026): auto_now не пишется в БД, если поля нет в update_fields.
+                # Любое частичное сохранение товара двигает updated_at — иначе кассы,
+                # следящие за каталогом по updated_at, не узнают об изменении.
+                update_fields.add("updated_at")
+                kwargs["update_fields"] = list(update_fields)
             super().save(*args, **kwargs)
             
         # Инвалидация кэша после сохранения
@@ -1490,6 +1611,19 @@ class ProductPackage(models.Model):
         ),
     )
 
+    # G8 (аудит 03.11): у комплекта (kind=bundle) строка packages — это товар состава. Раньше хранилось
+    # только название (name); теперь можно и ссылку. NULL — старые строки «по названию», работают как раньше.
+    # db_constraint=False: без внешнего ключа в базе (миграция не трогает горячую main_product).
+    component = models.ForeignKey(
+        "main.Product",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_constraint=False,
+        related_name="+",
+        verbose_name="Товар состава (комплект)",
+    )
+
     created_at = models.DateTimeField("Создано", auto_now_add=True)
 
     class Meta:
@@ -1537,8 +1671,15 @@ class ProductImage(models.Model):
     product = models.ForeignKey("Product", on_delete=models.CASCADE, related_name="images", verbose_name="Товар")
 
     image = models.ImageField(upload_to=product_image_upload_to, null=True, blank=True, verbose_name="Изображение (WebP)")
+    # 03.11 front-market: миниатюра 320px WebP для кассы и списков (оригиналы бывают 4080×3072)
+    thumb = models.ImageField(
+        upload_to=product_image_thumb_upload_to, null=True, blank=True, max_length=255,
+        verbose_name="Миниатюра (WebP 320px)",
+    )
     alt = models.CharField(max_length=255, blank=True, verbose_name="Alt-текст")
     is_primary = models.BooleanField(default=False, verbose_name="Основное изображение")
+    # ТЗ Н-26: фото конкретного цвета (название цвета варианта), пусто = общее фото
+    color = models.CharField("Цвет", max_length=64, blank=True, default="", db_default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -1588,21 +1729,55 @@ class ProductImage(models.Model):
                 self.branch_id = self.product.branch_id
 
         # Если загружен файл (любой формат) — преобразуем в WebP и перезапишем self.image
+        old_thumb = None
         if self.image and hasattr(self.image, "file"):
+            new_upload = not getattr(self.image, "_committed", True)
             try:
                 self.image = self._convert_to_webp(self.image)
             except Exception as e:
                 raise ValidationError({"image": f"Не удалось конвертировать в WebP: {e}"})
+            # 03.11: новое фото — новая миниатюра; не вышло — фото всё равно сохраняем (команда доделает)
+            if new_upload or not self.thumb:
+                old_thumb = self.thumb.name if self.thumb else None
+                try:
+                    self.image.seek(0)
+                    self.thumb = self.make_thumb_content(self.image)
+                except Exception:
+                    self.thumb = None
+                self.image.seek(0)
 
         super().save(*args, **kwargs)
+        if old_thumb and old_thumb != (self.thumb.name if self.thumb else None):
+            try:
+                st = self._meta.get_field("thumb").storage
+                if st.exists(old_thumb):
+                    st.delete(old_thumb)
+            except Exception:
+                pass
 
     def delete(self, *args, **kwargs):
-        storage = self.image.storage if self.image else None
-        name = self.image.name if self.image else None
+        files = [(f.storage, f.name) for f in (self.image, self.thumb) if f]
         super().delete(*args, **kwargs)
-        # удалим файл из хранилища
-        if storage and name and storage.exists(name):
-            storage.delete(name)
+        # удалим файлы из хранилища
+        for storage, name in files:
+            if storage and name and storage.exists(name):
+                storage.delete(name)
+
+    @staticmethod
+    def make_thumb_content(fileobj, size: int = PRODUCT_THUMB_SIZE) -> ContentFile:
+        """Миниатюра WebP: большая сторона не больше size, пропорции сохраняются."""
+        fileobj.seek(0)
+        im = Image.open(fileobj)
+        im.draft("RGB", (size * 2, size * 2))  # JPEG: читаем сразу уменьшенным — меньше памяти
+        # поворот по EXIF не делаем: оригинал (WebP без EXIF) показывается так же
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        im.thumbnail((size, size), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="WEBP", quality=78, method=4)
+        content = ContentFile(buf.getvalue())
+        content.name = f"{uuid.uuid4().hex}.webp"
+        return content
 
     @staticmethod
     def _convert_to_webp(field_file) -> ContentFile:
@@ -1754,6 +1929,22 @@ def scale_amount_step(company) -> Decimal:
     """Шаг, которым весы печатают сумму: целые сомы либо тыйыны (2 знака)."""
     unit = getattr(company, "scale_barcode_amount_unit", None)
     return Decimal("1") if unit == SCALE_BARCODE_AMOUNT_UNIT_SOM else Decimal("0.01")
+
+
+def line_total_like_check(item) -> Decimal:
+    """
+    ТЗ кассы 05.11 п.5: сумма строки (после скидки строки) по тому же правилу, что subtotal/total:
+    весовая строка — вниз до шага весов компании (cart_line_base), остальные — HALF_UP до копейки.
+    """
+    disc = Decimal(str(getattr(item, "line_discount", None) or 0))
+    raw = Decimal(str(item.unit_price or 0)) * Decimal(str(item.quantity or 0))
+    # целая сумма не меняется ни одним правилом — без запросов к товару и компании
+    if raw == raw.to_integral_value() or getattr(item, "product_id", None) is None:
+        return (raw - disc).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if not getattr(item.product, "is_weight", False):
+        return (raw - disc).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    base = cart_line_base(item, scale_amount_step(item.company))
+    return (base - disc).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def cart_line_base(item, amount_step: Decimal) -> Decimal:
@@ -1924,7 +2115,8 @@ class Cart(models.Model):
         if self.shift_id:
             if self.company_id and self.shift.company_id != self.company_id:
                 raise ValidationError({"shift": "Смена другой компании."})
-            if self.branch_id is not None and (self.shift.branch_id or None) != (self.branch_id or None):
+            _sb = self.shift.branch_id or getattr(self.shift.cashbox, "branch_id", None)  # ТЗ 31.10 п.13
+            if self.branch_id is not None and _sb is not None and _sb != self.branch_id:
                 raise ValidationError({"shift": "Смена другого филиала."})
 
     # Поля, которые пишет recalc(): это вычисляемые суммы, они не участвуют
@@ -2019,7 +2211,9 @@ class Cart(models.Model):
         for item in items:
             base = cart_line_base(item, amount_step)
             disc = Decimal(str(item.line_discount or 0))
-            disc = min(max(disc, Decimal("0")), base)
+            # 29.10: у строки «Расход» с минусом base < 0 — скидка не может быть отрицательной,
+            # иначе минус строки возвращался «скидкой» и итог чека не уменьшался (разница с кассой).
+            disc = min(max(disc, Decimal("0")), max(base, Decimal("0")))
             subtotal_raw += base
             line_discount_raw += disc
 
@@ -2040,6 +2234,11 @@ class Cart(models.Model):
         taxable_base = subtotal - discount_total
         tax_total = _money(self._calc_tax(taxable_base))
         total = _money(subtotal - discount_total + tax_total)
+        # Аудит 12.11: сумма не влезает в DecimalField(12,2) → раньше 500 «numeric field overflow».
+        _lim = Decimal("9999999999.99")
+        if abs(subtotal) > _lim or abs(total) > _lim or abs(discount_total) > _lim:
+            from rest_framework.exceptions import ValidationError as _DRFValidationError
+            raise _DRFValidationError({"detail": "Слишком большая сумма чека. Проверьте количество и цену.", "code": "amount_too_large"})
 
         # Частый случай (переключение вкладок корзин): суммы не изменились —
         # не трогаем БД, не бампим updated_at, не шлём лишний UPDATE.
@@ -2068,6 +2267,7 @@ class DiscountSource(models.TextChoices):
 
 
 class CartItem(models.Model):
+    serial_numbers = models.JSONField("Серийные номера", null=True, blank=True)  # 13.11.2026
     DiscountSource = DiscountSource
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -2125,6 +2325,13 @@ class CartItem(models.Model):
         verbose_name="Оптовая позиция",
     )
 
+    # --- ТЗ 26.10 Б-53, Б-55 строка корзины (каркас tz26; логика — в apps/main/tz26/) ---
+    sale_unit = models.ForeignKey("main.ProductSaleUnit", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    base_quantity = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
+    price_source = models.CharField(max_length=40, blank=True, default="", db_default="")
+    base_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+
+    variant_name = models.CharField("Вариант (вкус/цвет)", max_length=128, blank=True, default="", db_default="")  # vn2111
     class Meta:
         constraints = [
             models.UniqueConstraint(
@@ -2341,6 +2548,13 @@ class Sale(models.Model):
     )
 
     client = models.ForeignKey("main.Client", on_delete=models.SET_NULL, null=True, blank=True, related_name="sale")
+    # --- ТЗ 26.10 Б-56, Б-67, Б-80 продажа (каркас tz26; логика — в apps/main/tz26/) ---
+    client_object = models.ForeignKey("main.ClientObject", on_delete=models.SET_NULL, null=True, blank=True, related_name="sales")
+    source = models.CharField("Источник", max_length=20, blank=True, default="", db_default="", db_index=True)
+    device_key = models.CharField("Устройство", max_length=64, blank=True, default="", db_default="", db_index=True)
+    device_name = models.CharField(max_length=64, blank=True, default="", db_default="")
+    conversation_id = models.UUIDField(null=True, blank=True)
+
 
     # Консультант и комиссия от выручки
     consultant = models.ForeignKey(
@@ -2411,6 +2625,17 @@ class Sale(models.Model):
     is_offline = models.BooleanField(default=False, verbose_name="Продажа без связи")
     received_at = models.DateTimeField(null=True, blank=True, verbose_name="Принята сервером")
 
+    # 13.11.2026 П0-1: реквизиты чека ККМ, которые записала касса (apps/main/fiscal_kassa.py)
+    fiscal_status = models.CharField("Фискальный статус", max_length=16, default="none", db_default="none")
+    fiscal_doc_number = models.CharField("Номер ФД", max_length=32, blank=True, default="", db_default="")
+    fiscal_memory_number = models.CharField("Номер ФМ", max_length=32, blank=True, default="", db_default="")
+    kkm_reg_number = models.CharField("РН ККМ", max_length=32, blank=True, default="", db_default="")
+    fiscal_sign = models.CharField("Фискальный признак", max_length=64, blank=True, default="", db_default="")
+    fiscal_qr_url = models.CharField("QR чека", max_length=512, blank=True, default="", db_default="")
+    kkm_shift_id = models.CharField("Смена ККМ", max_length=32, blank=True, default="", db_default="")
+    fiscal_error = models.CharField("Ошибка фискализации", max_length=255, blank=True, default="", db_default="")
+    fiscal_at = models.DateTimeField("Время фискализации", null=True, blank=True)
+
     # Фискализация eKassa (после успешной оплаты, вне транзакции чекаута)
     ekassa_fiscal = models.JSONField(
         null=True,
@@ -2418,6 +2643,8 @@ class Sale(models.Model):
         verbose_name="eKassa: фискальный чек",
         help_text="Статус, newid, номер ФД и служебные данные ответа API.",
     )
+
+    is_test = models.BooleanField("Тестовые данные", default=False, db_default=False)  # П0-4 К-18 Sale
 
     class Meta:
         indexes = [
@@ -2461,7 +2688,9 @@ class Sale(models.Model):
         if self.shift_id:
             if self.company_id and self.shift.company_id != self.company_id:
                 raise ValidationError({"shift": "Смена другой компании."})
-            if (self.branch_id or None) != (self.shift.branch_id or None):
+            # ТЗ 31.10 п.13: у смены без филиала (общая касса) чек может иметь филиал кассира
+            _sb = self.shift.branch_id or getattr(self.shift.cashbox, "branch_id", None)
+            if _sb is not None and (self.branch_id or None) != _sb:
                 raise ValidationError({"shift": "Смена другого филиала."})
             if self.cashbox_id and self.cashbox_id != self.shift.cashbox_id:
                 raise ValidationError({"cashbox": "Касса продажи должна совпадать с кассой смены."})
@@ -2485,8 +2714,11 @@ class Sale(models.Model):
             if self.company_id != self.shift.company_id:
                 self.company_id = self.shift.company_id
                 touched.add("company")
-            if (self.branch_id or None) != (self.shift.branch_id or None):
-                self.branch_id = self.shift.branch_id
+            # ТЗ 31.10 п.13: если у смены нет филиала — берём филиал её кассы, а если и там нет,
+            # оставляем уже выбранный (раньше затирали в NULL, и у чеков пропадал branch)
+            _shift_branch_id = self.shift.branch_id or getattr(self.shift.cashbox, "branch_id", None)
+            if _shift_branch_id is not None and (self.branch_id or None) != _shift_branch_id:
+                self.branch_id = _shift_branch_id
                 touched.add("branch")
             if self.cashbox_id != self.shift.cashbox_id:
                 self.cashbox_id = self.shift.cashbox_id  # ← важно: всегда, не только если пусто
@@ -2587,6 +2819,7 @@ class Sale(models.Model):
                 "payment_method": self.payment_method,
                 "payments": [{"method": p.method, "amount": p.amount} for p in lines],
                 "shift": self.shift_id,
+                "cashbox": self.cashbox_id,  # ТЗ 29.10 Б-102
                 "cashier": self.user_id,
                 "client": self.client_id,
                 "paid_at": self.paid_at,
@@ -2800,6 +3033,10 @@ class SalePayment(models.Model):
     method = models.CharField(max_length=16, choices=Sale.PaymentMethod.choices, verbose_name="Способ оплаты")
     amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="Сумма")
     created_at = models.DateTimeField(auto_now_add=True)
+    # cur2011: оплата в валюте — amount всегда в сомах, здесь сколько и по какому курсу взяли
+    currency = models.CharField(max_length=3, null=True, blank=True, verbose_name="Валюта")
+    amount_currency = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True, verbose_name="Сумма в валюте")
+    rate = models.DecimalField(max_digits=16, decimal_places=6, null=True, blank=True, verbose_name="Курс")
 
     class Meta:
         indexes = [
@@ -2887,7 +3124,18 @@ class SaleReturn(models.Model):
     )
     returned_items = models.JSONField(null=True, blank=True, verbose_name="Возвращённые позиции")
     reason = models.CharField(max_length=255, blank=True, default="", db_default="", verbose_name="Причина")
+    reason_code = models.CharField(max_length=32, blank=True, default="", db_default="", verbose_name="Код причины")  # П1-1 p1114
     refund_method = models.CharField(max_length=16, blank=True, default="", verbose_name="Способ возврата денег")
+    # 13.11.2026 П0-1: реквизиты чека ККМ, которые записала касса (apps/main/fiscal_kassa.py)
+    fiscal_status = models.CharField("Фискальный статус", max_length=16, default="none", db_default="none")
+    fiscal_doc_number = models.CharField("Номер ФД", max_length=32, blank=True, default="", db_default="")
+    fiscal_memory_number = models.CharField("Номер ФМ", max_length=32, blank=True, default="", db_default="")
+    kkm_reg_number = models.CharField("РН ККМ", max_length=32, blank=True, default="", db_default="")
+    fiscal_sign = models.CharField("Фискальный признак", max_length=64, blank=True, default="", db_default="")
+    fiscal_qr_url = models.CharField("QR чека", max_length=512, blank=True, default="", db_default="")
+    kkm_shift_id = models.CharField("Смена ККМ", max_length=32, blank=True, default="", db_default="")
+    fiscal_error = models.CharField("Ошибка фискализации", max_length=255, blank=True, default="", db_default="")
+    fiscal_at = models.DateTimeField("Время фискализации", null=True, blank=True)
     # 11: сколько денег фактически отдали по возврату — наличными и безналом
     # (по способу возврата refund_method, а не по исходной оплате). Возврат по чеку
     # в долг может не выдавать денег вовсе — тогда обе суммы 0.
@@ -2897,7 +3145,22 @@ class SaleReturn(models.Model):
     refund_noncash = models.DecimalField(
         max_digits=12, decimal_places=2, default=Decimal("0.00"), verbose_name="Возвращено безналом"
     )
+    # ТЗ 31.10 п.3: чек до этого возврата (шапка, оплаты, строки) — ответ API показывает
+    # исходный чек по снимку первого возврата (apps/main/sale_original.py).
+    sale_before = models.JSONField(null=True, blank=True, verbose_name="Чек до возврата")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата возврата")
+    # ТЗ 10.11: правка и аннулирование в течение 24 ч
+    status = models.CharField(max_length=16, default="posted", db_default="posted", db_index=True)  # posted | voided
+    version = models.PositiveIntegerField(default=1, db_default=1)
+    edited_at = models.DateTimeField(null=True, blank=True)
+    edited_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    edit_count = models.PositiveIntegerField(default=0, db_default=0)
+    voided_at = models.DateTimeField(null=True, blank=True)
+    voided_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    void_approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    void_reason = models.CharField(max_length=500, blank=True, default="", db_default="")
+    # id движений денег этого возврата; None — возврат до 10.11 (правка не поддерживается)
+    cashflow_ids = models.JSONField(null=True, blank=True)
 
     class Meta:
         constraints = [
@@ -2911,6 +3174,8 @@ class SaleReturn(models.Model):
 
 
 class SaleItem(models.Model):
+    serial_numbers = models.JSONField("Серийные номера", null=True, blank=True)  # 13.11.2026
+    warranty_until = models.DateField("Гарантия до", null=True, blank=True)  # 13.11.2026
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="sale_items")
@@ -2994,16 +3259,24 @@ class SaleItem(models.Model):
     )
 
     # ✅ себестоимость единицы на момент продажи (для маржи)
-    purchase_price_snapshot = models.DecimalField(
+    # ТЗ 31.10 п.19: 4 знака, как закупка товара (сумма себестоимости строки округляется до копеек)
+    purchase_price_snapshot = PreciseDecimalField(
         "Себестоимость (снапшот)",
-        max_digits=12,
-        decimal_places=2,
+        max_digits=14,
+        decimal_places=4,
         null=True,
         blank=True,
         default=None,
     )
 
 
+    # --- ТЗ 26.10 Б-53, Б-55 строка продажи (каркас tz26; логика — в apps/main/tz26/) ---
+    sale_unit = models.ForeignKey("main.ProductSaleUnit", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    base_quantity = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
+    price_source = models.CharField(max_length=40, blank=True, default="", db_default="")
+    base_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+
+    variant_name = models.CharField("Вариант (вкус/цвет)", max_length=128, blank=True, default="", db_default="")  # vn2111
     class Meta:
         indexes = [
             models.Index(fields=["company", "sale"]),
@@ -3061,10 +3334,10 @@ class SaleItem(models.Model):
                     if self.sale_package_id:
                         ipp = Decimal(str(self.sale_package.quantity_in_package or 0))
                         self.purchase_price_snapshot = (
-                            _money(pp / ipp) if ipp > 0 else _money(pp)
+                            _cost4(pp / ipp) if ipp > 0 else _cost4(pp)
                         )
                     else:
-                        self.purchase_price_snapshot = _money(pp)
+                        self.purchase_price_snapshot = _cost4(pp)
             else:
                 self.is_custom = True
                 # если товар не выбран — себестоимость неизвестна
@@ -3077,16 +3350,15 @@ class SaleItem(models.Model):
         if hasattr(self, "line_discount"):
             self.line_discount = _money(getattr(self, "line_discount", None) or Decimal("0.00"))
         if self.purchase_price_snapshot is not None:
-            self.purchase_price_snapshot = _money(self.purchase_price_snapshot)
+            self.purchase_price_snapshot = _cost4(self.purchase_price_snapshot)
 
         self.full_clean()
         return super().save(*args, **kwargs)
 
     @property
     def line_total(self) -> Decimal:
-        base = Decimal(self.unit_price or 0) * Decimal(self.quantity or 0)
-        disc = Decimal(getattr(self, "line_discount", None) or 0)
-        return (base - disc).quantize(Decimal("0.01"))
+        # ТЗ 01.11: 0.005 -> 0.01, не банковское; 05.11 п.5: весовая — вниз, как subtotal
+        return line_total_like_check(self)
 
     @property
     def amount(self) -> Decimal:
@@ -3513,18 +3785,23 @@ class ProductInventoryItem(models.Model):
         on_delete=models.CASCADE,
         related_name="inventory_lines",
     )
+    # ТЗ 31.10 п.19: остатки с 3 знаками (как Product.quantity)
     quantity_before = models.DecimalField(
         "Было на момент проведения",
         max_digits=12,
-        decimal_places=2,
+        decimal_places=3,
         null=True,
         blank=True,
     )
     quantity_fact = models.DecimalField(
         "Учётное количество (факт)",
         max_digits=12,
-        decimal_places=2,
+        decimal_places=3,
     )
+    # 14.11.2026 П0-4 К-9: момент подсчёта, остаток на тот момент, что поставлено при проведении
+    counted_at = models.DateTimeField("Когда посчитано", null=True, blank=True)
+    quantity_at_count = models.DecimalField("Остаток в момент подсчёта", max_digits=12, decimal_places=3, null=True, blank=True)
+    quantity_applied = models.DecimalField("Поставлено при проведении", max_digits=12, decimal_places=3, null=True, blank=True)
 
     class Meta:
         verbose_name = "Строка инвентаризации товара"
@@ -3623,6 +3900,22 @@ class Client(models.Model):
     created_at = models.DateTimeField("Создано", auto_now_add=True)
     updated_at = models.DateTimeField("Обновлено", auto_now=True)
 
+    # --- ТЗ 26.10 Б-55, Б-56, Б-74 клиент (каркас tz26; логика — в apps/main/tz26/) ---
+    price_level = models.ForeignKey("main.PriceLevel", on_delete=models.SET_NULL, null=True, blank=True, related_name="clients")
+    credit_limit = models.DecimalField("Лимит долга", max_digits=12, decimal_places=2, null=True, blank=True)
+    default_due_days = models.PositiveIntegerField("Срок долга по умолчанию, дней", null=True, blank=True)
+    client_kind = models.CharField(max_length=10, blank=True, default="", db_default="")  # person|foreman|team|company
+    instagram_username = models.CharField(max_length=64, blank=True, default="", db_default="")
+    whatsapp_phone = models.CharField(max_length=32, blank=True, default="", db_default="")
+    # ТЗ кассы 05.11 п.31 / Б-30: согласия на сообщения и язык покупателя
+    consent_service = models.BooleanField("Согласие: служебные сообщения", default=False, db_default=False)
+    consent_marketing = models.BooleanField("Согласие: реклама", default=False, db_default=False)
+    consents_updated_at = models.DateTimeField("Согласия изменены", null=True, blank=True)
+    consents_source = models.CharField("Источник согласий", max_length=16, blank=True, default="", db_default="")
+    language = models.CharField("Язык покупателя", max_length=2, default="ru", db_default="ru")
+
+    is_test = models.BooleanField("Тестовые данные", default=False, db_default=False)  # П0-4 К-18 Client
+
     class Meta:
         verbose_name = "Клиент"
         verbose_name_plural = "Клиенты"
@@ -3659,6 +3952,31 @@ class Client(models.Model):
 # ==========================
 # Supplier receipts (оприходования)
 # ==========================
+def supplier_doc_number(series, number, created_at):
+    """
+    ТЗ 31.10 п.20: номер документа поставщика для показа — «ПР-2026-000123» / «ВП-2026-000007».
+    sequence — сквозной номер в компании (целое поле number), year — год проведения (местное время).
+    """
+    if number is None:
+        return {"number_display": None, "series": series, "year": None, "sequence": None}
+    year = timezone.localtime(created_at).year if created_at else timezone.localdate().year
+    return {
+        "number_display": f"{series}-{year}-{int(number):06d}",
+        "series": series,
+        "year": year,
+        "sequence": int(number),
+    }
+
+
+def _next_company_number(model, company_id, lock_key):
+    """Следующий номер документа в компании под advisory-блокировкой (как у прихода, ТЗ 30.10)."""
+    if connection.vendor == "postgresql":
+        with connection.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", [f"{lock_key}:{company_id}"])
+    last = model.objects.filter(company_id=company_id).aggregate(m=Max("number"))["m"]
+    return (last or 0) + 1
+
+
 class SupplierReceipt(models.Model):
     """
     Журнал оприходований от поставщиков.
@@ -3690,6 +4008,34 @@ class SupplierReceipt(models.Model):
         related_name="created_supplier_receipts",
     )
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    # ТЗ Н-29: приход по заказу поставщику
+    order = models.ForeignKey(
+        "main.PurchaseOrder", on_delete=models.SET_NULL, null=True, blank=True, related_name="receipts",
+    )
+    # ТЗ Н-33: скидка (сумма; процент — если задана в %) и доп. расходы прихода
+    discount = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"), db_default=Decimal("0.00"))
+    discount_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    extra_costs = models.JSONField(default=list, blank=True, db_default=[])
+    # ТЗ 30.10 «Поступления»: номер прихода в компании, накладная поставщика, файлы накладной
+    number = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    document_number = models.CharField(max_length=64, blank=True, default="", db_default="")
+    document_date = models.DateField(null=True, blank=True)
+    attachments = models.ManyToManyField("main.MainMedia", blank=True, related_name="supplier_receipts")
+    vat_mode = models.CharField("Режим НДС", max_length=16, blank=True, default="", db_default="")  # П0-4 К-11
+    esf_number = models.CharField("Номер ЭСФ", max_length=64, blank=True, default="", db_default="")  # П2-4 Б6
+    esf_received = models.BooleanField("ЭСФ получен", default=False, db_default=False)  # П2-4 Б6
+
+    # ТЗ 31.10 п.21: версия для правки прихода (If-Match / version), comment — комментарий к документу
+    version = models.PositiveIntegerField(default=1, db_default=1)
+    comment = models.TextField(blank=True, default="", db_default="")
+    # ТЗ редактор накладных 30.10: сколько раз правили, когда и кто последним
+    edit_count = models.PositiveIntegerField(default=0, db_default=0)
+    edited_at = models.DateTimeField(null=True, blank=True)
+    edited_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name="edited_supplier_receipts",
+    )
+
+    DOC_SERIES = "ПР"  # ТЗ 31.10 п.20
 
     class Meta:
         verbose_name = "Оприходование от поставщика"
@@ -3706,14 +4052,83 @@ class SupplierReceipt(models.Model):
         if self.branch_id and self.company_id and self.branch.company_id != self.company_id:
             raise ValidationError({"branch": "Филиал принадлежит другой компании."})
 
+    def save(self, *args, **kwargs):
+        if self.number is None and self.company_id:
+            # ТЗ 30.10: следующий номер прихода в компании. Отдельная advisory-блокировка
+            # на компанию (не строка Company — та горячая), снимается в конце транзакции.
+            with transaction.atomic():
+                self.number = _next_company_number(SupplierReceipt, self.company_id, "supplier_receipt_no")
+                return super().save(*args, **kwargs)
+        return super().save(*args, **kwargs)
+
+    @property
+    def number_info(self):
+        """ТЗ 31.10 п.20: number_display «ПР-2026-000123», series, year, sequence."""
+        return supplier_doc_number(self.DOC_SERIES, self.number, self.created_at)
+
+
+class PurchaseOrder(models.Model):
+    """ТЗ Н-29: заказ поставщику как документ (общий для всех касс/ПК/телефонов компании)."""
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Черновик"
+        SENT = "sent", "Отправлен"
+        PARTIAL = "partial", "Принят частично"
+        RECEIVED = "received", "Принят полностью"
+        CANCELLED = "cancelled", "Отменён"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="purchase_orders", db_index=True)
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="purchase_orders", null=True, blank=True, db_index=True)
+    number = models.PositiveIntegerField(verbose_name="Номер (по компании)")
+    supplier = models.ForeignKey(
+        Client, on_delete=models.CASCADE, related_name="purchase_orders", db_index=True,
+        limit_choices_to=Q(type=Client.StatusClient.SUPPLIERS),
+    )
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT, db_index=True)
+    note = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_purchase_orders")
+    sent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Заказ поставщику"
+        verbose_name_plural = "Заказы поставщикам"
+        ordering = ["-created_at", "-number"]
+        constraints = [models.UniqueConstraint(fields=["company", "number"], name="uniq_purchase_order_number_company")]
+        indexes = [models.Index(fields=["company", "supplier", "status"])]
+
+
+class PurchaseOrderLine(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order = models.ForeignKey(PurchaseOrder, on_delete=models.CASCADE, related_name="lines")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="purchase_order_lines")
+    qty = models.DecimalField(max_digits=12, decimal_places=3)
+    purchase_price = models.DecimalField(max_digits=11, decimal_places=3, null=True, blank=True)
+    received_qty = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("0"))
+
+    class Meta:
+        ordering = ["id"]
+
 
 class SupplierReceiptItem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     receipt = models.ForeignKey(SupplierReceipt, on_delete=models.CASCADE, related_name="items", db_index=True)
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="supplier_receipt_items", db_index=True)
-    qty = models.PositiveIntegerField()
-    purchase_price = models.DecimalField(max_digits=11, decimal_places=3, null=True, blank=True)
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="supplier_receipt_items", db_index=True)
+    # ТЗ редактор накладных 30.10: 3 знака — дробное количество у весовых товаров (раньше целое)
+    qty = models.DecimalField(max_digits=12, decimal_places=3)
+    # ТЗ 31.10 п.19: закупка с 4 знаками; line_total — сумма строки «как в накладной» (хранится как пришла)
+    purchase_price = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
+    line_total = models.DecimalField(max_digits=16, decimal_places=4, null=True, blank=True)
+    # ТЗ Н-33: закупка за единицу с учётом скидки и доп. расходов (только если они переданы)
+    landed_price = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)
+    # ТЗ 31.10 п.20: цена продажи до и после прихода и наценка после прихода (снимок при проведении)
+    markup_percent = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    sale_price = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)
+    previous_sale_price = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)
 
+    variant_name = models.CharField("Вариант (вкус/цвет)", max_length=128, blank=True, default="", db_default="")  # vn2111
     class Meta:
         verbose_name = "Строка оприходования"
         verbose_name_plural = "Строки оприходования"
@@ -3742,6 +4157,41 @@ class SupplierReceiptItem(models.Model):
                 raise ValidationError({"product": "Товар не принадлежит выбранному поставщику."})
 
 
+class SupplierReceiptVersion(models.Model):
+    """
+    ТЗ редактор накладных 30.10: снимок прихода на каждую версию.
+    Версия 1 — исходный документ (пишется при первой правке), дальше — после каждой правки/отката.
+    snapshot — шапка и строки после этой версии; lines_diff — что изменилось относительно прошлой.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    receipt = models.ForeignKey(SupplierReceipt, on_delete=models.CASCADE, related_name="versions")
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="+", db_index=True)
+    version = models.PositiveIntegerField()
+    action = models.CharField(max_length=16, blank=True, default="")  # create | edit | revert
+    at = models.DateTimeField(default=timezone.now, db_index=True)
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    device = models.CharField(max_length=128, blank=True, default="")
+    source = models.CharField(max_length=16, blank=True, default="")
+    reason = models.CharField(max_length=500, blank=True, default="")
+    reason_code = models.CharField(max_length=32, blank=True, default="")
+    total = models.DecimalField(max_digits=16, decimal_places=2, default=Decimal("0.00"))
+    snapshot = models.JSONField(default=dict, blank=True)
+    lines_diff = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        verbose_name = "Версия прихода"
+        verbose_name_plural = "Версии приходов"
+        ordering = ["receipt", "version"]
+        constraints = [
+            models.UniqueConstraint(fields=["receipt", "version"], name="uniq_supplier_receipt_version"),
+        ]
+        indexes = [models.Index(fields=["company", "at"], name="sup_rcpt_ver_company_at")]
+
+    def __str__(self):
+        return f"{self.receipt_id} v{self.version}"
+
+
 class SupplierReturn(models.Model):
     """
     Документ возврата товара поставщику (Маркет).
@@ -3762,6 +4212,7 @@ class SupplierReturn(models.Model):
     class Status(models.TextChoices):
         POSTED = "posted", "Проведён"
         CANCELLED = "cancelled", "Отменён"
+        VOIDED = "voided", "Аннулирован"  # ТЗ 10.11: правка/аннулирование в течение 24 ч
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="supplier_returns", db_index=True)
@@ -3801,6 +4252,20 @@ class SupplierReturn(models.Model):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.POSTED, db_index=True)
     cashbox = models.ForeignKey("construction.Cashbox", on_delete=models.SET_NULL, null=True, blank=True, related_name="supplier_returns")
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    # ТЗ 31.10 п.20: номер возврата в компании (как у прихода), показ — «ВП-2026-000007»
+    number = models.PositiveIntegerField(null=True, blank=True, db_index=True)
+    # ТЗ 10.11: правка и аннулирование в течение 24 ч (версия, мягкое удаление, что списано с долга)
+    version = models.PositiveIntegerField(default=1, db_default=1)
+    edited_at = models.DateTimeField(null=True, blank=True)
+    edited_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="edited_supplier_returns")
+    edit_count = models.PositiveIntegerField(default=0, db_default=0)
+    voided_at = models.DateTimeField(null=True, blank=True)
+    voided_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="voided_supplier_returns")
+    void_approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    void_reason = models.CharField(max_length=500, blank=True, default="", db_default="")
+    debt_allocations = models.JSONField(null=True, blank=True)  # [{deal_id, amount}] — что списано с долга при зачёте
+
+    DOC_SERIES = "ВП"
 
     class Meta:
         verbose_name = "Возврат поставщику"
@@ -3819,14 +4284,25 @@ class SupplierReturn(models.Model):
         if self.receipt_id and self.supplier_id and self.receipt.supplier_id != self.supplier_id:
             raise ValidationError({"receipt": "Приход принадлежит другому поставщику."})
 
+    def save(self, *args, **kwargs):
+        if self.number is None and self.company_id:
+            with transaction.atomic():
+                self.number = _next_company_number(SupplierReturn, self.company_id, "supplier_return_no")
+                return super().save(*args, **kwargs)
+        return super().save(*args, **kwargs)
+
+    @property
+    def number_info(self):
+        return supplier_doc_number(self.DOC_SERIES, self.number, self.created_at)
+
 
 class SupplierReturnItem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     supplier_return = models.ForeignKey(SupplierReturn, on_delete=models.CASCADE, related_name="items", db_index=True)
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="supplier_return_items", db_index=True)
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="supplier_return_items", db_index=True)
     receipt_item = models.ForeignKey(SupplierReceiptItem, on_delete=models.SET_NULL, null=True, blank=True, related_name="returns", db_index=True)
     qty = models.DecimalField(max_digits=12, decimal_places=3)
-    purchase_price = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    purchase_price = models.DecimalField(max_digits=14, decimal_places=4, null=True, blank=True)  # ТЗ 31.10 п.19
 
     class Meta:
         verbose_name = "Строка возврата поставщику"
@@ -4162,6 +4638,11 @@ class ClientDeal(models.Model):
 
     def save(self, *args, **kwargs):
         custom_installments = getattr(self, "_custom_installments", None)
+        schedule_snapshot = None
+        if self.pk and not self._state.adding:
+            _old = ClientDeal.objects.filter(pk=self.pk).first()
+            if _old is not None:
+                schedule_snapshot = _old._schedule_terms()
         if self.kind != self.Kind.DEBT:
             self.debt_days = None
             self.debt_months = None
@@ -4176,7 +4657,18 @@ class ClientDeal(models.Model):
             return
 
         if self.auto_schedule or custom_installments:
+            # ТЗ 12.6: если по сделке уже есть платежи, а условия графика не менялись
+            # (правка title/note и т.п.), график не пересобираем.
+            if not custom_installments and schedule_snapshot is not None and self.payments.exists():
+                if self._schedule_terms() == schedule_snapshot:
+                    return
             self.rebuild_installments(custom_installments=custom_installments)
+
+    def _schedule_terms(self):
+        return (
+            self.kind, self.amount or Decimal("0"), self.prepayment or Decimal("0"),
+            self.debt_days, self.debt_months, self.first_due_date, self.schedule_version,
+        )
 
 
 def sync_sale_status_from_deal(deal_id) -> None:
@@ -4203,6 +4695,10 @@ def sync_sale_status_from_deal(deal_id) -> None:
         updates["status"] = target
     if sale.debt_remaining != left:
         updates["debt_remaining"] = left
+    # Аудит 12.11: без paid_at погашенный чек выпадал из всех отчётов (фильтр paid по paid_at).
+    # Выручка долгового чека — на дату продажи, поэтому paid_at = created_at.
+    if target == Sale.Status.PAID and sale.paid_at is None:
+        updates["paid_at"] = sale.created_at
     if updates:
         Sale.objects.filter(pk=sale.pk).update(**updates)
 
@@ -4481,7 +4977,10 @@ class DealPayment(models.Model):
             self.company_id = self.deal.company_id
             self.branch_id = self.deal.branch_id
 
-        self.full_clean()
+        # ТЗ 31.10 п.5: оплата пачкой (pay-any) создаёт платёж из взноса той же сделки — проверки заведомо
+        # выполнены; full_clean на каждый взнос давал ~15 мс × N
+        if not getattr(self, "_skip_clean", False):
+            self.full_clean()
         super().save(*args, **kwargs)
 
 
@@ -5322,6 +5821,9 @@ class MarketSaleEmployeePayProfile(models.Model):
         PER_ITEM = "per_item", "За проданный товар"
         SALARY_PLUS_PER_ITEM = "salary_plus_per_item", "Оклад + за проданный товар"
         PERCENT_PLUS_PER_ITEM = "percent_plus_per_item", "Процент + за проданный товар"
+        # ТЗ 26.10 Б-63: ставка за каждую закрытую смену
+        PER_SHIFT = "per_shift", "За смену"
+        PER_SHIFT_PLUS_PERCENT = "per_shift_plus_percent", "За смену + процент"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(
@@ -5373,6 +5875,15 @@ class MarketSaleEmployeePayProfile(models.Model):
         validators=[MinValueValidator(Decimal("0"))],
         help_text="Сом за единицу; весовой товар — 1 за строку чека. Если > 0, добавляется к любой схеме.",
     )
+    # ТЗ 26.10 Б-63: сменная ставка (схемы per_shift, per_shift_plus_percent), сом за закрытую смену
+    per_shift_amount = models.DecimalField(
+        "Ставка за смену",
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0"),
+        db_default=Decimal("0"),
+        validators=[MinValueValidator(Decimal("0"))],
+    )
 
     class Meta:
         verbose_name = "Зарплата продавца (маркет)"
@@ -5402,6 +5913,11 @@ class MarketSaleEmployeePayProfile(models.Model):
             raise ValidationError({"branch": "Филиал другой компании."})
         if self.sales_percent > Decimal("100"):
             raise ValidationError({"sales_percent": "Не больше 100%."})
+        if self.pay_scheme in (self.PayScheme.PER_SHIFT, self.PayScheme.PER_SHIFT_PLUS_PERCENT):
+            if (self.per_shift_amount or Decimal("0")) <= 0:
+                raise ValidationError({"per_shift_amount": "Для сменной схемы укажите ставку за смену больше 0."})
+            if self.pay_scheme == self.PayScheme.PER_SHIFT_PLUS_PERCENT and (self.sales_percent or Decimal("0")) <= 0:
+                raise ValidationError({"sales_percent": "Для схемы «За смену + процент» укажите процент больше 0."})
         if self.pay_scheme == self.PayScheme.SALARY:
             if (self.monthly_base_salary or Decimal("0")) <= 0:
                 raise ValidationError({"monthly_base_salary": "Для схемы «Оклад» укажите оклад больше 0."})
@@ -5576,7 +6092,8 @@ class AgentRequestCart(models.Model):
                 })
 
             # списываем со склада
-            locked_qs.update(quantity=F("quantity") - need_qty)
+            # ТЗ-28 §2.1: продажа меняет updated_at, иначе касса пропустит остаток при ?updated_since=
+            locked_qs.update(quantity=F("quantity") - need_qty, updated_at=timezone.now())
 
             prod_model = type(prod)
             prod_id = prod.pk
@@ -6096,6 +6613,7 @@ class StockMovement(models.Model):
         AGENT_RETURN = "agent_return", "Возврат от агента"
         STAFF_TRANSFER = "staff_transfer", "Передача между сотрудниками"
         STAFF_RETURN = "staff_return", "Возврат между сотрудниками"
+        RECEIPT_CORRECTION = "receipt_correction", "Правка прихода"  # ТЗ редактор накладных 30.10
 
     class Warehouse(models.TextChoices):
         FINISHED_GOODS = "finished_goods", "Готовая продукция"
@@ -6360,7 +6878,7 @@ class SupplierPurchase(models.Model):
 
     quantity = models.DecimalField("Количество", max_digits=14, decimal_places=3)
     unit = models.CharField("Единица", max_length=50, blank=True, default="")
-    unit_price = models.DecimalField("Цена за единицу", max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    unit_price = models.DecimalField("Цена за единицу", max_digits=14, decimal_places=4, default=Decimal("0.00"))  # ТЗ 31.10 п.19
     amount = models.DecimalField("Сумма", max_digits=14, decimal_places=2, default=Decimal("0.00"))
 
     payment_type = models.CharField(
@@ -6387,10 +6905,12 @@ class SupplierPurchase(models.Model):
 
 def record_supplier_purchase(*, company, supplier, quantity, unit_price, created_by,
                              branch=None, product=None, item_make=None, product_name="",
-                             unit="", payment_type=None, purchased_at=None):
+                             unit="", payment_type=None, purchased_at=None, amount=None):
     """
     Пишет строку в журнал закупок. Вызывать ВНУТРИ транзакции операции.
     Без поставщика или с нулевым количеством запись не создаётся.
+    ТЗ 31.10 п.19: цена — 4 знака; amount (сумма по документу) — если передана, берётся как есть
+    (округление до копеек), иначе количество × цена.
     """
     if supplier is None:
         return None
@@ -6399,7 +6919,8 @@ def record_supplier_purchase(*, company, supplier, quantity, unit_price, created
     if qty <= 0:
         return None
 
-    price = Decimal(str(unit_price or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    price = Decimal(str(unit_price or 0)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    total = Decimal(str(amount)) if amount is not None else qty * price
     source = product or item_make
     return SupplierPurchase.objects.create(
         company=company,
@@ -6411,7 +6932,7 @@ def record_supplier_purchase(*, company, supplier, quantity, unit_price, created
         quantity=qty,
         unit=unit or getattr(source, "unit", "") or "",
         unit_price=price,
-        amount=(qty * price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+        amount=total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
         payment_type=payment_type or SupplierPurchase.PaymentType.CASH,
         purchased_at=purchased_at or timezone.now(),
         created_by=created_by,
@@ -6628,6 +7149,65 @@ class ProductionSalaryPayout(models.Model):
         return f"Зарплата {_user_display_name(self.employee)}: {self.amount}"
 
 
+class MarketSalaryPayout(models.Model):
+    """ТЗ Н-18: выплата зарплаты магазина (оклад/аванс/премия/удержание). Один расход кассы на выплату."""
+
+    class Kind(models.TextChoices):
+        SALARY = "salary", "Зарплата"
+        ADVANCE = "advance", "Аванс"
+        BONUS = "bonus", "Премия"
+        DEDUCTION = "deduction", "Удержание"
+        FINE = "fine", "Штраф"  # ТЗ 26.10 Б-63: запись начисления, денег не двигает (как и bonus)
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(
+        Company, on_delete=models.CASCADE, related_name="market_salary_payouts", verbose_name="Компания",
+    )
+    employee = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="market_salary_payouts", verbose_name="Сотрудник",
+    )
+    kind = models.CharField("Вид", max_length=16, choices=Kind.choices, default=Kind.SALARY, db_default="salary")
+    amount = models.DecimalField("Сумма", max_digits=12, decimal_places=2)
+    period_from = models.DateField("Период с", null=True, blank=True)
+    period_to = models.DateField("Период по", null=True, blank=True)
+    # ТЗ 26.10 Б-63: дата штрафа/премии (для fine/bonus); у остальных пусто
+    date = models.DateField("Дата записи", null=True, blank=True)
+    method = models.CharField("Способ", max_length=32, blank=True, default="", db_default="")
+    cashbox = models.ForeignKey(
+        "construction.Cashbox", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="market_salary_payouts", verbose_name="Касса",
+    )
+    shift = models.ForeignKey(
+        "construction.CashShift", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="market_salary_payouts", verbose_name="Смена",
+    )
+    comment = models.CharField("Комментарий", max_length=255, blank=True, default="", db_default="")
+    cashflow = models.ForeignKey(
+        "construction.CashFlow", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+", verbose_name="Расход",
+    )
+    reversal_cashflow = models.ForeignKey(
+        "construction.CashFlow", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+", verbose_name="Обратное движение",
+    )
+    reversed_at = models.DateTimeField("Отменена", null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="market_salary_payouts_created", verbose_name="Кто выплатил",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Выплата зарплаты (магазин)"
+        verbose_name_plural = "Выплаты зарплаты (магазин)"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["company", "employee", "created_at"], name="main_market_company_6b1f0e_idx")]
+
+    def __str__(self):
+        return f"{self.get_kind_display()} {_user_display_name(self.employee)}: {self.amount}"
+
+
 class PosPrinterSetting(models.Model):
     """
     POS: синхронизация ESC/POS-конфига принтера чеков per-device (или per-branch workstation).
@@ -6697,6 +7277,7 @@ class ClientBonusTransaction(models.Model):
         EARN = "earn", "Начисление"
         REDEEM = "redeem", "Списание"
         MANUAL = "manual", "Ручная корректировка"
+        EXPIRE = "expire", "Сгорание"  # ТЗ 29.10 Б-99: срока бонусов в настройках пока нет, значение зарезервировано
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="bonus_transactions")
@@ -6713,10 +7294,17 @@ class ClientBonusTransaction(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # ТЗ 29.10 Б-99: где начислили/списали
+    branch = models.ForeignKey(
+        Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    cashbox = models.ForeignKey(
+        "construction.Cashbox", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
 
     class Meta:
         ordering = ("-created_at",)
-        indexes = [models.Index(fields=["client", "created_at"])]
+        indexes = [models.Index(fields=["client", "created_at"]), models.Index(fields=["company", "created_at"])]
         constraints = [
             models.UniqueConstraint(
                 fields=["company", "idempotency_key"],
@@ -6740,6 +7328,9 @@ class ProductVariant(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="variants")
     size = models.CharField("Размер", max_length=32, blank=True, default="")
     color = models.CharField("Цвет", max_length=64, blank=True, default="")
+    # ТЗ Н-26: цвет в виде #RRGGBB (необязательно) и ручной порядок (0 = по умолчанию, по размерам)
+    color_hex = models.CharField("Цвет (#RRGGBB)", max_length=7, blank=True, default="", db_default="")
+    sort_order = models.IntegerField("Порядок", default=0, db_default=0)
     barcode = models.CharField("Штрихкод", max_length=64, null=True, blank=True)
     quantity = models.DecimalField("Остаток", max_digits=12, decimal_places=3, default=Decimal("0"))
     price = models.DecimalField("Цена", max_digits=12, decimal_places=2, null=True, blank=True)
@@ -6811,6 +7402,9 @@ class MarketStockTransfer(models.Model):
     )
     note = models.CharField(max_length=255, blank=True, default="")
     idempotency_key = models.CharField(max_length=128, null=True, blank=True)
+    # ТЗ 31.10 п.22: номер документа и файлы (накладная, фото, Excel)
+    document_number = models.CharField(max_length=64, blank=True, default="")
+    attachments = models.ManyToManyField("main.MainMedia", blank=True, related_name="market_stock_transfers")
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
     )
@@ -7117,6 +7711,12 @@ class Rental(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     returned_at = models.DateTimeField(null=True, blank=True)
+    # ТЗ Н-21: пеня за день просрочки, касса и смена выдачи
+    late_penalty_per_day = models.DecimalField(
+        "Пеня за день просрочки", max_digits=12, decimal_places=2, default=Decimal("0.00"), db_default=Decimal("0.00")
+    )
+    cashbox = models.ForeignKey("construction.Cashbox", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    shift = models.ForeignKey("construction.CashShift", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 
     class Meta:
         ordering = ("-created_at",)
@@ -7133,6 +7733,99 @@ class RentalItem(models.Model):
     variant = models.ForeignKey(ProductVariant, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
     quantity = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("1"))
     returned_quantity = models.DecimalField("Возвращено", max_digits=12, decimal_places=3, default=Decimal("0"))
+
+
+class RentalExtension(models.Model):
+    """ТЗ Н-21: продление проката (новая дата возврата и доплата)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rental = models.ForeignKey(Rental, on_delete=models.CASCADE, related_name="extensions")
+    old_date_to = models.DateField()
+    new_date_to = models.DateField()
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    payment_method = models.CharField(max_length=32, blank=True, default="cash")
+    shift = models.ForeignKey("construction.CashShift", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    idempotency_key = models.CharField(max_length=128, null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["rental", "idempotency_key"],
+                condition=models.Q(idempotency_key__isnull=False),
+                name="uniq_rental_extension_idem",
+            )
+        ]
+
+
+class ClientDocument(models.Model):
+    """ТЗ Н-22: клиентский документ — КП, счёт, накладная (номер выдаёт сервер, удаление мягкое)."""
+
+    class Type(models.TextChoices):
+        QUOTE = "quote", "Коммерческое предложение"
+        INVOICE = "invoice", "Счёт"
+        WAYBILL = "waybill", "Накладная"
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Черновик"
+        SENT = "sent", "Отправлен"
+        ACCEPTED = "accepted", "Принят"
+        PAID = "paid", "Оплачен"
+        CANCELED = "canceled", "Отменён"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="client_documents")
+    type = models.CharField(max_length=16, choices=Type.choices)
+    number = models.PositiveIntegerField()
+    client = models.ForeignKey(Client, on_delete=models.PROTECT, null=True, blank=True, related_name="documents")
+    lines = models.JSONField(default=list, blank=True)
+    discount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    valid_until = models.DateField(null=True, blank=True)
+    due_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    note = models.CharField(max_length=500, blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_deleted = models.BooleanField(default=False, db_default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        constraints = [models.UniqueConstraint(fields=["company", "type", "number"], name="uniq_client_doc_number")]
+        indexes = [models.Index(fields=["company", "type", "status"], name="main_clientdoc_idx")]
+
+
+class ClientDocumentPayment(models.Model):
+    """ТЗ Н-22: оплата по документу (ключ идемпотентности хранится 7+ суток — вечно)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document = models.ForeignKey(ClientDocument, on_delete=models.CASCADE, related_name="payments")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    payment_method = models.CharField(max_length=32, blank=True, default="cash")
+    shift = models.ForeignKey("construction.CashShift", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    idempotency_key = models.CharField(max_length=128, null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("created_at",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document", "idempotency_key"],
+                condition=models.Q(idempotency_key__isnull=False),
+                name="uniq_client_doc_pay_idem",
+            )
+        ]
 
 
 class ProductDeletion(models.Model):
@@ -7511,6 +8204,7 @@ class ShowcaseOrder(models.Model):
     class DeliveryType(models.TextChoices):
         PICKUP = "pickup", "Самовывоз"
         DELIVERY = "delivery", "Доставка"
+        TRY_ON = "try_on", "Примерка в магазине"  # ТЗ кассы 05.11 п.38 / Б-94
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(
@@ -7539,7 +8233,13 @@ class ShowcaseOrder(models.Model):
     total = models.DecimalField("Итоговая сумма", max_digits=14, decimal_places=2, default=Decimal("0.00"))
     delivery_fee = models.DecimalField("Стоимость доставки", max_digits=14, decimal_places=2, default=Decimal("0.00"))
     source = models.CharField("Источник", max_length=32, default="showcase", blank=True, db_index=True)
+    # ТЗ 01.11: деталь источника — site_cart, assistant, product_card, bot_catalog…
+    source_detail = models.CharField("Деталь источника", max_length=32, blank=True, default="", db_default="", db_index=True)
+    # ТЗ 01.11: токен ссылки на корзину (c_<token>); один токен — один заказ
+    cart_token = models.CharField("Токен корзины", max_length=64, null=True, blank=True, unique=True)
     idempotency_key = models.CharField(max_length=128, null=True, blank=True, db_index=True)
+    # ТЗ Б-22: для source=telegram_bot — чат покупателя в Telegram
+    telegram_chat_id = models.CharField("Telegram chat id покупателя", max_length=64, blank=True, default="", db_default="")
     # Остаток зарезервирован (списан) при создании заказа; снимается при отмене
     # или при выдаче через кассу (sale), т.к. продажа на кассе списывает сама.
     stock_reserved = models.BooleanField("Остаток зарезервирован", default=False)
@@ -7551,8 +8251,19 @@ class ShowcaseOrder(models.Model):
         related_name="+",
         verbose_name="Продажа на кассе",
     )
+    # ТЗ Н-33: код выдачи при самовывозе (4–6 цифр), генерируется при создании
+    pickup_code = models.CharField("Код выдачи", max_length=8, blank=True, default="", db_default="")
+    # ТЗ кассы 05.11 п.38 / Б-94: для delivery_type=try_on — до какого времени товар держим; после — автоотмена
+    hold_until = models.DateTimeField("Держим до", null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        if self._state.adding and not self.pickup_code:
+            import secrets as _secrets
+
+            self.pickup_code = "".join(_secrets.choice("0123456789") for _ in range(_secrets.choice((4, 5, 6))))
+        super().save(*args, **kwargs)
 
     class Meta:
         verbose_name = "Заказ с витрины"
@@ -7602,6 +8313,54 @@ class ShowcaseOrderItem(models.Model):
         return f"{self.product_name} x {self.qty}"
 
 
+class ShowcaseStockRequest(models.Model):
+    """ТЗ Н-27: «Сообщить о поступлении» — заявка покупателя на вариант товара, которого нет в наличии."""
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Ждёт поступления"
+        READY = "ready", "Поступило (покупателю нужно сообщить)"
+        NOTIFIED = "notified", "Покупателю сообщили"
+        CANCELED = "canceled", "Отменена"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="showcase_stock_requests")
+    product = models.ForeignKey("Product", on_delete=models.CASCADE, related_name="+")
+    variant = models.ForeignKey("ProductVariant", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    phone = models.CharField("Телефон", max_length=64, blank=True, default="", db_default="")
+    telegram_chat_id = models.CharField("Telegram chat id", max_length=64, blank=True, default="", db_default="")
+    client_ip = models.CharField("IP", max_length=64, blank=True, default="", db_default="")
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.OPEN, db_default="open", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    notified_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        verbose_name = "Заявка «сообщить о поступлении»"
+        verbose_name_plural = "Заявки «сообщить о поступлении»"
+        indexes = [models.Index(fields=["company", "status"], name="idx_sc_stockreq_co_status")]
+
+    def __str__(self):
+        return f"{self.product_id} {self.variant_id} {self.phone or self.telegram_chat_id}"
+
+
+class ShowcaseCartLink(models.Model):
+    """ТЗ 01.11: корзина сайта, переданная в Telegram-бот ссылкой t.me/<bot>?start=c_<token>."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="showcase_cart_links", verbose_name="Компания")
+    token = models.CharField("Токен", max_length=55, unique=True)
+    items = models.JSONField("Позиции", default=list)
+    expires_at = models.DateTimeField("Действует до", db_index=True)
+    client_ip = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Ссылка на корзину витрины"
+        verbose_name_plural = "Ссылки на корзину витрины"
+
+    def __str__(self):
+        return f"ShowcaseCartLink({self.company_id}, {self.token})"
+
+
 class ShowcaseStats(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(
@@ -7615,6 +8374,11 @@ class ShowcaseStats(models.Model):
     add_to_cart = models.PositiveIntegerField("Добавлений в корзину", default=0)
     product_views = models.JSONField("Просмотры товаров", default=dict)
     banner_clicks = models.JSONField("Клики по баннерам", default=dict)
+    # ТЗ 01.11: счётчики ассистента, Telegram и ссылок на корзину
+    assistant_open = models.PositiveIntegerField("Открытий ассистента", default=0, db_default=0)
+    assistant_message = models.PositiveIntegerField("Сообщений ассистенту", default=0, db_default=0)
+    telegram_click = models.PositiveIntegerField("Кликов «Заказать в Telegram»", default=0, db_default=0)
+    cart_link = models.PositiveIntegerField("Ссылок на корзину", default=0, db_default=0)
 
     class Meta:
         verbose_name = "Статистика витрины"
@@ -7908,6 +8672,157 @@ class SalesTarget(models.Model):
         return f"SalesTarget({self.company_id}, {self.month}: {self.revenue_target})"
 
 
+# ТЗ Н-31: лента изменений для касс (monotonic id, хранится 7 дней)
+class ChangeEvent(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="change_events")
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    type = models.CharField("Тип", max_length=48)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    entity = models.CharField("Сущность", max_length=48, blank=True, default="")
+    entity_id = models.CharField("ID сущности", max_length=64, blank=True, default="")
+    data = models.JSONField("Данные", default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Событие изменения"
+        verbose_name_plural = "Лента изменений"
+        indexes = [models.Index(fields=["company", "id"], name="chgev_company_id_idx")]
+
+    def __str__(self):
+        return f"ChangeEvent({self.id}, {self.type})"
+
+
+# ТЗ Н-31: запрос «на кассу» (владелец просит кассира выполнить операцию)
+class PosRequest(models.Model):
+    class Kind(models.TextChoices):
+        DEBT_PAYMENT = "debt_payment", "Оплата долга клиента"
+        SALARY_PAYOUT = "salary_payout", "Выплата зарплаты"
+        SUPPLIER_PAYMENT = "supplier_payment", "Оплата поставщику"
+        RENTAL_PAYMENT = "rental_payment", "Оплата проката"
+        CASH_OUT = "cash_out", "Изъятие из кассы"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Ожидает"
+        ACCEPTED = "accepted", "Принят"
+        DECLINED = "declined", "Отклонён"
+        CANCELED = "canceled", "Отменён"
+        EXPIRED = "expired", "Истёк"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="pos_requests")
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    kind = models.CharField(max_length=24, choices=Kind.choices)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING, db_index=True)
+    cashbox = models.ForeignKey("construction.Cashbox", on_delete=models.CASCADE, related_name="+", verbose_name="Касса-адресат")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    payload = models.JSONField(default=dict, blank=True)
+    comment = models.CharField(max_length=255, blank=True, default="")
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    decided_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    shift = models.ForeignKey("construction.CashShift", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    result = models.JSONField(default=dict, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Запрос на кассу"
+        verbose_name_plural = "Запросы на кассу"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["company", "status", "cashbox"], name="posreq_comp_st_cb_idx")]
+
+    def __str__(self):
+        return f"PosRequest({self.kind}, {self.status})"
+
+# ---------------------------------------------------------------------------
+# ТЗ Н-32: медиа-хранилище и электронный чек; Н-33: таблица размеров
+# ---------------------------------------------------------------------------
+
+def main_media_upload_to(instance, filename):
+    return f"main_media/{instance.company_id}/{instance.id.hex}_{filename}"[:240]
+
+
+class MainMedia(models.Model):
+    """ТЗ Н-32 (1): файл компании (тема, фото товара, накладная), POST api/main/media/."""
+
+    class Purpose(models.TextChoices):
+        THEME = "theme", "Тема"
+        PRODUCT = "product", "Товар"
+        INVOICE = "invoice", "Накладная"
+        OTHER = "other", "Другое"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="main_media")
+    purpose = models.CharField(max_length=16, choices=Purpose.choices, default=Purpose.OTHER, db_index=True)
+    file = models.FileField(upload_to=main_media_upload_to, max_length=255)
+    size = models.PositiveIntegerField(default=0)
+    content_type = models.CharField(max_length=64, default="")
+    sha256 = models.CharField(max_length=64, default="", db_index=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Файл компании"
+        verbose_name_plural = "Файлы компании"
+        ordering = ["-created_at"]
+
+
+def _new_receipt_token():
+    import secrets as _secrets
+
+    return _secrets.token_urlsafe(24)
+
+
+class SaleReceiptLink(models.Model):
+    """ТЗ Н-32 (2): публичная ссылка на электронный чек (одна на продажу)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    sale = models.OneToOneField(Sale, on_delete=models.CASCADE, related_name="public_link")
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="+")
+    token = models.CharField(max_length=64, unique=True, default=_new_receipt_token)
+    created_at = models.DateTimeField(auto_now_add=True)
+    # ТЗ 30.10 №9: срок жизни и отзыв ссылки (null — бессрочная, как у ссылок Н-32)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Публичная ссылка на чек"
+        verbose_name_plural = "Публичные ссылки на чеки"
+
+
+class SaleReceiptRating(models.Model):
+    """ТЗ Н-32 (2): оценка электронного чека покупателем (один раз на чек)."""
+
+    link = models.OneToOneField(SaleReceiptLink, on_delete=models.CASCADE, related_name="rating")
+    score = models.PositiveSmallIntegerField()
+    comment = models.TextField(blank=True, default="")
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Оценка чека"
+        verbose_name_plural = "Оценки чеков"
+
+
+class SizeChart(models.Model):
+    """ТЗ Н-33: таблица размеров витрины (showcase/size-charts/)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="size_charts")
+    name = models.CharField(max_length=128)
+    columns = models.JSONField(default=list, blank=True)
+    rows = models.JSONField(default=list, blank=True)
+    note = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Таблица размеров"
+        verbose_name_plural = "Таблицы размеров"
+        ordering = ["name"]
+
+
 from apps.main.telegram_bot.models import (
     TelegramBotSettings,
     TelegramInquiry,
@@ -7916,3 +8831,319 @@ from apps.main.telegram_bot.models import (
     TelegramMessageLog,
 )
 
+
+
+# ТЗ 26.10 (Б-52…Б-87): модели новых разделов лежат в apps/main/tz26/*/models.py
+from apps.main.tz26.models import *  # noqa: E402,F401,F403
+
+
+# ==========================
+# ТЗ 29.10 Б-98: отметки тестировщиков мобилки
+# ==========================
+class AppTestCheck(models.Model):
+    """Отметка «проверено/проблема» по пункту чек-листа на устройстве. Ключ (company, version, item_id, device_id)."""
+
+    STATUS_CHOICES = (("ok", "Проверено"), ("issue", "Проблема"))
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="app_test_checks")
+    version = models.CharField(max_length=32)
+    item_id = models.CharField(max_length=128)
+    device_id = models.CharField(max_length=8)
+    name = models.CharField(max_length=128, blank=True, default="")
+    status = models.CharField(max_length=8, choices=STATUS_CHOICES)
+    comment = models.TextField(blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["company", "version", "item_id", "device_id"], name="uniq_app_test_check"),
+        ]
+        indexes = [models.Index(fields=["company", "version"])]
+
+
+# ==========================
+# ТЗ 29.10 Б-100: инвесторы и выплаты
+# ==========================
+class Investor(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="investors")
+    name = models.CharField(max_length=255)
+    phone = models.CharField(max_length=32, blank=True, default="")
+    amount = models.DecimalField(max_digits=14, decimal_places=2, default=0, verbose_name="Вложение")
+    date = models.DateField(null=True, blank=True, verbose_name="Дата вложения")
+    terms = models.JSONField(default=dict, blank=True, verbose_name="Условия (например {\"percent\": 20})")
+    version = models.PositiveIntegerField(default=1)
+    effective_from = models.DateField(null=True, blank=True, verbose_name="Действует с")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("name", "created_at")
+
+
+class InvestorPayout(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="investor_payouts")
+    investor = models.ForeignKey(Investor, on_delete=models.CASCADE, related_name="payouts")
+    month = models.DateField(verbose_name="Месяц (первое число)")
+    accrued = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    paid = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    paid_date = models.DateField(null=True, blank=True)
+    marked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-month", "-created_at")
+        indexes = [models.Index(fields=["company", "month"])]
+
+
+class MarketplaceTheme(models.Model):
+    """ТЗ кассы 05.11 п.33 / Б-48: каталог тем и видов кассы. Правит поддержка в админке; пусто — тоже нормально."""
+
+    class Kind(models.TextChoices):
+        THEME = "theme", "Тема"
+        LAYOUT = "layout", "Вид"
+
+    slug = models.SlugField("Код (id)", max_length=64, unique=True, help_text="Латиница, например dark-blue")
+    kind = models.CharField("Тип", max_length=8, choices=Kind.choices, default=Kind.THEME)
+    title = models.JSONField("Название по языкам", default=dict, blank=True, help_text='{"ru": "...", "ky": "...", "en": "...", "tr": "...", "uz": "..."}')
+    preview_url = models.CharField("Картинка (URL)", max_length=500, blank=True, default="")
+    price = models.DecimalField("Цена, сом", max_digits=10, decimal_places=2, null=True, blank=True, help_text="Пусто — бесплатно")
+    version = models.CharField("Версия", max_length=32, blank=True, default="1")
+    position = models.PositiveIntegerField("Порядок", default=0)
+    is_active = models.BooleanField("Показывать", default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Тема / вид кассы"
+        verbose_name_plural = "Темы и виды кассы"
+        ordering = ["position", "slug"]
+
+    @property
+    def feature_code(self):
+        return f"{self.kind}:{self.slug}"
+
+    def __str__(self):
+        return self.feature_code
+
+
+class ShowcaseCollection(models.Model):
+    """ТЗ кассы 05.11 п.37 / Б-93: коллекция (лукбук, сезон) витрины."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="showcase_collections", verbose_name="Компания")
+    slug = models.SlugField("Адрес", max_length=64)
+    title = models.JSONField("Название по языкам", default=dict, blank=True)
+    description = models.JSONField("Описание по языкам", default=dict, blank=True)
+    season = models.CharField("Сезон", max_length=16, blank=True, default="", help_text="Например SS26")
+    cover = models.ForeignKey(ShowcaseMedia, on_delete=models.SET_NULL, null=True, blank=True, related_name="+", verbose_name="Обложка")
+    products = models.ManyToManyField("Product", through="ShowcaseCollectionItem", related_name="showcase_collections")
+    is_active = models.BooleanField("Показывать", default=True)
+    position = models.PositiveIntegerField("Порядок", default=0)
+    starts_at = models.DateTimeField("Начало показа", null=True, blank=True)
+    ends_at = models.DateTimeField("Конец показа", null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Коллекция витрины"
+        verbose_name_plural = "Коллекции витрины"
+        ordering = ["position", "created_at"]
+        constraints = [models.UniqueConstraint(fields=["company", "slug"], name="uniq_showcase_collection_slug")]
+
+    def __str__(self):
+        return f"{self.slug} ({self.company_id})"
+
+
+class ShowcaseCollectionItem(models.Model):
+    collection = models.ForeignKey(ShowcaseCollection, on_delete=models.CASCADE, related_name="items")
+    product = models.ForeignKey("Product", on_delete=models.CASCADE, related_name="+")
+    position = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["position", "id"]
+        constraints = [models.UniqueConstraint(fields=["collection", "product"], name="uniq_showcase_collection_product")]
+
+
+
+class ShowcaseProductReview(models.Model):
+    """ТЗ кассы 05.11 п.39 / Б-95: отзыв покупателя о товаре витрины с модерацией (отдельно от services-Review)."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "На проверке"
+        APPROVED = "approved", "Опубликован"
+        REJECTED = "rejected", "Отклонён"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="showcase_product_reviews", verbose_name="Компания")
+    product = models.ForeignKey("Product", on_delete=models.CASCADE, related_name="showcase_reviews", verbose_name="Товар")
+    rating = models.PositiveSmallIntegerField("Оценка 1–5")
+    text = models.TextField("Текст", max_length=2000, blank=True, default="")
+    author_name = models.CharField("Имя", max_length=80)
+    author_phone = models.CharField("Телефон (не публикуется)", max_length=32, blank=True, default="")
+    status = models.CharField("Статус", max_length=12, choices=Status.choices, default=Status.PENDING, db_index=True)
+    reply = models.TextField("Ответ магазина", max_length=1000, blank=True, default="")
+    replied_at = models.DateTimeField(null=True, blank=True)
+    ip_hash = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Отзыв о товаре витрины"
+        verbose_name_plural = "Отзывы о товарах витрины"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["product", "status"])]
+
+
+class ReturnAuditLog(models.Model):
+    """ТЗ 10.11: журнал правок/аннулирования возвратов (только добавление). Видят владелец и администратор."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="return_audit_logs", db_index=True)
+    object_type = models.CharField(max_length=32, db_index=True)  # supplier_return | pos_return
+    object_id = models.UUIDField(db_index=True)
+    number = models.CharField(max_length=64, blank=True, default="")
+    version_before = models.PositiveIntegerField(default=0)
+    version_after = models.PositiveIntegerField(default=0)
+    action = models.CharField(max_length=16)  # created | edited | voided
+    snapshot_before = models.JSONField(null=True, blank=True)
+    snapshot_after = models.JSONField(null=True, blank=True)
+    diff = models.JSONField(null=True, blank=True)
+    reason = models.CharField(max_length=500, blank=True, default="")
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    performed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    device_id = models.CharField(max_length=128, blank=True, default="")
+    ip = models.CharField(max_length=64, blank=True, default="")
+    at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Журнал правок возврата"
+        verbose_name_plural = "Журнал правок возвратов"
+        ordering = ["at"]
+        indexes = [models.Index(fields=["company", "object_type", "object_id", "version_after"])]
+
+
+class ReturnConfirmToken(models.Model):
+    """ТЗ 10.11: одноразовый токен подтверждения PIN на одно действие с одним документом (120 с)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="return_confirm_tokens")
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="+")  # кто нажал
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")  # чей PIN
+    scope = models.CharField(max_length=32)  # return_edit | return_void
+    object_type = models.CharField(max_length=32)
+    object_id = models.UUIDField()
+    version = models.PositiveIntegerField()
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["expires_at"])]
+
+
+class SoldSerial(models.Model):
+    """13.11.2026: проданный серийный номер — поиск продаж, гарантия, запрет повторной продажи."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="sold_serials")
+    sale = models.ForeignKey("main.Sale", on_delete=models.CASCADE, related_name="sold_serials")
+    sale_item = models.ForeignKey("main.SaleItem", on_delete=models.CASCADE, related_name="sold_serials")
+    product = models.ForeignKey("main.Product", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    serial = models.CharField("Серийный номер", max_length=64)
+    serial_norm = models.CharField(max_length=64)
+    sold_at = models.DateTimeField()
+    warranty_until = models.DateField(null=True, blank=True)
+    returned_at = models.DateTimeField(null=True, blank=True)
+    sale_return = models.ForeignKey(
+        "main.SaleReturn", on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+    duplicate = models.BooleanField(default=False, help_text="Продан, когда уже числился проданным (офлайн)")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Проданный серийный номер"
+        verbose_name_plural = "Проданные серийные номера"
+        indexes = [models.Index(fields=["company", "serial_norm"], name="idx_soldserial_company_serial")]
+
+    def __str__(self):
+        return self.serial
+
+class CompanyFiscalSettings(models.Model):
+    """13.11.2026 П0-1: налоги компании и признак «касса пробивает чеки» (fiscal_kassa.py)."""
+    company = models.OneToOneField(Company, on_delete=models.CASCADE, related_name="fiscal_settings")
+    fiscal_enabled = models.BooleanField("Касса пробивает чеки (ККМ)", default=False)
+    tax_regime = models.CharField("Режим налогообложения", max_length=32, blank=True, default="")
+    vat_payer = models.BooleanField("Плательщик НДС", default=False)
+    vat_rates = models.JSONField("Ставки НДС", null=True, blank=True)
+    nsp_rate = models.DecimalField("Ставка НсП, %", max_digits=5, decimal_places=2, null=True, blank=True)
+    # 14.11.2026 П0-1 (p0114): НсП безналом отдельно (nsp_rate — наличными); null — как наличными
+    nsp_rate_cashless = models.DecimalField("Ставка НсП безнал, %", max_digits=5, decimal_places=2, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Налоги и ККМ компании"
+
+    def __str__(self):
+        return f"Налоги · {self.company_id}"
+
+class StockLedger(models.Model):
+    """14.11.2026 П0-4 К-1: журнал остатков, пишет триггер PostgreSQL nur_stock_ledger (stock_ledger.py)."""
+    id = models.BigAutoField(primary_key=True)
+    company_id = models.UUIDField()
+    branch_id = models.UUIDField(null=True)
+    product_id = models.UUIDField()
+    qty_before = models.DecimalField(max_digits=14, decimal_places=3)
+    qty_after = models.DecimalField(max_digits=14, decimal_places=3)
+    qty_delta = models.DecimalField(max_digits=14, decimal_places=3)
+    kind = models.CharField(max_length=16)
+    source = models.CharField(max_length=64, default="system")
+    method = models.CharField(max_length=8, null=True)
+    doc_id = models.CharField(max_length=64, null=True)
+    user_id = models.UUIDField(null=True)
+    client = models.CharField(max_length=32, null=True)
+    request_id = models.CharField(max_length=64, null=True)
+    unit_cost = models.DecimalField(max_digits=14, decimal_places=4, null=True)
+    occurred_at = models.DateTimeField()
+    created_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "main_stockledger"
+        managed = False
+
+
+# П1-1 (14.11.2026, p1114): причины возврата и возврат без чека
+from apps.main.models_noreceipt import ReturnReason, ReturnWithoutSale  # noqa: E402,F401
+
+
+# Л-10 (14.11.2026, l1014): клиент перенесён из файла, начальный долг
+from apps.main.models_import import ClientImportMark  # noqa: E402,F401
+
+# П0-4 К-2 (14.11.2026, k2_1411): документы движения склада
+from apps.main.models_stockdocs import StockDocument, StockDocumentLine  # noqa: E402,F401
+
+
+# П2-2 (14.11.2026, p2214): push-токены сотрудников
+from apps.main.models_push import StaffPushToken  # noqa: E402,F401
+
+
+# П2-5 (14.11.2026, p2514): промокоды витрины и доставка
+from apps.main.models_showcase_promo import ShowcaseOrderDelivery, ShowcaseOrderPromo, ShowcasePromoCode  # noqa: E402,F401
+
+# П1-6 К-6 (15.11.2026, k6_1511): серийные номера с прихода
+from apps.main.models_serials_stock import StockSerial  # noqa: E402,F401
+
+# П2-3 К-12 (15.11.2026, p23_1511): переоценка
+from apps.main.models_price_revision import PriceRevision, PriceRevisionLine  # noqa: E402,F401
+
+# П3-1 (15.11.2026, p31_1511): подарочные сертификаты
+from apps.main.models_gift_cards import GiftCard, GiftCardMove  # noqa: E402,F401
+
+# 19.11.2026 К-4/К-5 (k458): партии
+from apps.main.models_batches import StockBatch, StockBatchMove  # noqa: E402,F401
+from apps.main.models_product_history import ProductHistory  # noqa: E402,F401  hist2111

@@ -1,0 +1,3348 @@
+{
+ "version": "2026-11-14",
+ "count": 266,
+ "codes": [
+  {
+   "code": "addon_required",
+   "http": [
+    402
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "WhatsApp не подключён в тарифе. Включите в Маркетплейсе.",
+   "where": [
+    "apps/main/whatsapp_views.py:_WaBase"
+   ]
+  },
+  {
+   "code": "ai_unavailable",
+   "http": [
+    503
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "ИИ сейчас не ответил: ключи исчерпали лимит Google или недействительны. Попробуйте позже.",
+   "where": [
+    "apps/main/ai_advisor_web.py:AiAdvisorAskAPIView",
+    "apps/main/ai_advisor_web.py:AiAdvisorAskVoiceAPIView",
+    "apps/main/ai_advisor_web.py:AiAdvisorInvoiceParseAPIView"
+   ]
+  },
+  {
+   "code": "already_active",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Функция уже включена.",
+   "where": [
+    "apps/users/app_settings_views.py:CompanyFeatureTrialAPIView"
+   ]
+  },
+  {
+   "code": "already_claimed",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Задание уже взято другим устройством.",
+   "where": [
+    "apps/main/tz26/pos_print/views.py:PrintJobClaimAPIView",
+    "apps/main/tz26/pos_print/views.py:PrintJobDoneAPIView"
+   ]
+  },
+  {
+   "code": "already_has_packages",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "У товара уже есть упаковки — повторный перевод удвоил бы цену.",
+   "where": [
+    "apps/main/product_pack_convert.py"
+   ]
+  },
+  {
+   "code": "already_rated",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "Этот чек уже оценён.",
+   "where": [
+    "apps/main/media_receipts.py:PublicReceiptRatingAPIView"
+   ]
+  },
+  {
+   "code": "already_redeemed",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Этот промокод вы уже вводили.",
+   "where": [
+    "apps/users/promo_views.py:PromoRedeemAPIView"
+   ]
+  },
+  {
+   "code": "already_reversed",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Выплата уже отменена.",
+   "where": [
+    "apps/main/market_salary_views.py:MarketSalaryPayoutDetailAPIView"
+   ]
+  },
+  {
+   "code": "already_taken",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Отложенный чек уже забран.",
+   "where": [
+    "apps/main/tz26/pos_print/held_views.py:HeldCartTakeAPIView"
+   ]
+  },
+  {
+   "code": "already_voided",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Возврат уже аннулирован.",
+   "where": [
+    "apps/main/pos_return_edit.py",
+    "apps/main/return_edit.py",
+    "apps/users/pin.py"
+   ]
+  },
+  {
+   "code": "amount_exceeds_debt",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/pos_views.py:SalePayDebtAPIView",
+    "apps/main/views.py:ClientDealsPayAnyAPIView"
+   ]
+  },
+  {
+   "code": "amount_exceeds_installment",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": null,
+   "where": [
+    "apps/main/views.py:ClientDealPayAPIView"
+   ]
+  },
+  {
+   "code": "amount_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Сумма должна быть больше нуля.",
+   "where": [
+    "apps/main/market_salary_views.py:MarketSalaryPayoutListCreateAPIView",
+    "apps/main/pos_requests.py",
+    "apps/main/views.py:ClientDealsPayAnyAPIView"
+   ]
+  },
+  {
+   "code": "amount_too_large",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Слишком большая сумма чека. Проверьте количество и цену.",
+   "where": [
+    "apps/main/models.py"
+   ]
+  },
+  {
+   "code": "attribute_key_exists",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Такой ключ уже есть.",
+   "where": [
+    "apps/main/tz26/hw_catalog/views.py:AttributeKeyListCreateAPIView"
+   ]
+  },
+  {
+   "code": "author_phone",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Неверный номер телефона.",
+   "where": [
+    "apps/main/tz31_reviews.py"
+   ]
+  },
+  {
+   "code": "bad_period",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Дата начала позже даты конца периода.",
+   "where": [
+    "apps/main/analytics_market.py",
+    "apps/main/tz1029_invest.py:StartupPaybackAPIView"
+   ]
+  },
+  {
+   "code": "barcode_duplicate",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": null,
+   "where": [
+    "apps/main/mass_incoming_views.py"
+   ]
+  },
+  {
+   "code": "barcode_exists",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": null,
+   "where": [
+    "apps/main/mass_incoming_views.py"
+   ]
+  },
+  {
+   "code": "barcode_taken",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Штрихкод «…» уже занят.",
+   "where": [
+    "apps/main/tz26/hw_units/units.py"
+   ]
+  },
+  {
+   "code": "batch_insufficient",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "В партии «…» осталось ….",
+   "where": [
+    "apps/main/tz26/hw_batches/services.py"
+   ]
+  },
+  {
+   "code": "batch_label_too_long",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "batch_label — не длиннее … символов.",
+   "where": [
+    "apps/main/tz26/hw_batches/services.py"
+   ]
+  },
+  {
+   "code": "batch_not_found",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Партия не найдена у этого товара.",
+   "where": [
+    "apps/main/tz26/hw_batches/services.py"
+   ]
+  },
+  {
+   "code": "batch_product_mismatch",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "У своей позиции нет партии.",
+   "where": [
+    "apps/main/tz26/hw_batches/services.py"
+   ]
+  },
+  {
+   "code": "below_min_cut",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Минимальный отрез — ….",
+   "where": [
+    "apps/main/tz26/hw_batches/services.py"
+   ]
+  },
+  {
+   "code": "bonus_earn_needs_sale",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Начислить бонусы без чека может только владелец.",
+   "where": [
+    "apps/main/kassa_views.py:ClientBonusAPIView"
+   ]
+  },
+  {
+   "code": "branch_forbidden",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": null,
+   "where": [
+    "apps/main/mass_incoming_views.py"
+   ]
+  },
+  {
+   "code": "branch_invalid",
+   "http": [
+    400,
+    404
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": null,
+   "where": [
+    "apps/main/mass_incoming_views.py"
+   ]
+  },
+  {
+   "code": "branch_not_found",
+   "http": [
+    400,
+    404
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Филиал не найден.",
+   "where": [
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView",
+    "apps/main/tz26/hw_catalog/services.py",
+    "apps/main/tz26/staff/schedule_views.py"
+   ]
+  },
+  {
+   "code": "cash_less_than_total",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Сумма, полученная наличными, меньше суммы продажи.",
+   "where": [
+    "apps/main/pos_views.py:SaleCheckoutAPIView"
+   ]
+  },
+  {
+   "code": "cashbox_has_open_shift",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "cash",
+   "detail_ru": "По кассе есть открытая смена. Закройте смену перед удалением.",
+   "where": [
+    "apps/construction/views.py:CashboxDetailView"
+   ]
+  },
+  {
+   "code": "cashbox_has_other_open_shift",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "cash",
+   "detail_ru": null,
+   "where": [
+    "apps/construction/models.py"
+   ]
+  },
+  {
+   "code": "cashbox_has_pending",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "cash",
+   "detail_ru": "По кассе есть неодобренные операции или заявки. Разберите их перед удалением.",
+   "where": [
+    "apps/construction/views.py:CashboxDetailView"
+   ]
+  },
+  {
+   "code": "cashbox_inactive",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "cash",
+   "detail_ru": "Касса находится в архиве.",
+   "where": [
+    "apps/construction/views.py:CashFlowListCreateView"
+   ]
+  },
+  {
+   "code": "cashbox_not_found",
+   "http": [
+    400,
+    404
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Касса не найдена.",
+   "where": [
+    "apps/main/market_salary_views.py:MarketSalaryPayoutListCreateAPIView",
+    "apps/main/pos_requests.py:PosRequestListCreateView",
+    "apps/main/pos_views.py:SalePayDebtAPIView",
+    "apps/main/tz26/pos_sync/views.py:CompanyDeviceHeartbeatAPIView"
+   ]
+  },
+  {
+   "code": "cashbox_role_required",
+   "http": [
+    400,
+    409
+   ],
+   "kind": "error",
+   "area": "cash",
+   "detail_ru": "Нельзя изменить роль последней обязательной кассы.",
+   "where": [
+    "apps/construction/views.py:CashboxDetailView"
+   ]
+  },
+  {
+   "code": "cashbox_unresolvable",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "cash",
+   "detail_ru": "Не удалось определить кассу для операции",
+   "where": [
+    "apps/construction/auto_cashflow.py",
+    "apps/main/views.py"
+   ]
+  },
+  {
+   "code": "category_is_system",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "cash",
+   "detail_ru": "Системную статью нельзя удалить.",
+   "where": [
+    "apps/construction/views.py:CashFlowCategoryDetailView"
+   ]
+  },
+  {
+   "code": "category_not_found",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Категория не найдена в вашей компании.",
+   "where": [
+    "apps/main/tz26/hw_catalog/views.py:CategoryRelationListCreateAPIView"
+   ]
+  },
+  {
+   "code": "client_has_documents",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": null,
+   "where": [
+    "apps/main/views.py:ClientRetrieveUpdateDestroyAPIView"
+   ]
+  },
+  {
+   "code": "client_not_found",
+   "http": [
+    400,
+    404
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Клиент не найден.",
+   "where": [
+    "apps/main/pos_requests.py:PosRequestAcceptView",
+    "apps/main/tz26/cust_orders/views.py:OrderBase"
+   ]
+  },
+  {
+   "code": "client_required",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/pos_requests.py:PosRequestListCreateView"
+   ]
+  },
+  {
+   "code": "code_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Нужны action и code.",
+   "where": [
+    "apps/users/views_access.py:AccessCodeVerifyAPIView"
+   ]
+  },
+  {
+   "code": "company_required",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Компания не определена.",
+   "where": [
+    "apps/main/tz26/hw_catalog/views.py"
+   ]
+  },
+  {
+   "code": "confirm_invalid",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "returns",
+   "detail_ru": "Токен подтверждения недействителен: истёк, уже использован или от другого документа.",
+   "where": [
+    "apps/main/return_edit.py"
+   ]
+  },
+  {
+   "code": "confirm_required",
+   "http": [
+    428
+   ],
+   "kind": "error",
+   "area": "returns",
+   "detail_ru": "Нужно подтвердить действие PIN-кодом руководителя.",
+   "where": [
+    "apps/main/return_edit.py"
+   ]
+  },
+  {
+   "code": "conflict",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Не удалось выдать код, повторите.",
+   "where": [
+    "apps/main/tz26/pos_print/held_views.py:HeldCartListCreateAPIView",
+    "apps/main/tz26/pos_print/scanner_views.py",
+    "apps/possync/views.py:StockMovementsAPIView"
+   ]
+  },
+  {
+   "code": "credit_limit_exceeded",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Лимит долга клиента … сом, текущий долг … сом, запрошено … сом.",
+   "where": [
+    "apps/main/tz26/hw_prices/services.py"
+   ]
+  },
+  {
+   "code": "cursor_expired",
+   "http": [
+    410
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Курсор устарел, перечитайте данные целиком.",
+   "where": [
+    "apps/main/change_views.py:ChangesFeedView"
+   ]
+  },
+  {
+   "code": "date_in_past",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Срок оплаты не может быть раньше сегодняшней даты.",
+   "where": [
+    "apps/main/views.py:ClientDealInstallmentUpdateAPIView"
+   ]
+  },
+  {
+   "code": "date_not_later",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Новая дата должна быть позже текущей даты возврата.",
+   "where": [
+    "apps/main/rentals.py:RentalExtendAPIView"
+   ]
+  },
+  {
+   "code": "deal_exists",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "По этому приходу сделка уже создана.",
+   "where": [
+    "apps/main/views.py:ClientDealListCreateAPIView"
+   ]
+  },
+  {
+   "code": "deal_not_v2",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Сделка версии v1 не поддерживает перенос отдельных взносов.",
+   "where": [
+    "apps/main/views.py:ClientDealInstallmentUpdateAPIView"
+   ]
+  },
+  {
+   "code": "debt_already_paid",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "returns",
+   "detail_ru": "По долгу за этот приход уже были оплаты — поставщика и оплату менять нельзя.",
+   "where": [
+    "apps/main/receipt_edit.py",
+    "apps/main/return_edit.py"
+   ]
+  },
+  {
+   "code": "debt_forbidden",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "debts",
+   "detail_ru": "Этому кассиру нельзя продавать в долг",
+   "where": [
+    "apps/possync/debt_limits.py"
+   ]
+  },
+  {
+   "code": "debt_limit_exceeded",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "debts",
+   "detail_ru": "Лимит долга клиента … сом, текущий долг … сом",
+   "where": [
+    "apps/possync/debt_limits.py"
+   ]
+  },
+  {
+   "code": "device_not_found",
+   "http": [
+    404
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Устройство не найдено.",
+   "where": [
+    "apps/users/views.py:AuthDeviceDetailAPIView"
+   ]
+  },
+  {
+   "code": "device_slot_taken",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "auth",
+   "detail_ru": "Вы уже входили на другом устройстве такого типа ({title} «{name}», был в сети {seen}). ",
+   "where": [
+    "apps/users/auth_session.py"
+   ]
+  },
+  {
+   "code": "discount_exceeds_total",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Скидка больше суммы прихода.",
+   "where": [
+    "apps/main/views.py"
+   ]
+  },
+  {
+   "code": "discount_limit_exceeded",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": null,
+   "where": [
+    "apps/main/tz26/hw_units/units.py"
+   ]
+  },
+  {
+   "code": "document_canceled",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "clients",
+   "detail_ru": "Документ отменён.",
+   "where": [
+    "apps/main/client_documents.py:ClientDocumentPayAPIView"
+   ]
+  },
+  {
+   "code": "duplicate_line",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView"
+   ]
+  },
+  {
+   "code": "edit_window_expired",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "returns",
+   "detail_ru": "Приход можно править только … ч после проведения.",
+   "where": [
+    "apps/main/receipt_edit.py",
+    "apps/main/return_edit.py"
+   ]
+  },
+  {
+   "code": "ekassa_disabled",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "Интеграция eKassa выключена или не настроена.",
+   "where": [
+    "apps/ekassa/views.py"
+   ]
+  },
+  {
+   "code": "ekassa_test_disabled",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "Тестовые чеки eKassa отключены. Задайте EKASSA_ALLOW_TEST_RECEIPT=1 или включите DEBUG.",
+   "where": [
+    "apps/ekassa/views.py:EkassaTestReceiptView"
+   ]
+  },
+  {
+   "code": "ekassa_upstream",
+   "http": [
+    500,
+    502
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": null,
+   "where": [
+    "apps/ekassa/views.py"
+   ]
+  },
+  {
+   "code": "email_taken",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/users/serializers.py"
+   ]
+  },
+  {
+   "code": "employee_limit",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/users/serializers.py:EmployeeCreateSerializer"
+   ]
+  },
+  {
+   "code": "employee_limit_reached",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": null,
+   "where": [
+    "apps/users/services_subscription.py"
+   ]
+  },
+  {
+   "code": "employee_not_found",
+   "http": [
+    404
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Сотрудник не найден.",
+   "where": [
+    "apps/main/market_salary_views.py:MarketSalaryPayoutListCreateAPIView",
+    "apps/main/tz26/staff/salary_views.py:MarketSalaryStatementView",
+    "apps/main/tz26/staff/schedule_views.py",
+    "apps/main/tz26/staff/tasks_api.py"
+   ]
+  },
+  {
+   "code": "empty_sale",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "В чеке нет позиций",
+   "where": [
+    "apps/main/kassa_views.py:QuickCheckoutSerializer",
+    "apps/main/pos_serializers.py:CheckoutSerializer"
+   ]
+  },
+  {
+   "code": "exceeds_returnable",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "returns",
+   "detail_ru": "Больше, чем можно вернуть по приходу (максимум …).",
+   "where": [
+    "apps/main/return_edit.py"
+   ]
+  },
+  {
+   "code": "exchange_debt_sale",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Обмен по чеку в долг возможен только после полного погашения долга. Оформите возврат.",
+   "where": [
+    "apps/main/kassa_stage3.py:SaleExchangeAPIView"
+   ]
+  },
+  {
+   "code": "execution_failed",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Оплата долга не прошла.",
+   "where": [
+    "apps/main/pos_requests.py:PosRequestAcceptView"
+   ]
+  },
+  {
+   "code": "expired",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Срок отложенного чека истёк.",
+   "where": [
+    "apps/main/tz26/pos_print/held_views.py:HeldCartTakeAPIView"
+   ]
+  },
+  {
+   "code": "feature_disabled",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "showcase",
+   "detail_ru": null,
+   "where": [
+    "apps/main/showcase/services.py",
+    "apps/main/showcase/views_design.py",
+    "core/exceptions.py"
+   ]
+  },
+  {
+   "code": "field_conflict",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "debts",
+   "detail_ru": "Поля method и payment_method заданы с разными значениями — передайте одно.",
+   "where": [
+    "apps/main/services_debt.py"
+   ]
+  },
+  {
+   "code": "file_required",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "Файл не передан.",
+   "where": [
+    "apps/main/media_receipts.py:MainMediaListCreateAPIView",
+    "apps/main/receipt_files.py:SupplierReceiptFileAPIView",
+    "apps/main/transfer_files.py:StockTransferFileAPIView",
+    "apps/main/tz26/staff/tasks_api.py:StaffTaskFilesView"
+   ]
+  },
+  {
+   "code": "file_too_large",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Файл больше 10 МБ.",
+   "where": [
+    "apps/main/tz26/staff/tasks_api.py"
+   ]
+  },
+  {
+   "code": "file_type_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Допустимы фото (jpg, png, webp, heic, gif) и pdf.",
+   "where": [
+    "apps/main/tz26/staff/tasks_api.py"
+   ]
+  },
+  {
+   "code": "fine_exceeds_accrued",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Штрафы за период больше начисленного.",
+   "where": [
+    "apps/main/market_salary_views.py"
+   ]
+  },
+  {
+   "code": "first_due_date_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "first_due_date: YYYY-MM-DD.",
+   "where": [
+    "apps/main/views.py:SupplierReceiptAPIView"
+   ]
+  },
+  {
+   "code": "fiscal_already_set",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "У чека уже записаны другие фискальные реквизиты.",
+   "where": [
+    "apps/main/fiscal_kassa.py"
+   ]
+  },
+  {
+   "code": "fiscal_locked",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "Среди чеков есть пробитые на ККМ — их удалять нельзя.",
+   "where": [
+    "apps/main/fiscal_kassa.py",
+    "apps/main/pos_views.py:SaleBulkDeleteAPIView"
+   ]
+  },
+  {
+   "code": "fiscal_mode_server",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "Чеки этой компании пробивает сервер (eKassa), касса их не пишет.",
+   "where": [
+    "apps/main/fiscal_kassa.py:ReturnFiscalAPIView",
+    "apps/main/fiscal_kassa.py:SaleFiscalAPIView"
+   ]
+  },
+  {
+   "code": "fiscal_pending",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "Чек возврата сейчас отправляется в eKassa. Подождите минуту и повторите.",
+   "where": [
+    "apps/main/fiscal_kassa.py"
+   ]
+  },
+  {
+   "code": "forbidden",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Создавать запросы может владелец или администратор.",
+   "where": [
+    "apps/main/ai_advisor_web.py:AiAdvisorAskAPIView",
+    "apps/main/ai_advisor_web.py:AiAdvisorAskVoiceAPIView",
+    "apps/main/ai_advisor_web.py:AiAdvisorInvoiceApplyAPIView",
+    "apps/main/ai_advisor_web.py:AiAdvisorInvoiceParseAPIView"
+   ]
+  },
+  {
+   "code": "fractional_not_allowed",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Дробное количество — только у весовых товаров.",
+   "where": [
+    "apps/main/views.py:SupplierReceiptAPIView"
+   ]
+  },
+  {
+   "code": "global_product_not_found",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": null,
+   "where": [
+    "apps/main/mass_incoming_views.py"
+   ]
+  },
+  {
+   "code": "has_promotion_tiers",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "У товара есть ступени акции — сначала уберите их.",
+   "where": [
+    "apps/main/product_pack_convert.py"
+   ]
+  },
+  {
+   "code": "has_returns",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "По строке был возврат поставщику: цену менять и удалять строку нельзя, количество — не ниже возвращённого.",
+   "where": [
+    "apps/main/receipt_edit.py"
+   ]
+  },
+  {
+   "code": "idempotency_conflict",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "common",
+   "detail_ru": "Этот Idempotency-Key уже использован для другого запроса.",
+   "where": [
+    "apps/integrations/idempotency.py"
+   ]
+  },
+  {
+   "code": "idempotency_in_progress",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Документ с этим ключом уже создаётся.",
+   "where": [
+    "apps/possync/views.py:StockMovementsAPIView"
+   ]
+  },
+  {
+   "code": "idempotency_key_not_found",
+   "http": [
+    404
+   ],
+   "kind": "error",
+   "area": "common",
+   "detail_ru": "Операции с таким ключом нет.",
+   "where": [
+    "apps/main/views_idempotency.py:IdempotencyLookupAPIView"
+   ]
+  },
+  {
+   "code": "idempotency_key_required",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Нужен Idempotency-Key.",
+   "where": [
+    "apps/main/receipt_edit.py",
+    "apps/main/return_edit_views.py",
+    "apps/main/tz26/pos_print/common.py",
+    "apps/main/views.py:SupplierDebtPayAPIView"
+   ]
+  },
+  {
+   "code": "in_progress",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "common",
+   "detail_ru": "Запрос с этим Idempotency-Key ещё выполняется.",
+   "where": [
+    "apps/integrations/idempotency.py"
+   ]
+  },
+  {
+   "code": "installment_already_paid",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Взнос уже полностью оплачен.",
+   "where": [
+    "apps/main/views.py:ClientDealInstallmentUpdateAPIView"
+   ]
+  },
+  {
+   "code": "insufficient_stock",
+   "http": [
+    400,
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Недостаточно остатка. Доступно не более … (в базовых единицах).",
+   "where": [
+    "apps/main/pos_bulk.py:SaleItemsBulkAPIView",
+    "apps/main/pos_views.py:SaleCheckoutAPIView",
+    "apps/main/tz26/hw_units/units.py",
+    "apps/possync/views.py:StockMovementsAPIView"
+   ]
+  },
+  {
+   "code": "invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "bytes — целое число.",
+   "where": [
+    "apps/integrations/idempotency.py",
+    "apps/main/transfer_files.py:StockTransferDetailAPIView",
+    "apps/main/tz26/cust_orders/services.py",
+    "apps/main/tz26/cust_orders/views.py"
+   ]
+  },
+  {
+   "code": "invalid_amount",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "Некорректное amount_som.",
+   "where": [
+    "apps/ekassa/views.py:EkassaTestReceiptView"
+   ]
+  },
+  {
+   "code": "invalid_attribute_key",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Неверный ключ атрибута «…».",
+   "where": [
+    "apps/main/tz26/hw_catalog/services.py",
+    "apps/main/tz26/hw_catalog/views.py"
+   ]
+  },
+  {
+   "code": "invalid_attributes",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": null,
+   "where": [
+    "apps/main/tz26/hw_catalog/services.py"
+   ]
+  },
+  {
+   "code": "invalid_category_relation",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "kind: accessory или analog.",
+   "where": [
+    "apps/main/tz26/hw_catalog/views.py:CategoryRelationListCreateAPIView"
+   ]
+  },
+  {
+   "code": "invalid_cursor",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Неверный курсор.",
+   "where": [
+    "apps/main/change_views.py:ChangesFeedView"
+   ]
+  },
+  {
+   "code": "invalid_date",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Неверный формат даты due_date. Ожидается YYYY-MM-DD.",
+   "where": [
+    "apps/main/views.py:ClientDealInstallmentUpdateAPIView"
+   ]
+  },
+  {
+   "code": "invalid_debt_schedule",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Срок долга не может быть в прошлом.",
+   "where": [
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView",
+    "apps/possync/schedule.py"
+   ]
+  },
+  {
+   "code": "invalid_format",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "showcase",
+   "detail_ru": null,
+   "where": [
+    "apps/main/showcase/views_design.py"
+   ]
+  },
+  {
+   "code": "invalid_idempotency_key",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Неверный формат idempotency_key.",
+   "where": [
+    "apps/main/views.py:ClientDealInstallmentUpdateAPIView"
+   ]
+  },
+  {
+   "code": "invalid_key",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Ключ не найден.",
+   "where": [
+    "apps/users/app_settings_views.py:CompanyFeatureActivateAPIView"
+   ]
+  },
+  {
+   "code": "invalid_param",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "status: draft|sent|partial|received|cancelled.",
+   "where": [
+    "apps/main/purchase_orders.py:PurchaseOrderListCreateAPIView",
+    "apps/main/tz26/cust_orders/views.py:OrderListCreateAPIView",
+    "apps/possync/views.py:DebtLimitsUsageAPIView"
+   ]
+  },
+  {
+   "code": "invalid_preview_token",
+   "http": [
+    404
+   ],
+   "kind": "error",
+   "area": "showcase",
+   "detail_ru": "Ссылка предпросмотра недействительна.",
+   "where": [
+    "apps/main/showcase/services.py"
+   ]
+  },
+  {
+   "code": "invalid_purpose",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "purpose: ….",
+   "where": [
+    "apps/main/media_receipts.py:MainMediaListCreateAPIView"
+   ]
+  },
+  {
+   "code": "invalid_related",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": null,
+   "where": [
+    "apps/main/tz26/hw_catalog/services.py"
+   ]
+  },
+  {
+   "code": "invalid_score",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "Оценка — число от 1 до 5.",
+   "where": [
+    "apps/main/media_receipts.py:PublicReceiptRatingAPIView"
+   ]
+  },
+  {
+   "code": "invalid_state",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Задание в статусе «…».",
+   "where": [
+    "apps/main/tz26/pos_print/views.py:PrintJobCancelAPIView",
+    "apps/main/tz26/pos_print/views.py:PrintJobClaimAPIView",
+    "apps/main/tz26/pos_print/views.py:PrintJobDoneAPIView",
+    "apps/main/tz26/pos_print/views.py:PrintJobFailAPIView"
+   ]
+  },
+  {
+   "code": "invalid_storage_location",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Ячейка — не больше … символов.",
+   "where": [
+    "apps/main/tz26/hw_catalog/services.py"
+   ]
+  },
+  {
+   "code": "invalid_token",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Ссылка устарела или уже использована. Запросите новую.",
+   "where": [
+    "apps/users/password_reset.py:PasswordResetCheckAPIView",
+    "apps/users/password_reset.py:PasswordResetConfirmAPIView"
+   ]
+  },
+  {
+   "code": "invalid_type",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "Недопустимый тип файла.",
+   "where": [
+    "apps/main/media_receipts.py"
+   ]
+  },
+  {
+   "code": "items_empty",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Нет строк прихода.",
+   "where": [
+    "apps/main/views.py:SupplierReceiptAPIView"
+   ]
+  },
+  {
+   "code": "key_already_used",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Ключ уже использован другой компанией.",
+   "where": [
+    "apps/users/app_settings_views.py:CompanyFeatureActivateAPIView"
+   ]
+  },
+  {
+   "code": "key_used",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Слишком много неверных ключей. Попробуйте через час.",
+   "where": [
+    "apps/users/app_settings_views.py:CompanyFeatureActivateAPIView"
+   ]
+  },
+  {
+   "code": "kind_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "kind: salary | advance | bonus | fine | deduction.",
+   "where": [
+    "apps/main/market_salary_views.py:MarketSalaryPayoutListCreateAPIView"
+   ]
+  },
+  {
+   "code": "last_admin",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Нельзя убрать последнего администратора компании.",
+   "where": [
+    "apps/users/serializers.py"
+   ]
+  },
+  {
+   "code": "lines_merged",
+   "http": [
+    200
+   ],
+   "kind": "warning",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/kassa_views.py"
+   ]
+  },
+  {
+   "code": "markup_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": null,
+   "where": [
+    "apps/main/mass_incoming_views.py"
+   ]
+  },
+  {
+   "code": "media_in_use",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "showcase",
+   "detail_ru": null,
+   "where": [
+    "apps/main/showcase/views_design.py:ShowcaseMediaDetailAPIView"
+   ]
+  },
+  {
+   "code": "merge_target_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "cash",
+   "detail_ru": "Касса-наследник недоступна.",
+   "where": [
+    "apps/construction/views.py:CashboxBulkDeleteView",
+    "apps/construction/views.py:CashboxDetailView"
+   ]
+  },
+  {
+   "code": "method_not_allowed",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Неизвестный способ оплаты.",
+   "where": [
+    "apps/main/kassa_views.py:ClientPayDebtAPIView"
+   ]
+  },
+  {
+   "code": "method_required",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/pos_views.py"
+   ]
+  },
+  {
+   "code": "mixed_batches",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "В чеке один товар из разных партий (оттенок/калибр могут отличаться).",
+   "where": [
+    "apps/main/tz26/hw_batches/services.py",
+    "apps/main/tz26/hw_batches/views.py"
+   ]
+  },
+  {
+   "code": "mixed_sum_mismatch",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/pos_views.py"
+   ]
+  },
+  {
+   "code": "negative_price",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView",
+    "apps/main/pos_bulk.py:SaleItemsBulkAPIView",
+    "apps/main/pos_views.py:SaleAddCustomItemAPIView"
+   ]
+  },
+  {
+   "code": "negative_stock",
+   "http": [
+    200
+   ],
+   "kind": "warning",
+   "area": "sales",
+   "detail_ru": "Не хватает остатка по товару «…»: возвращённое уже продано.",
+   "where": [
+    "apps/main/pos_return_edit.py",
+    "apps/main/receipt_edit.py",
+    "apps/main/return_edit.py"
+   ]
+  },
+  {
+   "code": "new_lines_not_allowed",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "returns",
+   "detail_ru": "Новые строки в правке возврата не допускаются.",
+   "where": [
+    "apps/main/return_edit.py"
+   ]
+  },
+  {
+   "code": "no_access",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Нет доступа к отправке WhatsApp. Попросите владельца.",
+   "where": [
+    "apps/main/whatsapp_views.py:WhatsAppSendAPIView",
+    "apps/main/whatsapp_views.py:WhatsAppSettingsAPIView"
+   ]
+  },
+  {
+   "code": "no_cashbox",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Нет кассы для продажи без связи.",
+   "where": [
+    "apps/main/kassa_views.py"
+   ]
+  },
+  {
+   "code": "no_client",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "У продажи в долг нет клиента — погасить её нельзя.",
+   "where": [
+    "apps/main/pos_views.py:SalePayDebtAPIView"
+   ]
+  },
+  {
+   "code": "no_company",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "У пользователя нет компании.",
+   "where": [
+    "apps/main/media_receipts.py:MainMediaListCreateAPIView",
+    "apps/main/tz26/pos_sync/views.py"
+   ]
+  },
+  {
+   "code": "no_debt",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "У клиента нет непогашенных долгов.",
+   "where": [
+    "apps/main/pos_views.py:SalePayDebtAPIView",
+    "apps/main/views.py:ClientDealsPayAnyAPIView"
+   ]
+  },
+  {
+   "code": "no_key",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Владелец ещё не добавил ключ Google Gemini.",
+   "where": [
+    "apps/main/ai_advisor_web.py:AiAdvisorAskAPIView",
+    "apps/main/ai_advisor_web.py:AiAdvisorAskVoiceAPIView",
+    "apps/main/ai_advisor_web.py:AiAdvisorInvoiceParseAPIView"
+   ]
+  },
+  {
+   "code": "not_divisible",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Остаток … не делится на … без остатка.",
+   "where": [
+    "apps/main/product_pack_convert.py"
+   ]
+  },
+  {
+   "code": "not_found",
+   "http": [
+    404
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "Файл не найден.",
+   "where": [
+    "apps/main/media_receipts.py:MainMediaDetailAPIView",
+    "apps/main/media_receipts.py:PublicReceiptAPIView",
+    "apps/main/media_receipts.py:PublicReceiptPdfAPIView",
+    "apps/main/media_receipts.py:PublicReceiptRatingAPIView"
+   ]
+  },
+  {
+   "code": "not_heard",
+   "http": [
+    422
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Не расслышал. Скажите ещё раз, ближе к микрофону.",
+   "where": [
+    "apps/main/ai_advisor_web.py:AiAdvisorAskVoiceAPIView"
+   ]
+  },
+  {
+   "code": "not_invoice",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "clients",
+   "detail_ru": "Оплата принимается только по счёту.",
+   "where": [
+    "apps/main/client_documents.py:ClientDocumentPayAPIView"
+   ]
+  },
+  {
+   "code": "not_pending",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Запрос уже в статусе «{obj.status}».",
+   "where": [
+    "apps/main/pos_requests.py"
+   ]
+  },
+  {
+   "code": "not_supplier",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Контрагент не поставщик.",
+   "where": [
+    "apps/main/views.py:SupplierDebtPayAPIView"
+   ]
+  },
+  {
+   "code": "not_taken",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Сначала заберите чек (take).",
+   "where": [
+    "apps/main/tz26/pos_print/held_views.py:HeldCartCloseAPIView"
+   ]
+  },
+  {
+   "code": "nothing_to_change",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Необходимо указать хотя бы одно поле для изменения: due_date, promised_date или note.",
+   "where": [
+    "apps/main/views.py:ClientDealInstallmentUpdateAPIView"
+   ]
+  },
+  {
+   "code": "number_conflict",
+   "http": [
+    400,
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Не удалось выдать номер заказа, повторите.",
+   "where": [
+    "apps/main/purchase_orders.py:PurchaseOrderListCreateAPIView",
+    "apps/main/tz26/cust_orders/services.py"
+   ]
+  },
+  {
+   "code": "object_not_found",
+   "http": [
+    400,
+    404
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Объект не найден у этого клиента.",
+   "where": [
+    "apps/main/tz26/cust_orders/views.py:OrderBase",
+    "apps/main/tz26/hw_prices/services.py"
+   ]
+  },
+  {
+   "code": "offline_too_old",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Приход старше 7 суток — оформите его вручную.",
+   "where": [
+    "apps/main/kassa_views.py:QuickCheckoutSerializer",
+    "apps/main/offline_receipt.py"
+   ]
+  },
+  {
+   "code": "only_status_for_assignee",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Исполнитель может менять только статус, отчёт и файлы отчёта.",
+   "where": [
+    "apps/main/tz26/staff/tasks_api.py:StaffTaskDetailView"
+   ]
+  },
+  {
+   "code": "order_already_delivered",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Заказ уже выдан, отменить нельзя.",
+   "where": [
+    "apps/main/tz26/cust_orders/services.py"
+   ]
+  },
+  {
+   "code": "order_closed",
+   "http": [
+    400,
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Заказ закрыт: строки и поставщика менять нельзя.",
+   "where": [
+    "apps/main/purchase_orders.py:PurchaseOrderDetailAPIView",
+    "apps/main/tz26/cust_orders/services.py",
+    "apps/main/tz26/cust_orders/views.py:OrderDetailAPIView",
+    "apps/main/views.py:SupplierReceiptAPIView"
+   ]
+  },
+  {
+   "code": "order_empty",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "В заказе нет строк.",
+   "where": [
+    "apps/main/tz26/cust_orders/services.py"
+   ]
+  },
+  {
+   "code": "order_not_confirmed",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Сначала подтвердите заказ (status=confirmed).",
+   "where": [
+    "apps/main/tz26/cust_orders/services.py"
+   ]
+  },
+  {
+   "code": "order_not_deletable",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Удалить можно только черновик или отменённый заказ.",
+   "where": [
+    "apps/main/purchase_orders.py:PurchaseOrderDetailAPIView"
+   ]
+  },
+  {
+   "code": "order_not_found",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Заказ поставщику не найден.",
+   "where": [
+    "apps/main/views.py:SupplierReceiptAPIView"
+   ]
+  },
+  {
+   "code": "order_reserved",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Строки нельзя менять: заказ в резерве. Отмените его или создайте новый.",
+   "where": [
+    "apps/main/tz26/cust_orders/views.py:OrderDetailAPIView"
+   ]
+  },
+  {
+   "code": "order_supplier_mismatch",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Заказ оформлен на другого поставщика.",
+   "where": [
+    "apps/main/views.py:SupplierReceiptAPIView"
+   ]
+  },
+  {
+   "code": "order_waiting_supply",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Часть товара ещё не пришла.",
+   "where": [
+    "apps/main/tz26/cust_orders/services.py"
+   ]
+  },
+  {
+   "code": "overpayment",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "clients",
+   "detail_ru": "Остаток к оплате ….",
+   "where": [
+    "apps/main/client_documents.py:ClientDocumentPayAPIView"
+   ]
+  },
+  {
+   "code": "owner_source_not_supported",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Выплата «из кармана владельца» пока не поддержана: внесите вложение владельца и выплатите из кассы.",
+   "where": [
+    "apps/main/market_salary_views.py:MarketSalaryPayoutListCreateAPIView"
+   ]
+  },
+  {
+   "code": "pack_unknown",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": null,
+   "where": [
+    "apps/users/tz31_tariffs.py"
+   ]
+  },
+  {
+   "code": "package_not_found",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView",
+    "apps/main/pos_bulk.py:SaleItemsBulkAPIView"
+   ]
+  },
+  {
+   "code": "paid_amount_exceeds_total",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "paid_amount больше суммы прихода.",
+   "where": [
+    "apps/main/views.py:SupplierReceiptAPIView"
+   ]
+  },
+  {
+   "code": "paid_amount_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "paid_amount — неотрицательная сумма.",
+   "where": [
+    "apps/main/views.py:SupplierReceiptAPIView"
+   ]
+  },
+  {
+   "code": "paid_sales_need_confirmation",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Среди выбранных чеков есть оплаченные. Удалить их можно только после подтверждения.",
+   "where": [
+    "apps/main/pos_views.py:SaleBulkDeleteAPIView"
+   ]
+  },
+  {
+   "code": "payment_not_tracked",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": null,
+   "where": [
+    "apps/main/receipt_edit.py"
+   ]
+  },
+  {
+   "code": "payment_type_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "payment_type: cash | transfer | debt | prepayment.",
+   "where": [
+    "apps/main/views.py:SupplierReceiptAPIView"
+   ]
+  },
+  {
+   "code": "payout_not_found",
+   "http": [
+    404
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Выплата не найдена.",
+   "where": [
+    "apps/main/market_salary_views.py:MarketSalaryPayoutDetailAPIView"
+   ]
+  },
+  {
+   "code": "payout_over_profit",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": null,
+   "where": [
+    "apps/main/tz1029_invest.py:PayoutSerializer"
+   ]
+  },
+  {
+   "code": "period_closed",
+   "http": [
+    409,
+    423
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Период закрыт — правка невозможна.",
+   "where": [
+    "apps/main/offline_receipt.py",
+    "apps/main/pos_return_edit.py",
+    "apps/main/return_edit.py"
+   ]
+  },
+  {
+   "code": "period_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Период указан неверно.",
+   "where": [
+    "apps/main/market_salary_views.py:MarketSalaryPayoutListCreateAPIView",
+    "apps/main/tz26/staff/schedule_views.py",
+    "apps/main/tz26/staff/schedule_views.py:StaffTimesheetView",
+    "apps/main/tz26/staff/tasks_api.py"
+   ]
+  },
+  {
+   "code": "permission_denied",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "Пользователь не привязан к компании.",
+   "where": [
+    "apps/construction/views.py:CashFlowWriteAccess",
+    "apps/construction/views_admin.py:TrashListView",
+    "apps/construction/views_admin.py:TrashRestoreView",
+    "apps/construction/views_buhgalter.py:AuditLogView"
+   ]
+  },
+  {
+   "code": "phone_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/users/serializers.py"
+   ]
+  },
+  {
+   "code": "pin_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Неверный PIN.",
+   "where": [
+    "apps/users/pin.py:PinSetView",
+    "apps/users/pin.py:PinVerifyView"
+   ]
+  },
+  {
+   "code": "pin_locked",
+   "http": [
+    429
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Слишком много попыток. Повторите через … мин.",
+   "where": [
+    "apps/users/pin.py"
+   ]
+  },
+  {
+   "code": "pin_not_set",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "PIN ещё не задан.",
+   "where": [
+    "apps/users/pin.py:PinSettingsView",
+    "apps/users/pin.py:PinVerifyView"
+   ]
+  },
+  {
+   "code": "pin_required",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Нужно подтвердить действие PIN-кодом.",
+   "where": [
+    "apps/users/pin.py"
+   ]
+  },
+  {
+   "code": "plan_not_allowed",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "На тарифе «Стандарт» все пакеты уже включены.",
+   "where": [
+    "apps/users/tz31_tariffs.py"
+   ]
+  },
+  {
+   "code": "prepayment_exceeds_total",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Предоплата больше суммы заказа.",
+   "where": [
+    "apps/main/tz26/cust_orders/services.py"
+   ]
+  },
+  {
+   "code": "prepayment_via_action",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Предоплата вносится через POST customer-orders/{id}/prepay/.",
+   "where": [
+    "apps/main/tz26/cust_orders/views.py:OrderDetailAPIView"
+   ]
+  },
+  {
+   "code": "preview_expired",
+   "http": [
+    404,
+    410
+   ],
+   "kind": "error",
+   "area": "showcase",
+   "detail_ru": "Срок действия ссылки предпросмотра истёк (24 ч). Создайте новую.",
+   "where": [
+    "apps/main/showcase/services.py"
+   ]
+  },
+  {
+   "code": "price_below_cost",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Цена продажи не может быть ниже закупочной (…).",
+   "where": [
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView",
+    "apps/main/pos_bulk.py:SaleItemsBulkAPIView",
+    "apps/main/pos_views.py:AgentCartItemUpdateDestroyAPIView",
+    "apps/main/pos_views.py:AgentSaleAddItemAPIView"
+   ]
+  },
+  {
+   "code": "price_changed",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Цены изменились. Обновите каталог и пересчитайте чек.",
+   "where": [
+    "apps/main/event_names.py",
+    "apps/main/events_stream.py",
+    "apps/main/kassa_views.py",
+    "apps/main/mass_incoming_views.py"
+   ]
+  },
+  {
+   "code": "price_level_exists",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Уровень с таким кодом уже есть.",
+   "where": [
+    "apps/main/tz26/hw_prices/services.py"
+   ]
+  },
+  {
+   "code": "price_level_in_use",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Уровень назначен клиентам.",
+   "where": [
+    "apps/main/tz26/hw_prices/views.py:PriceLevelDetailAPIView"
+   ]
+  },
+  {
+   "code": "price_level_system",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Системный уровень удалить нельзя.",
+   "where": [
+    "apps/main/tz26/hw_prices/views.py:PriceLevelDetailAPIView"
+   ]
+  },
+  {
+   "code": "price_levels_limit",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Своих уровней цен не больше ….",
+   "where": [
+    "apps/main/tz26/hw_prices/services.py"
+   ]
+  },
+  {
+   "code": "price_mismatch",
+   "http": [
+    200
+   ],
+   "kind": "warning",
+   "area": "sales",
+   "detail_ru": "Цены изменились. Обновите каталог и пересчитайте чек.",
+   "where": [
+    "apps/main/kassa_views.py"
+   ]
+  },
+  {
+   "code": "price_overflow",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Цена за упаковку выходит за допустимый предел (9 999 999,999).",
+   "where": [
+    "apps/main/product_pack_convert.py"
+   ]
+  },
+  {
+   "code": "product_has_history",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Товар нельзя удалить: по нему есть приходы, продажи или перемещения. Его можно отправить в архив.",
+   "where": [
+    "apps/main/views.py",
+    "apps/main/views.py:ProductBulkDeleteAPIView"
+   ]
+  },
+  {
+   "code": "product_in_open_cart",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Товар лежит в открытой корзине кассы — закройте корзины и повторите.",
+   "where": [
+    "apps/main/product_pack_convert.py"
+   ]
+  },
+  {
+   "code": "product_not_found",
+   "http": [
+    400,
+    404
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Товар не найден.",
+   "where": [
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView",
+    "apps/main/pos_bulk.py:SaleItemsBulkAPIView",
+    "apps/main/purchase_orders.py:PurchaseOrderBase",
+    "apps/main/tz26/cust_orders/views.py:OrderBase"
+   ]
+  },
+  {
+   "code": "product_not_in_location",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Товары вне ячеек «……»: … шт.",
+   "where": [
+    "apps/main/tz26/hw_catalog/services.py"
+   ]
+  },
+  {
+   "code": "quantity_below_min",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": null,
+   "where": [
+    "apps/main/tz26/hw_units/services.py"
+   ]
+  },
+  {
+   "code": "quantity_step_mismatch",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": null,
+   "where": [
+    "apps/main/tz26/hw_units/services.py"
+   ]
+  },
+  {
+   "code": "quota_exceeded",
+   "http": [
+    413
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "Исчерпана квота хранилища компании.",
+   "where": [
+    "apps/main/media_receipts.py"
+   ]
+  },
+  {
+   "code": "rate_limited",
+   "http": [
+    429
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Слишком много отзывов. Попробуйте позже.",
+   "where": [
+    "apps/main/tz31_reviews.py:PublicProductReviewsAPIView"
+   ]
+  },
+  {
+   "code": "read_only",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Недостаточно прав: у вас доступ к разделу только для просмотра.",
+   "where": [
+    "apps/main/serializers.py",
+    "apps/users/permissions.py",
+    "apps/users/serializers.py"
+   ]
+  },
+  {
+   "code": "reason_required",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "Укажите причину правки (…–… знаков).",
+   "where": [
+    "apps/main/receipt_edit.py"
+   ]
+  },
+  {
+   "code": "receipt_fully_returned",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "Приход полностью возвращён поставщику — править нечего.",
+   "where": [
+    "apps/main/receipt_edit.py"
+   ]
+  },
+  {
+   "code": "receipt_not_found",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Приход не найден.",
+   "where": [
+    "apps/main/views.py:ClientDealListCreateAPIView"
+   ]
+  },
+  {
+   "code": "receipt_qty_not_integer",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "Строка …: … x … даёт дробное количество, а товар штучный.",
+   "where": [
+    "apps/main/tz26/hw_units/receipts.py"
+   ]
+  },
+  {
+   "code": "refresh_expired",
+   "http": [
+    401
+   ],
+   "kind": "error",
+   "area": "auth",
+   "detail_ru": null,
+   "where": [
+    "apps/users/auth_session.py"
+   ]
+  },
+  {
+   "code": "refund_exceeds_paid",
+   "http": [
+    400,
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Продажа уже отменена или полностью возвращена.",
+   "where": [
+    "apps/main/pos_views.py"
+   ]
+  },
+  {
+   "code": "reject_cascade_failed",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "cash",
+   "detail_ru": "Невозможно отклонить возврат чека: склад и долг уже изменены.",
+   "where": [
+    "apps/construction/auto_cashflow.py"
+   ]
+  },
+  {
+   "code": "rental_returned",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Прокат уже возвращён.",
+   "where": [
+    "apps/main/rentals.py:RentalExtendAPIView"
+   ]
+  },
+  {
+   "code": "restore_failed",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "cash",
+   "detail_ru": null,
+   "where": [
+    "apps/construction/views_admin.py:TrashRestoreView"
+   ]
+  },
+  {
+   "code": "return_voided",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "Возврат аннулирован.",
+   "where": [
+    "apps/main/fiscal_kassa.py:ReturnFiscalAPIView"
+   ]
+  },
+  {
+   "code": "route_not_found",
+   "http": [
+    404
+   ],
+   "kind": "error",
+   "area": "common",
+   "detail_ru": "Такого адреса API нет.",
+   "where": [
+    "core/capabilities.py",
+    "core/urls.py"
+   ]
+  },
+  {
+   "code": "sale_not_completed",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "Чек ещё не проведён.",
+   "where": [
+    "apps/main/fiscal_kassa.py:SaleFiscalAPIView"
+   ]
+  },
+  {
+   "code": "sale_price_not_latest",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": null,
+   "where": [
+    "apps/main/receipt_edit.py"
+   ]
+  },
+  {
+   "code": "sale_unit_conflict",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "В корзине уже есть этот товар в другой единице. Уберите ту строку или продавайте в одной единице.",
+   "where": [
+    "apps/main/tz26/hw_units/units.py"
+   ]
+  },
+  {
+   "code": "sale_unit_in_use",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "hardware",
+   "detail_ru": "Единица «…» лежит в открытой корзине.",
+   "where": [
+    "apps/main/tz26/hw_units/units.py"
+   ]
+  },
+  {
+   "code": "sale_unit_not_found",
+   "http": [
+    404
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "…: единица закупки не найдена или не разрешена к приходу.",
+   "where": [
+    "apps/main/tz26/hw_units/receipts.py",
+    "apps/main/tz26/hw_units/units.py"
+   ]
+  },
+  {
+   "code": "sales_after_receipt",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": null,
+   "where": [
+    "apps/main/receipt_edit.py"
+   ]
+  },
+  {
+   "code": "schedule_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Поле … указано неверно.",
+   "where": [
+    "apps/main/tz26/staff/schedule_views.py"
+   ]
+  },
+  {
+   "code": "serial_already_sold",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/serials.py"
+   ]
+  },
+  {
+   "code": "serial_count_mismatch",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/serials.py"
+   ]
+  },
+  {
+   "code": "serial_duplicate_in_line",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/serials.py"
+   ]
+  },
+  {
+   "code": "serial_too_long",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/serials.py"
+   ]
+  },
+  {
+   "code": "server_error",
+   "http": [
+    500
+   ],
+   "kind": "error",
+   "area": "common",
+   "detail_ru": "Внутренняя ошибка сервера (500).",
+   "where": [
+    "core/urls.py"
+   ]
+  },
+  {
+   "code": "session_expired",
+   "http": [
+    410
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Сеанс не найден или истёк.",
+   "where": [
+    "apps/main/tz26/pos_print/scanner_views.py:ScannerScanAPIView"
+   ]
+  },
+  {
+   "code": "session_revoked",
+   "http": [
+    401
+   ],
+   "kind": "error",
+   "area": "auth",
+   "detail_ru": null,
+   "where": [
+    "apps/users/auth_session.py"
+   ]
+  },
+  {
+   "code": "shift_closed",
+   "http": [
+    400,
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Смена уже закрыта.",
+   "where": [
+    "apps/construction/serializers.py:CashFlowSerializer",
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView",
+    "apps/main/pos_views.py:SaleCheckoutAPIView",
+    "apps/main/pos_views.py:SalePayDebtAPIView"
+   ]
+  },
+  {
+   "code": "shift_closed_money_to_main",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": null,
+   "where": [
+    "apps/main/receipt_edit.py"
+   ]
+  },
+  {
+   "code": "shift_not_found",
+   "http": [
+    400,
+    404
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Смена не найдена.",
+   "where": [
+    "apps/main/tz26/cust_orders/services.py",
+    "apps/main/views.py",
+    "apps/main/views.py:ClientDealsPayAnyAPIView"
+   ]
+  },
+  {
+   "code": "shift_not_open",
+   "http": [
+    404,
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Смена не открыта. Сначала откройте смену на кассе.",
+   "where": [
+    "apps/main/tz26/cust_orders/services.py",
+    "apps/possync/views.py:ShiftCurrentAPIView"
+   ]
+  },
+  {
+   "code": "shift_not_owned",
+   "http": [
+    400,
+    403
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Это смена другого кассира.",
+   "where": [
+    "apps/construction/serializers.py:CashFlowSerializer",
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView",
+    "apps/main/pos_views.py:SalePayDebtAPIView",
+    "apps/main/views.py"
+   ]
+  },
+  {
+   "code": "shift_required",
+   "http": [
+    400,
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Принять можно только в открытой смене на этой кассе.",
+   "where": [
+    "apps/main/pos_requests.py:PosRequestAcceptView",
+    "apps/main/views.py:ClientDealsPayAnyAPIView"
+   ]
+  },
+  {
+   "code": "slug_moved",
+   "http": [
+    200
+   ],
+   "kind": "error",
+   "area": "showcase",
+   "detail_ru": "Адрес витрины изменён.",
+   "where": [
+    "apps/main/showcase/services.py:ShowcaseErrorMixin"
+   ]
+  },
+  {
+   "code": "speed_daily_limit",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": null,
+   "where": [
+    "apps/main/tz31_speed.py"
+   ]
+  },
+  {
+   "code": "speed_rate_limited",
+   "http": [
+    429
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Слишком частые замеры. Повторите позже.",
+   "where": [
+    "apps/main/tz31_speed.py"
+   ]
+  },
+  {
+   "code": "status_transition_invalid",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Новый заказ можно создать только как draft или confirmed.",
+   "where": [
+    "apps/main/tz26/cust_orders/views.py:OrderDetailAPIView",
+    "apps/main/tz26/cust_orders/views.py:OrderListCreateAPIView"
+   ]
+  },
+  {
+   "code": "stock_changed",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Остаток уже изменился (идут продажи). Обновите товар и повторите.",
+   "where": [
+    "apps/main/product_pack_convert.py"
+   ]
+  },
+  {
+   "code": "supplier_not_found",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Поставщик не найден.",
+   "where": [
+    "apps/main/purchase_orders.py:PurchaseOrderBase",
+    "apps/main/tz26/cust_orders/services.py",
+    "apps/main/tz26/cust_orders/views.py:OrderReserveAPIView"
+   ]
+  },
+  {
+   "code": "supplier_required",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Укажите поставщика (supplier).",
+   "where": [
+    "apps/main/tz26/cust_orders/services.py"
+   ]
+  },
+  {
+   "code": "tax_regime_conflict",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "При этом режиме НДС не платят: снимите «Плательщик НДС» или выберите общий режим.",
+   "where": [
+    "apps/main/fiscal_kassa.py:FiscalSettingsAPIView"
+   ]
+  },
+  {
+   "code": "throttled",
+   "http": [
+    429
+   ],
+   "kind": "error",
+   "area": "showcase",
+   "detail_ru": "Слишком много заказов. Попробуйте позже.",
+   "where": [
+    "apps/main/showcase/views_public_design.py:PublicCompanyShowcaseCartLinkAPIView",
+    "apps/main/showcase/views_public_design.py:PublicCompanyShowcaseEventsAPIView",
+    "apps/main/showcase/views_public_design.py:PublicCompanyShowcaseNotifyAPIView",
+    "apps/main/showcase/views_public_design.py:PublicCompanyShowcaseOrderCreateAPIView"
+   ]
+  },
+  {
+   "code": "token_invalid",
+   "http": [
+    401
+   ],
+   "kind": "error",
+   "area": "auth",
+   "detail_ru": "Token is invalid or expired",
+   "where": [
+    "apps/users/auth_session.py",
+    "apps/users/views.py",
+    "apps/users/views.py:CustomTokenRefreshView"
+   ]
+  },
+  {
+   "code": "too_big",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Файл больше 8 МБ.",
+   "where": [
+    "apps/main/ai_advisor_web.py:AiAdvisorInvoiceParseAPIView"
+   ]
+  },
+  {
+   "code": "too_fast",
+   "http": [
+    429
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Слишком часто. Подождите минуту.",
+   "where": [
+    "apps/main/ai_advisor_web.py:AiAdvisorAskAPIView"
+   ]
+  },
+  {
+   "code": "too_large",
+   "http": [
+    413
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "Тело больше 50 МБ.",
+   "where": [
+    "apps/main/media_receipts.py",
+    "apps/main/tz31_speed.py:SpeedUpAPIView"
+   ]
+  },
+  {
+   "code": "too_long",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Запись слишком длинная — до полутора минут.",
+   "where": [
+    "apps/main/ai_advisor_web.py:AiAdvisorAskVoiceAPIView"
+   ]
+  },
+  {
+   "code": "too_many_attempts",
+   "http": [
+    429
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Слишком много неверных попыток входа. Подождите 15 минут или восстановите пароль.",
+   "where": [
+    "apps/users/app_settings_views.py:CompanyFeatureActivateAPIView",
+    "apps/users/promo_views.py:PromoRedeemAPIView",
+    "apps/users/views.py:CustomTokenObtainPairView"
+   ]
+  },
+  {
+   "code": "too_many_items",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Не больше … позиций за запрос.",
+   "where": [
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView",
+    "apps/main/pos_bulk.py:SaleItemsBulkAPIView"
+   ]
+  },
+  {
+   "code": "too_many_requests",
+   "http": [
+    429
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Слишком много запросов. Попробуйте через 15 минут.",
+   "where": [
+    "apps/users/password_reset.py:PasswordResetRequestEmailAPIView"
+   ]
+  },
+  {
+   "code": "total_mismatch",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": "Итог чека на сервере отличается от итога кассы.",
+   "where": [
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView"
+   ]
+  },
+  {
+   "code": "trial_used",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Пробный доступ к этой функции уже использован.",
+   "where": [
+    "apps/users/app_settings_views.py:CompanyFeatureTrialAPIView"
+   ]
+  },
+  {
+   "code": "turnstile_failed",
+   "http": [
+    403
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Проверка «я не робот» не пройдена.",
+   "where": [
+    "apps/main/tz31_reviews.py:PublicProductReviewsAPIView"
+   ]
+  },
+  {
+   "code": "unknown_feature",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "staff",
+   "detail_ru": "Неизвестная функция.",
+   "where": [
+    "apps/users/app_settings_views.py:CompanyFeatureTrialAPIView"
+   ]
+  },
+  {
+   "code": "use_websocket",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": null,
+   "where": [
+    "apps/main/events_stream.py"
+   ]
+  },
+  {
+   "code": "user_disabled",
+   "http": [
+    401
+   ],
+   "kind": "error",
+   "area": "auth",
+   "detail_ru": null,
+   "where": [
+    "apps/users/auth_session.py"
+   ]
+  },
+  {
+   "code": "validation_error",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "fiscal",
+   "detail_ru": "Напишите вопрос.",
+   "where": [
+    "apps/main/ai_advisor_web.py:AiAdvisorAskAPIView",
+    "apps/main/ai_advisor_web.py:AiAdvisorAskVoiceAPIView",
+    "apps/main/ai_advisor_web.py:AiAdvisorInvoiceApplyAPIView",
+    "apps/main/ai_advisor_web.py:AiAdvisorInvoiceParseAPIView"
+   ]
+  },
+  {
+   "code": "variant_mismatch",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Вариант не относится к товару.",
+   "where": [
+    "apps/main/views.py:SupplierReceiptAPIView"
+   ]
+  },
+  {
+   "code": "variant_missing",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/kassa_views.py"
+   ]
+  },
+  {
+   "code": "variant_not_found",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView",
+    "apps/main/pos_bulk.py:SaleItemsBulkAPIView"
+   ]
+  },
+  {
+   "code": "variant_qty_mismatch",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Неверное количество в variants.",
+   "where": [
+    "apps/main/views.py:SupplierReceiptAPIView"
+   ]
+  },
+  {
+   "code": "variant_required",
+   "http": [
+    400
+   ],
+   "kind": "error",
+   "area": "sales",
+   "detail_ru": null,
+   "where": [
+    "apps/main/kassa_views.py:PosQuickCheckoutAPIView"
+   ]
+  },
+  {
+   "code": "variants_not_supported",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "У товара есть варианты — переведите остаток вручную.",
+   "where": [
+    "apps/main/product_pack_convert.py",
+    "apps/main/receipt_edit.py"
+   ]
+  },
+  {
+   "code": "version_conflict",
+   "http": [
+    400,
+    409,
+    412
+   ],
+   "kind": "error",
+   "area": "returns",
+   "detail_ru": "Приход уже изменили с другого устройства. Обновите и повторите.",
+   "where": [
+    "apps/main/receipt_edit.py",
+    "apps/main/return_edit.py",
+    "apps/main/tz26/cust_orders/views.py:OrderDetailAPIView",
+    "apps/users/pin.py"
+   ]
+  },
+  {
+   "code": "version_not_found",
+   "http": [
+    404
+   ],
+   "kind": "error",
+   "area": "purchases",
+   "detail_ru": "Нет такой версии прихода.",
+   "where": [
+    "apps/main/receipt_edit_views.py:SupplierReceiptRevertAPIView",
+    "apps/main/receipt_edit_views.py:SupplierReceiptVersionDetailAPIView"
+   ]
+  },
+  {
+   "code": "version_required",
+   "http": [
+    428
+   ],
+   "kind": "error",
+   "area": "returns",
+   "detail_ru": "Передайте версию прихода (If-Match или version) — иначе можно затереть чужую правку.",
+   "where": [
+    "apps/main/receipt_edit.py",
+    "apps/main/return_edit.py",
+    "apps/users/pin.py"
+   ]
+  },
+  {
+   "code": "weight_product_not_supported",
+   "http": [
+    409
+   ],
+   "kind": "error",
+   "area": "other",
+   "detail_ru": "Весовой товар нельзя перевести в упаковки.",
+   "where": [
+    "apps/main/product_pack_convert.py"
+   ]
+  }
+ ]
+}

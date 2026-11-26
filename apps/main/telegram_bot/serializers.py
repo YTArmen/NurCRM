@@ -97,15 +97,28 @@ class TelegramBotSettingsSerializer(serializers.ModelSerializer):
             "ai_owner_actions_enabled",
             "send_product_photos",
             "owner_phone",
+            "orders_chat_id",
+            "orders_chat_title",
+            "orders_chat_bound_at",
+            "orders_recipients",
+            "orders_show_amount",
+            "orders_show_phone",
+            "orders_last_error",
             "last_update_at",
             "last_reply_at",
             "token",
             "ai_key",
         ]
-        read_only_fields = ["bot_username", "token_set", "webhook_ok", "webhook_error", "ai_key_set", "ai_source", "last_update_at", "last_reply_at"]
+        read_only_fields = ["orders_chat_id", "orders_chat_title", "orders_chat_bound_at", "orders_last_error", "bot_username", "token_set", "webhook_ok", "webhook_error", "ai_key_set", "ai_source", "last_update_at", "last_reply_at"]
 
     def get_ai_source(self, obj):
         return obj.ai_source
+
+    def validate_orders_recipients(self, value):
+        inst = self.instance
+        if value in ("group", "both") and not (inst and inst.orders_chat_id):
+            raise serializers.ValidationError("Сначала привяжите группу заказов.")
+        return value
 
     def update(self, instance, validated_data):
         new_token = validated_data.pop("token", None)
@@ -367,6 +380,26 @@ class TelegramBotScenarioSerializer(serializers.ModelSerializer):
 
 class TelegramBotAuditSerializer(serializers.ModelSerializer):
     at = serializers.DateTimeField(source="created_at", read_only=True)
+    event = serializers.CharField(source="action", read_only=True)
+    order_id = serializers.SerializerMethodField()
+    chat_id = serializers.SerializerMethodField()
+    ok = serializers.SerializerMethodField()
+    error = serializers.SerializerMethodField()
+
+    def _ch(self, obj, key):
+        return (obj.changes or {}).get(key) if obj.action == "order_notified" else None
+
+    def get_order_id(self, obj):
+        return self._ch(obj, "order_id")
+
+    def get_chat_id(self, obj):
+        return self._ch(obj, "chat_id")
+
+    def get_ok(self, obj):
+        return self._ch(obj, "ok")
+
+    def get_error(self, obj):
+        return self._ch(obj, "error")
 
     class Meta:
         from apps.main.telegram_bot.models import TelegramBotAudit
@@ -379,4 +412,9 @@ class TelegramBotAuditSerializer(serializers.ModelSerializer):
             "object_title",
             "source",
             "changes",
+            "event",
+            "order_id",
+            "chat_id",
+            "ok",
+            "error",
         ]

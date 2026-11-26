@@ -1076,7 +1076,10 @@ class MenuItemSerializer(CompanyBranchReadOnlyMixin):
         # чтобы фронт видел добавленные ингредиенты через /dishes/<id>/ingredients/.
         try:
             if getattr(instance, "dish_ingredients", None) is not None and instance.dish_ingredients.exists():
-                qs = (
+                if "dish_ingredients" in getattr(instance, "_prefetched_objects_cache", {}):  # perf1311c
+                    qs = sorted(instance.dish_ingredients.all(), key=lambda d: (d.created_at, str(d.id)))
+                else:
+                  qs = (
                     instance.dish_ingredients
                     .select_related("product", "preparation")
                     .prefetch_related(
@@ -1119,7 +1122,7 @@ class MenuItemSerializer(CompanyBranchReadOnlyMixin):
     def get_ingredients_cost(self, obj):
         """Стоимость всех ингредиентов (без прочих расходов)"""
         total = Decimal("0.00")
-        for ingredient in obj.ingredients.select_related('product').all():
+        for ingredient in obj.ingredients.all():  # perf1311c: берём из prefetch
             unit_price = ingredient.product.unit_price or Decimal("0.00")
             amount = ingredient.amount or Decimal("0.00")
             total += unit_price * amount

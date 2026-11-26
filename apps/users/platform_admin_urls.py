@@ -10,8 +10,10 @@ from .platform_admin_views import (
     PlatformAdminUserResetPasswordAPIView,
     PlatformAdminUserImpersonateAPIView,
 )
+from .platform_admin_activity import PlatformAdminCompanyActivityAPIView
 
 urlpatterns = [
+    path('activity/', PlatformAdminCompanyActivityAPIView.as_view(), name='platform-admin-activity'),
     path('meta/', PlatformAdminMetaAPIView.as_view(), name='platform-admin-meta'),
     path('client-app/weekly-report/', PlatformClientAppWeeklyReportAPIView.as_view(), name='platform-admin-client-app-report'),
     path('client-app/shops/<str:company_id>/', PlatformClientAppShopHideAPIView.as_view(), name='platform-admin-client-app-shop'),

@@ -51,6 +51,7 @@ def _user_name(user) -> str:
     return full or getattr(user, "email", None) or str(getattr(user, "id", "") or "")
 
 
+from apps.users.permissions import read_only_guard  # noqa: E402
 class SalaryPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = "page_size"
@@ -125,6 +126,7 @@ class SalaryRateListAPIView(APIView):
         return paginator.get_paginated_response(data)
 
 
+@read_only_guard("can_edit_salary")
 class SalaryRateUpdateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -318,6 +320,7 @@ class SalarySummaryAPIView(APIView):
 # ─────────────────────────────────────────────────────────────
 # 4.5 / 4.6 Выплаты
 # ─────────────────────────────────────────────────────────────
+@read_only_guard("can_edit_salary")
 class SalaryPayoutListCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -397,10 +400,31 @@ class SalaryPayoutListCreateAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        _salary_cashflow(payout, company=company, agent=agent, user=request.user)
         return Response(
             AgentSalaryPayoutSerializer(payout).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+def _salary_cashflow(payout, *, company, agent, user):
+    """Серверная выплата ЗП → операция кассы со статьёй «Зарплата» (ТЗ «Бухгалтер», п. 3). Не ломает выплату."""
+    try:
+        from django.db import transaction
+        from apps.construction.auto_cashflow import create_auto_cashflow
+        from apps.construction.categories import get_default_category
+        from apps.construction.models import CashFlow
+
+        name = f"{getattr(agent, 'first_name', '') or ''} {getattr(agent, 'last_name', '') or ''}".strip() or str(agent.pk)
+        with transaction.atomic():
+            create_auto_cashflow(
+                company=company, user=user, type=CashFlow.Type.EXPENSE, amount=payout.amount,
+                source_kind=CashFlow.SourceKind.MANUAL, source_id=f"salary_payout:{payout.pk}",
+                name=f"Выплата ЗП: {name}", category=get_default_category(company, "salary"),
+            )
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("salary cashflow failed for payout %s", payout.pk, exc_info=True)
 
 
 def _agent_valid_for_company(agent, company) -> bool:

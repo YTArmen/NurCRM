@@ -321,6 +321,17 @@ class DocumentItemSerializer(serializers.ModelSerializer):
 
 
 class DocumentSerializer(serializers.ModelSerializer):
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if "items" in data and isinstance(data["items"], list):
+            data["items"] = sorted(
+                data["items"],
+                key=lambda x: (
+                    (x.get("product_name") or x.get("target_product_name") or "").lower()
+                )
+            )
+        return data
+
     items = DocumentItemSerializer(many=True)
     moves = StockMoveSerializer(many=True, read_only=True)
     receipts = serializers.SerializerMethodField()
@@ -481,6 +492,21 @@ class DocumentSerializer(serializers.ModelSerializer):
             or getattr(getattr(obj, "counterparty", None), "company", None)
             or getattr(getattr(obj, "cash_register", None), "company", None)
         )
+        # perf1311: в списке — один запрос на страницу (с кассой и филиалом), порядок как раньше.
+        root = getattr(self, "parent", None)
+        page = getattr(root, "instance", None) if isinstance(root, serializers.ListSerializer) else None
+        if isinstance(page, (list, tuple)):
+            cf_map = getattr(root, "_perf1311_cf", None)
+            if cf_map is None:
+                cf_map = {}
+                ids = [str(o.id) for o in page]
+                for cf in CashFlow.objects.filter(source_id__in=ids).select_related("cashbox__branch"):
+                    cf_map.setdefault(str(cf.source_id), []).append(cf)
+                root._perf1311_cf = cf_map
+            cfs = cf_map.get(str(obj.id), [])
+            if company:
+                cfs = [cf for cf in cfs if cf.company_id == company.id]
+            return serialize_auto_cashflows(cfs)
         if company:
             cfs = CashFlow.objects.filter(company=company, source_id=str(obj.id))
         else:
@@ -928,7 +954,7 @@ class ProductSimpleSerializer(StockQuantityGuardMixin, serializers.ModelSerializ
     def get_alternate_barcodes(self, obj):
         return [
             {"barcode": b.barcode, "name": b.name}
-            for b in obj.alternate_barcodes.order_by("barcode")
+            for b in sorted(obj.alternate_barcodes.all(), key=lambda x: x.barcode or "")  # perf1311
         ]
 
     def create(self, validated_data):

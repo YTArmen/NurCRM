@@ -1867,7 +1867,13 @@ class Document(models.Model):
             )
             if not multi_warehouse_no_from and not self.warehouse_from:
                 raise ValidationError("Document requires warehouse_from")
-            if self.doc_type in (self.DocType.SALE_RETURN, self.DocType.PURCHASE_RETURN) and not self.counterparty:
+            # Контрагент обязателен только для возврата «в долг» (нужен, чтобы уменьшить долг);
+            # возврат наличными по розничной продаже/закупу без контрагента допустим.
+            if (
+                self.doc_type in (self.DocType.SALE_RETURN, self.DocType.PURCHASE_RETURN)
+                and not self.counterparty
+                and self.payment_kind == self.PaymentKind.CREDIT
+            ):
                 raise ValidationError("Document requires counterparty")
 
         if self.doc_type in (self.DocType.SALE, self.DocType.PURCHASE, self.DocType.SALE_RETURN, self.DocType.PURCHASE_RETURN):
@@ -1948,6 +1954,7 @@ class DocumentItem(models.Model):
     class Meta:
         verbose_name = "Строка документа"
         verbose_name_plural = "Строки документов"
+        ordering = ["product__name", "id"]
 
     def clean(self):
         from django.core.exceptions import ValidationError
@@ -2025,7 +2032,17 @@ class DocumentItem(models.Model):
                 # Для документов агента возможны два режима списания:
                 # - use_common_stock=True: списываем со склада (общий товар) — не требуем AgentStockBalance
                 # - use_common_stock=False: списываем с остатков агента — требуем AgentStockBalance
-                if not bool(getattr(doc, "use_common_stock", False)):
+                # Входящие операции (возврат продажи, приход) остаток агента не требуют:
+                # при проведении запись AgentStockBalance создаётся автоматически.
+                _incoming_types = (
+                    Document.DocType.SALE_RETURN,
+                    Document.DocType.PURCHASE,
+                    Document.DocType.RECEIPT,
+                )
+                if (
+                    not bool(getattr(doc, "use_common_stock", False))
+                    and doc.doc_type not in _incoming_types
+                ):
                     has_balance = AgentStockBalance.objects.filter(
                         agent_id=doc.agent_id,
                         warehouse_id=item_warehouse_id,

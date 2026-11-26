@@ -120,8 +120,8 @@ class CompanyBranchReadOnlyMixin:
 # BarberProfile
 # ===========================
 class BarberProfileSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
-    company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")  # показываем id филиала (или None)
+    company = serializers.ReadOnlyField(source="company_id")
+    branch = serializers.ReadOnlyField(source="branch_id")  # показываем id филиала (или None)
 
     class Meta:
         model = BarberProfile
@@ -134,8 +134,8 @@ class BarberProfileSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSeria
 
 
 class ServiceCategorySerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
-    company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")
+    company = serializers.ReadOnlyField(source="company_id")
+    branch = serializers.ReadOnlyField(source="branch_id")
 
     class Meta:
         model = ServiceCategory
@@ -208,8 +208,8 @@ def normalize_service_name(value: str) -> str:
 
 
 class ServiceSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
-    company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")
+    company = serializers.ReadOnlyField(source="company_id")
+    branch = serializers.ReadOnlyField(source="branch_id")
 
     # категория теперь динамическая (FK)
     category = serializers.PrimaryKeyRelatedField(
@@ -363,8 +363,8 @@ def normalize_barber_phone(phone):
 
 
 class ClientSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
-    company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")
+    company = serializers.ReadOnlyField(source="company_id")
+    branch = serializers.ReadOnlyField(source="branch_id")
 
     class Meta:
         model = Client
@@ -414,8 +414,8 @@ class ClientSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
 
 
 class ClientDocumentSerializer(serializers.ModelSerializer):
-    company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")
+    company = serializers.ReadOnlyField(source="company_id")
+    branch = serializers.ReadOnlyField(source="branch_id")
     client = serializers.ReadOnlyField(source="client.id")
     file = serializers.FileField(required=False, allow_null=True)
 
@@ -525,8 +525,8 @@ class AppointmentServicesListField(serializers.Field):
 
 
 class AppointmentSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
-    company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")
+    company = serializers.ReadOnlyField(source="company_id")
+    branch = serializers.ReadOnlyField(source="branch_id")
 
     client_name = serializers.CharField(source="client.full_name", read_only=True)
     barber_name = serializers.SerializerMethodField()
@@ -797,8 +797,8 @@ class AppointmentHistoryRowSerializer(serializers.ModelSerializer):
 # Folder
 # ===========================
 class FolderSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
-    company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")
+    company = serializers.ReadOnlyField(source="company_id")
+    branch = serializers.ReadOnlyField(source="branch_id")
 
     parent = serializers.PrimaryKeyRelatedField(
         queryset=Folder.objects.all(), allow_null=True, required=False
@@ -834,8 +834,8 @@ class FolderSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
 # Document
 # ===========================
 class DocumentSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
-    company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")
+    company = serializers.ReadOnlyField(source="company_id")
+    branch = serializers.ReadOnlyField(source="branch_id")
     folder_name = serializers.CharField(source="folder.name", read_only=True)
 
     class Meta:
@@ -877,8 +877,8 @@ class PayoutSerializer(CompanyBranchReadOnlyMixin, serializers.ModelSerializer):
       - payout_amount       — сумма выплаты = round(выручка * percent / 100) + (завершённые * per_record) + fixed
     """
 
-    company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")
+    company = serializers.ReadOnlyField(source="company_id")
+    branch = serializers.ReadOnlyField(source="branch_id")
     barber_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -1113,8 +1113,8 @@ class ProductSalePayoutSerializer(CompanyBranchReadOnlyMixin, serializers.ModelS
     payout_amount считается в save() модели и только возвращается наружу.
     """
 
-    company = serializers.ReadOnlyField(source="company.id")
-    branch = serializers.ReadOnlyField(source="branch.id")
+    company = serializers.ReadOnlyField(source="company_id")
+    branch = serializers.ReadOnlyField(source="branch_id")
 
     product_name = serializers.CharField(
         source="product.name",

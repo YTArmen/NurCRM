@@ -445,6 +445,9 @@ class PlatformAdminUserImpersonateAPIView(APIView):
 
         refresh = RefreshToken.for_user(target_user)
         refresh["impersonated_by"] = str(request.user.id)
+        from apps.users.auth_session import stamp_auth_time
+
+        stamp_auth_time(refresh)
         access = refresh.access_token
         access["impersonated_by"] = str(request.user.id)
 

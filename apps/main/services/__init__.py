@@ -15,10 +15,13 @@ from apps.main.services.product_list_filters import apply_product_list_filters  
 
 
 class NotEnoughStock(Exception):
-    pass
+    # ТЗ Н-15: shortages — все нехватки чека [{product_id, variant_id, available, requested}] для errors[]
+    def __init__(self, *args, shortages=None):
+        super().__init__(*args)
+        self.shortages = shortages or []
 
 
-@transaction.atomic
+# ТЗ Н-15: был @transaction.atomic — savepoint на каждую строку чека, а функция ничего не пишет
 def _performer_commission(item) -> Decimal:
     """Процент мастеру с суммы строки (процент задаётся у услуги)."""
     pct = getattr(getattr(item, "product", None), "performer_commission_percent", None)
@@ -26,6 +29,33 @@ def _performer_commission(item) -> Decimal:
         return Decimal("0.00")
     line = (item.unit_price or Decimal("0")) * (item.quantity or Decimal("0")) - (item.line_discount or Decimal("0"))
     return pos_money(max(line, Decimal("0")) * Decimal(str(pct)) / Decimal("100"))
+
+
+def resolve_sale_branch(shift, cart=None, user=None):
+    """ТЗ 31.10 п.13: филиал чека. Раньше брали только shift.branch, а у смен, открытых без филиала
+    (касса «общая» или смена офлайн), чек оставался без branch. Порядок: смена -> касса смены ->
+    корзина -> основной филиал кассира."""
+    branch = getattr(shift, "branch", None)
+    if branch is None:
+        cashbox = getattr(shift, "cashbox", None)
+        branch = getattr(cashbox, "branch", None)
+    if branch is None and cart is not None:
+        branch = getattr(cart, "branch", None)
+    if branch is None:
+        cashier = user or getattr(shift, "cashier", None) or getattr(cart, "user", None)
+        primary = getattr(cashier, "primary_branch", None)
+        try:
+            branch = primary() if callable(primary) else primary
+        except Exception:
+            branch = None
+        company_id = getattr(shift, "company_id", None) or getattr(cart, "company_id", None)
+        if branch is not None and company_id and getattr(branch, "company_id", None) != company_id:
+            branch = None
+    return branch
+
+
+from apps.main.serials import record_sold_serials as _record_sold_serials  # noqa: E402
+from apps.main.serials import warranty_until_for as _warranty_until_for  # noqa: E402
 
 
 def checkout_cart(
@@ -44,6 +74,7 @@ def checkout_cart(
     consultant=None,
     consultant_commission_enabled: bool = False,
     consultant_commission_percent=None,
+    lenient_variants: bool = False,
 ) -> Sale:
     """
     Перенос корзины в Sale (статус NEW) и списание остатков.
@@ -54,7 +85,7 @@ def checkout_cart(
     cart.recalc()
 
     items = list(
-        cart.items.select_related("product", "sale_package", "variant")
+        cart.items.select_related("product", "sale_package", "variant", "sale_unit")
     )
     if not items:
         raise ValueError("Корзина пуста.")
@@ -64,7 +95,7 @@ def checkout_cart(
         raise ValueError("Нет смены. Сначала открой смену или передай кассу и создай смену.")
 
     cashbox = shift.cashbox
-    branch = shift.branch
+    branch = resolve_sale_branch(shift, cart)  # ТЗ 31.10 п.13
 
     prod_ids = [it.product_id for it in items if it.product_id]
     products = {p.id: p for p in Product.objects.select_for_update().filter(id__in=prod_ids)}
@@ -86,6 +117,8 @@ def checkout_cart(
         ProductVariant.objects.filter(product_id__in=prod_ids, is_active=True).values_list("product_id", flat=True)
     )
     for it in items:
+        if lenient_variants:
+            break  # ТЗ Н-15: офлайн-досылка — вариант не выбран, списываем с товара
         if it.product_id and it.product_id in active_variant_pids and not it.variant_id:
             p_name = products[it.product_id].name if it.product_id in products else "Товар"
             raise ValueError(f"Товар «{p_name}» имеет размеры/цвета. Выберите размер/цвет.")
@@ -100,25 +133,31 @@ def checkout_cart(
                 raise ValueError("Вариант позиции не найден.")
             consume_by_vid[it.variant_id] += cart_item_stock_consume_units(it)
     if not allow_negative_stock:
+        shortages, first_msg = [], None
         for vid, need in consume_by_vid.items():
             v = variants[vid]
             if need > Decimal(str(v.quantity or 0)):
-                raise NotEnoughStock(
-                    f"Недостаточно остатка «{products[v.product_id].name}» {v.size} {v.color}".strip()
-                    + f". Требуется {need}, доступно {v.quantity}."
-                )
-
-    if not allow_negative_stock:
+                if first_msg is None:
+                    first_msg = (
+                        f"Недостаточно остатка «{products[v.product_id].name}» {v.size} {v.color}".strip()
+                        + f". Требуется {need}, доступно {v.quantity}."
+                    )
+                shortages.append({"product_id": v.product_id, "variant_id": vid,
+                                  "available": Decimal(str(v.quantity or 0)), "requested": need})
         for pid, need in consume_by_pid.items():
             p = products[pid]
             if getattr(p, "kind", None) == Product.Kind.SERVICE:
                 continue
             have = Decimal(str(p.quantity or 0))
             if need > have:
-                raise NotEnoughStock(
-                    f"Недостаточно остатка для «{getattr(p, 'name', '') or p.id}». "
-                    f"Требуется {need} (в учётных единицах склада), доступно {have}."
-                )
+                if first_msg is None:
+                    first_msg = (
+                        f"Недостаточно остатка для «{getattr(p, 'name', '') or p.id}». "
+                        f"Требуется {need} (в учётных единицах склада), доступно {have}."
+                    )
+                shortages.append({"product_id": pid, "variant_id": None, "available": have, "requested": need})
+        if shortages:
+            raise NotEnoughStock(first_msg, shortages=shortages)
 
     comm_enabled = bool(consultant and consultant_commission_enabled)
     comm_pct = (
@@ -147,6 +186,9 @@ def checkout_cart(
         total=cart.total,
         created_at=timezone.now(),
     )
+    from apps.main.stock_batches import set_doc as _k458_doc  # К-4: движения остатка этого чека
+
+    _k458_doc(sale.id)
 
     sale_items = []
     for it in items:
@@ -154,11 +196,15 @@ def checkout_cart(
         name_snap = (getattr(p, "name", None) or getattr(it, "custom_name", None) or "Позиция")
         barcode_snap = getattr(p, "barcode", None) or ""
         pp = (p.purchase_price or Decimal("0.00")) if p else Decimal("0.00")
+        # ТЗ 31.10 п.19: себестоимость единицы — 4 знака (раньше копейки терялись на дешёвых товарах)
+        from apps.main.models import _cost4
         if it.sale_package_id:
             ipp = Decimal(str(it.sale_package.quantity_in_package or 0))
-            snap = pos_money(pp / ipp) if ipp > 0 else pos_money(pp)
+            snap = _cost4(pp / ipp) if ipp > 0 else _cost4(pp)
         else:
-            snap = pos_money(pp)
+            snap = _cost4(pp)
+        if it.sale_unit_id:  # ТЗ 26.10 Б-53: себестоимость единицы продажи = базовая x factor
+            snap = _cost4(pp * it.sale_unit.factor)
         sale_items.append(
             SaleItem(
                 company=cart.company,
@@ -168,6 +214,7 @@ def checkout_cart(
                 is_custom=bool(p is None),
                 name_snapshot=name_snap,
                 barcode_snapshot=barcode_snap,
+                variant_name=(getattr(it, "variant_name", "") or "")[:128],  # vn2111
                 unit_price=it.unit_price,
                 quantity=it.quantity,
                 line_discount=getattr(it, "line_discount", None) or Decimal("0.00"),
@@ -181,9 +228,14 @@ def checkout_cart(
                 performer_id=it.performer_id,
                 performer_commission_amount=_performer_commission(it),
                 is_wholesale=bool(getattr(it, "is_wholesale", False) or getattr(cart, "is_wholesale", False)),
+                sale_unit_id=it.sale_unit_id,  # ТЗ 26.10 Б-53
+                base_quantity=(cart_item_stock_consume_units(it) if it.sale_unit_id else None),
+                serial_numbers=getattr(it, "serial_numbers", None) or None,  # 13.11.2026
+                warranty_until=_warranty_until_for(p),
             )
         )
     SaleItem.objects.bulk_create(sale_items)
+    _record_sold_serials(sale, sale_items)  # 13.11.2026
     for vid, need in consume_by_vid.items():
         v = variants[vid]
         v.quantity = Decimal(str(v.quantity or 0)) - need
@@ -220,14 +272,30 @@ def checkout_cart(
             )
     if changed:
         Product.objects.bulk_update(changed, ["quantity"])
+        from apps.main.stock_batches import apply_sale_cost as _k458_cost  # К-4: себестоимость по партиям
+
+        _k458_cost(sale)
         changed_ids = [p.id for p in changed if getattr(p, "id", None)]
+
+        # ТЗ Н-31: одно событие stock_changed на всё списание (одна вставка в ленту)
+        try:
+            from apps.integrations.events import emit_event as _emit_stock
+            _emit_stock(cart.company_id, "stock_changed", {
+                "products": [str(i) for i in changed_ids][:200],
+                "reason": "sale",
+                "branch": getattr(cart, "branch_id", None),
+            })
+        except Exception:
+            pass
 
         def _send_webhooks():
             from apps.main.services.webhooks import send_product_webhook
 
+            # ТЗ Н-15: один запрос на все товары чека, а не по запросу на товар
+            fresh = {p.pk: p for p in Product.objects.filter(pk__in=changed_ids)}
             for pid in changed_ids:
                 try:
-                    prod = Product.objects.get(pk=pid)
+                    prod = fresh[pid]
                     send_product_webhook(prod, "product.updated")
                 except Exception:
                     logging.getLogger("crm.webhooks").error(

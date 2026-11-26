@@ -20,6 +20,11 @@ class ApiKey(models.Model):
     class Scope(models.TextChoices):
         READ = "read", "Чтение"
         WRITE = "write", "Запись"
+        # ТЗ Н-24 (1): узкие области для голосового агента и ИИ-бота
+        CATALOG_READ = "catalog:read", "Каталог и цены"
+        STOCK_READ = "stock:read", "Остатки"
+        CLIENT_READ_SELF = "client:read_self", "Данные клиента (по телефону звонящего)"
+        ORDER_DRAFT = "order:draft", "Черновик заказа"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="api_keys")
@@ -33,6 +38,8 @@ class ApiKey(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
+    # ТЗ Н-24 (1): лимит запросов в минуту на ключ
+    rate_limit_per_minute = models.PositiveIntegerField(default=120, db_default=120)
 
     class Meta:
         ordering = ("-created_at",)
@@ -52,6 +59,22 @@ class ApiKey(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.prefix}…)"
+
+
+class ApiKeyCallLog(models.Model):
+    """ТЗ Н-24 (1): журнал вызовов по ключу."""
+
+    id = models.BigAutoField(primary_key=True)
+    key = models.ForeignKey(ApiKey, on_delete=models.CASCADE, related_name="call_logs")
+    method = models.CharField(max_length=8)
+    path = models.CharField(max_length=255)
+    scope = models.CharField(max_length=32, blank=True, default="")
+    allowed = models.BooleanField(default=True)
+    reason = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ("-created_at",)
 
 
 class WebhookEndpoint(models.Model):

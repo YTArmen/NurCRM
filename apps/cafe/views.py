@@ -164,6 +164,7 @@ except Exception:
 
 
 # --------- company + branch (как в барбере/букинге) ---------
+from apps.users.permissions import read_only_guard  # noqa: E402
 class CompanyBranchQuerysetMixin:
     permission_classes = [permissions.IsAuthenticated]
 
@@ -791,6 +792,7 @@ class CafeExpenseRetrieveUpdateDestroyView(CompanyBranchQuerysetMixin, generics.
         return qs
 
 
+@read_only_guard("can_edit_salary")
 class CafeWaiterPayProfileListCreateView(CompanyBranchQuerysetMixin, generics.ListCreateAPIView):
     serializer_class = CafeWaiterPayProfileSerializer
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
@@ -810,6 +812,7 @@ class CafeWaiterPayProfileListCreateView(CompanyBranchQuerysetMixin, generics.Li
         return qs
 
 
+@read_only_guard("can_edit_salary")
 class CafeWaiterPayProfileRetrieveUpdateDestroyView(CompanyBranchQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
     serializer_class = CafeWaiterPayProfileSerializer
 
@@ -845,7 +848,7 @@ class CategoryRetrieveUpdateDestroyView(CompanyBranchQuerysetMixin, generics.Ret
 class MenuItemListCreateView(CompanyBranchQuerysetMixin, generics.ListCreateAPIView):
     queryset = (
         MenuItem.objects
-        .select_related("category", "company")
+        .select_related("category", "company", "kitchen")
         .prefetch_related(
             "ingredients__product",
             "dish_ingredients__product",
@@ -883,7 +886,7 @@ class MenuItemListCreateView(CompanyBranchQuerysetMixin, generics.ListCreateAPIV
 class MenuItemRetrieveUpdateDestroyView(CompanyBranchQuerysetMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = (
         MenuItem.objects
-        .select_related("category", "company")
+        .select_related("category", "company", "kitchen")
         .prefetch_related(
             "ingredients__product",
             "dish_ingredients__product",
@@ -1550,7 +1553,7 @@ class DishCostView(CompanyBranchQuerysetMixin, APIView):
 def _menu_items_queryset_for_user(mixin, company):
     qs = (
         MenuItem.objects
-        .select_related("category", "company")
+        .select_related("category", "company", "kitchen")
         .prefetch_related(
             "ingredients__product",
             "dish_ingredients__product",

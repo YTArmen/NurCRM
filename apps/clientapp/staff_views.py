@@ -17,6 +17,8 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.integrations.permissions import HasApiKeyScope
+from apps.main.ai_agent_api import client_debt_summary
 from apps.main.kassa_views import change_bonus
 from apps.main.models import Client, ClientBonusTransaction
 from apps.main.phone_utils import normalize_phone_e164
@@ -59,7 +61,14 @@ class _StaffBase(CompanyBranchRestrictedMixin, APIView):
 
 
 class ClientByPhoneAPIView(_StaffBase):
-    """GET /api/main/clients/by-phone/?phone=0555123456 — точное совпадение нормализованного номера."""
+    """
+    GET /api/main/clients/by-phone/?phone=0555123456 — точное совпадение нормализованного номера.
+    ТЗ Н-24 (3): + debt_total, since, next_due_date (то же число, что в clients/debtors/).
+    Ключ API — с областью client:read_self.
+    """
+
+    permission_classes = [permissions.IsAuthenticated, HasApiKeyScope]
+    required_scope = "client:read_self"
 
     def get(self, request):
         company = self.company_or_400()
@@ -78,10 +87,20 @@ class ClientByPhoneAPIView(_StaffBase):
         clients = [c for c in qs.order_by("created_at")[:20] if normalize_phone_e164(c.phone) == phone]
         if branch is not None:
             clients.sort(key=lambda c: 0 if c.branch_id == branch.id else 1)
+        created = False
+        if not clients:
+            # ТЗ 14.10, п. 2.3: клиента в компании нет, но номер подтверждён в приложении —
+            # заводим клиента из профиля (ФИО, телефон, дата рождения), чтобы старые кассы
+            # не открывали «Новый клиент» с пустым именем. Без профиля — как раньше, client: null.
+            client, created = services.client_for_kassa_or_from_app(company, branch, phone)
+            if client is not None:
+                clients = [client]
         return Response({
             "phone": phone,
-            "client": client_payload(clients[0]) if clients else None,
-            "results": [client_payload(c) for c in clients],
+            "client": client_payload(clients[0], created) if clients else None,
+            "results": [client_payload(c, created and c is clients[0]) for c in clients],
+            "has_app": services.confirmed_customer_for_phone(phone) is not None,
+            **client_debt_summary(company, clients[0] if clients else None),
         })
 
 
@@ -99,17 +118,21 @@ class ClientResolveQrAPIView(_StaffBase):
         if raw.upper().startswith("NURCRMT"):
             raw = raw[7:]
         elif raw.upper().startswith("NURCRM"):
-            # переходный формат: телефон в QR — только поиск, без создания
+            # переходный формат: телефон в QR. Клиента нет — заводим из подтверждённого профиля
+            # приложения (ТЗ 14.10, п. 2.3); без профиля — только поиск, client: null.
             phone = normalize_phone_e164(raw[6:])
             if not phone:
                 raise ValidationError({"token": ["Неверный QR."]})
-            client = services.pick_client_for_kassa(company, branch, phone)
-            return Response({
-                "format": "phone",
-                "phone": phone,
-                "client": client_payload(client) if client else None,
-                "verified": False,
-            })
+            client, created = services.client_for_kassa_or_from_app(company, branch, phone)
+            return Response(
+                {
+                    "format": "phone",
+                    "phone": phone,
+                    "client": client_payload(client, created) if client else None,
+                    "verified": False,
+                },
+                status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+            )
         if not raw or len(raw) > 64:
             raise ValidationError({"token": ["Неверный QR."]})
         now = timezone.now()
@@ -285,6 +308,7 @@ def _row_payload(row: AppShopSettings, branch=None):
         "longitude": str(row.longitude) if row.longitude is not None else None,
         "points_enabled": row.points_enabled,
         "points_percent": str(row.points_percent) if row.points_percent is not None else None,
+        "points_expire_days": row.points_expire_days,
         "geocode_status": row.geocode_status,
         "geocoded_at": row.geocoded_at.isoformat() if row.geocoded_at else None,
         "hidden_by_admin": row.hidden_by_admin,
@@ -310,6 +334,19 @@ def _apply_row(row: AppShopSettings, data: dict, is_branch: bool):
         row.points_enabled = None if (v is None and is_branch) else bool(v)
     if "points_percent" in data:
         row.points_percent = _dec(data["points_percent"], "points_percent", Decimal("0"), Decimal("100"))
+    if "points_expire_days" in data and not is_branch:
+        # ТЗ 29.10 Б-99: null/пусто = бонусы не сгорают
+        v = data["points_expire_days"]
+        if v in (None, ""):
+            row.points_expire_days = None
+        else:
+            try:
+                n = int(str(v))
+            except ValueError:
+                raise ValidationError({"points_expire_days": ["Ожидается целое число дней."]})
+            if not 1 <= n <= 3650:
+                raise ValidationError({"points_expire_days": ["Допустимо от 1 до 3650 дней."]})
+            row.points_expire_days = n
     coords_given = "latitude" in data or "longitude" in data
     if coords_given:
         lat = _dec(data.get("latitude"), "latitude", Decimal("-90"), Decimal("90"))

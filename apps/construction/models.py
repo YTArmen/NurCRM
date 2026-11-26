@@ -30,6 +30,18 @@ class CashFlowCategory(models.Model):
         verbose_name="Филиал",
     )
     title = models.CharField(max_length=128, verbose_name="Название")
+    # ТЗ «Бухгалтер», п. 3: статья движения денег.
+    class Kind(models.TextChoices):
+        INCOME = "income", "Доход"
+        EXPENSE = "expense", "Расход"
+        BOTH = "both", "Любой"
+
+    type = models.CharField(max_length=10, choices=Kind.choices, default=Kind.BOTH, db_default=Kind.BOTH, verbose_name="Тип статьи")
+    archived = models.BooleanField(default=False, db_default=False, verbose_name="В архиве")
+    code = models.CharField(max_length=32, blank=True, default="", db_default="", verbose_name="Код статьи по умолчанию")
+    # ТЗ Н-19: системный slug (salaries/rent/taxes/utilities/purchases) и признак «системная — не удаляется».
+    slug = models.CharField(max_length=32, blank=True, default="", db_default="", db_index=True, verbose_name="Системный slug")
+    is_system = models.BooleanField(default=False, db_default=False, verbose_name="Системная статья")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
 
     class Meta:
@@ -66,6 +78,8 @@ class Cashbox(models.Model):
         EXPENSE_VARIABLE = "expense_variable", "Переменные расходы"
         EXPENSE_FIXED = "expense_fixed", "Постоянные расходы"
         DEBT = "debt", "Для долгов"
+        SAFE = "safe", "Сейф"  # ТЗ Н-33: не ящик кассы, наличные в смене не считает
+        BANK = "bank", "Расчётный счёт"  # ТЗ Н-33
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -156,6 +170,42 @@ class Cashbox(models.Model):
         if "основн" in n:
             return self.CashboxRole.POS_MAIN
         return self.CashboxRole.POS_MAIN
+
+    def drawer_cash_info(self):
+        """
+        ТЗ Н-06: наличные в ящике кассы сейчас. Только для pos_branch/pos_main, иначе None.
+        Открыта смена — её expected_cash; иначе пересчитанная сумма (closing_cash) последней
+        закрытой смены + наличные приходы − расходы вне смены (shift пуст) после её закрытия.
+        Возвращает dict {drawer_cash, drawer_cash_at, last_closed_shift} или None.
+        """
+        if self.get_inferred_role() not in (self.CashboxRole.POS_BRANCH, self.CashboxRole.POS_MAIN):
+            return None
+        z = Decimal("0.00")
+        q = lambda v: (v or z).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)  # noqa: E731
+        shifts = CashShift.objects.filter(cashbox=self)
+        last_closed = shifts.filter(status=CashShift.Status.CLOSED).order_by("-closed_at", "-opened_at").first()
+        last_id = str(last_closed.id) if last_closed else None
+        open_shift = shifts.filter(status=CashShift.Status.OPEN).order_by("-opened_at").first()
+        now = timezone.now()
+        if open_shift is not None:
+            cash = open_shift.calc_live_totals(refresh=True).get("expected_cash", z)
+        elif last_closed is not None:
+            base = last_closed.closing_cash
+            if base is None:
+                base = last_closed.calc_live_totals().get("expected_cash", z)
+            out = (
+                CashFlow.objects.money()
+                .filter(cashbox=self, shift__isnull=True, created_at__gt=last_closed.closed_at)
+                .filter(Q(payment_method__isnull=True) | Q(payment_method="") | Q(payment_method="cash"))
+            )
+            agg = out.aggregate(
+                inc=Sum("amount", filter=Q(type=CashFlow.Type.INCOME)),
+                exp=Sum("amount", filter=Q(type=CashFlow.Type.EXPENSE)),
+            )
+            cash = base + (agg["inc"] or z) - (agg["exp"] or z)
+        else:
+            return {"drawer_cash": None, "drawer_cash_at": now, "last_closed_shift": None}
+        return {"drawer_cash": q(cash), "drawer_cash_at": now, "last_closed_shift": last_id}
 
     def clean(self):
         if self.branch_id and self.branch.company_id != self.company_id:
@@ -611,6 +661,9 @@ class CashShift(models.Model):
             "debt_prepayments_cash": debt_prepayments_cash,
             "debt_prepayments_noncash": debt_prepayments_noncash,
             "debt_payments_cash": debt_payments_cash,
+            # ТЗ Н-05: слагаемые expected_cash для раскладки «в ящике» (та же формула, без второй)
+            "drawer_cash_sales_net": drawer_cash_in + drawer_legacy_cash,
+            "non_sale_income": non_sale_income,
         }
 
         # Приводим деньги к 2 знакам. Произведение numeric(12,2) * numeric(…,3)
@@ -862,7 +915,27 @@ class CashShift(models.Model):
             "returns_total": str(q(agg["t"])),
             "returns_cash": str(q(agg["cash"])),
             "returns_noncash": str(q(agg["noncash"])),
+            **self._returns_debt_offset(q),  # П0-3 п.4
         }
+
+    def _returns_debt_offset(self, q) -> dict:
+        """П0-3 п.4: возвраты в счёт долга — часть суммы возврата, которой не выдали денег (уменьшила долг)."""
+        from django.db.models import DecimalField, ExpressionWrapper, F, Value
+        from django.db.models.functions import Coalesce
+
+        from apps.main.models import SaleReturn
+
+        z = Decimal("0.00")
+        money = DecimalField(max_digits=14, decimal_places=2)
+        part = ExpressionWrapper(
+            Coalesce(F("returned_amount"), Value(z)) - Coalesce(F("refund_cash"), Value(z))
+            - Coalesce(F("refund_noncash"), Value(z)),
+            output_field=money,
+        )
+        agg = (SaleReturn.objects.filter(shift_id=self.id).exclude(status="voided")
+               .annotate(_debt_part=part).filter(_debt_part__gt=0)
+               .aggregate(c=Count("id"), t=Sum("_debt_part")))
+        return {"returns_debt_offset": str(q(agg["t"])), "returns_debt_offset_count": agg["c"] or 0}
 
     def recalc_totals_for_close(self):
         t = self.calc_live_totals(refresh=True)
@@ -995,6 +1068,11 @@ class CashFlow(models.Model):
         POS_SALE_RETURN = "pos_sale_return", "Возврат продажи"
         CASHFLOW_CANCEL = "cashflow_cancel", "Отмена движения"
         MANUAL = "manual", "Ручная операция"
+        # ТЗ Н-19: типы расходов, которые ставит касса вместе со статьёй и сменой.
+        SHIFT_DRAWER_COLLECTION = "shift_drawer_collection", "Инкассация из ящика смены"
+        SALARY_PAYOUT = "salary_payout", "Выплата зарплаты"
+        RENT_PAYMENT = "rent_payment", "Оплата аренды"
+        SUPPLIER_PAYMENT = "supplier_payment", "Оплата поставщику"
 
     class RequestKind(models.TextChoices):
         EDIT = "edit", "Редактирование"
@@ -1091,7 +1169,7 @@ class CashFlow(models.Model):
         verbose_name="Тип источника",
     )
     source_id = models.CharField(
-        max_length=100,
+        max_length=128,
         null=True,
         blank=True,
         db_index=True,
@@ -1111,6 +1189,8 @@ class CashFlow(models.Model):
         db_index=True,
         verbose_name="Способ оплаты",
     )
+    # ТЗ 29.10 Б-100: "startup" — вложение при открытии, не входит в opex/operating_profit отчёта pnl
+    kind = models.CharField(max_length=16, blank=True, default="", db_default="", verbose_name="Вид расхода")
 
     shift = models.ForeignKey(
         "construction.CashShift",
@@ -1129,6 +1209,18 @@ class CashFlow(models.Model):
         related_name="cash_flows",
         verbose_name="Кассир",
     )
+    # 03.11 front-market: кому выплачено (зарплата). Раньше выплаты искали по тексту «Зарплата: Имя».
+    employee = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="paid_cash_flows",
+        verbose_name="Сотрудник (кому выплата)",
+    )
+    # S6 (аудит 03.11): за какой период зарплата (месяц YYYY-MM или с/по). Раньше фронт дописывал «· за 10.2026» в название.
+    salary_period_from = models.DateField(null=True, blank=True, verbose_name="Зарплата: период с")
+    salary_period_to = models.DateField(null=True, blank=True, verbose_name="Зарплата: период по")
     category = models.ForeignKey(
         "CashFlowCategory",
         on_delete=models.SET_NULL,
@@ -1137,6 +1229,14 @@ class CashFlow(models.Model):
         related_name="cashflows",
         verbose_name="Категория",
     )
+
+    # ТЗ «Бухгалтер», п. 6: отметка «проверено» (деньги не меняет)
+    checked_at = models.DateTimeField(null=True, blank=True, db_index=True, verbose_name="Проверено")
+    checked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="checked_cash_flows", verbose_name="Кто проверил",
+    )
+    accountant_note = models.TextField(blank=True, default="", db_default="", verbose_name="Комментарий бухгалтера")
 
     objects = CashFlowQuerySet.as_manager()
 
@@ -1154,6 +1254,7 @@ class CashFlow(models.Model):
             models.Index(fields=["company", "type", "created_at"], name="ix_flow_company_type_created"),
             models.Index(fields=["shift", "created_at"]),
             models.Index(fields=["cashier", "created_at"]),
+            models.Index(fields=["employee", "created_at"], name="ix_flow_employee_created"),
             models.Index(fields=["company", "source_kind", "source_id"], name="ix_flow_comp_src_kind_id"),
             models.Index(fields=["target_flow", "status"], name="ix_flow_target_status"),
             models.Index(fields=["request_kind"], name="ix_flow_request_kind"),
@@ -1184,7 +1285,11 @@ class CashFlow(models.Model):
                 raise ValidationError({"category": "Категория другого филиала (или укажите общую категорию без филиала)."})
 
     def save(self, *args, **kwargs):
-        if self.source_kind in (self.SourceKind.SHIFT_DRAWER_OUTFLOW, self.SourceKind.SHIFT_DRAWER_INFLOW):
+        if self.source_kind in (
+            self.SourceKind.SHIFT_DRAWER_OUTFLOW,
+            self.SourceKind.SHIFT_DRAWER_INFLOW,
+            self.SourceKind.SHIFT_DRAWER_COLLECTION,  # ТЗ Н-19: инкассация уменьшает ящик
+        ):
             self.affects_shift_drawer = True
 
         if self.cashbox_id:
@@ -1199,3 +1304,51 @@ class CashFlow(models.Model):
 
     def __str__(self):
         return f"{self.get_type_display()} {self.amount} ({self.status})"
+
+
+class AuditLog(models.Model):
+    """Журнал изменений денежных операций (ТЗ «Бухгалтер», п. 7). Только дописывается."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="audit_logs")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    action = models.CharField(max_length=32)  # create/update/delete/edit_request/cancel_request/approve/reject/closed_until
+    object_type = models.CharField(max_length=32)  # cashflow, period
+    object_id = models.CharField(max_length=64, blank=True, default="")
+    object_name = models.CharField(max_length=255, blank=True, default="")
+    before = models.JSONField(null=True, blank=True)
+    after = models.JSONField(null=True, blank=True)
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    branch = models.ForeignKey(Branch, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["company", "object_type", "object_id", "-created_at"], name="ix_audit_obj"),
+            models.Index(fields=["company", "-created_at"], name="ix_audit_company_date"),
+        ]
+
+
+class TrashEntry(models.Model):
+    """
+    Корзина удалённого (ТЗ п.9). В apps/main нельзя добавить deleted_at, поэтому при удалении
+    товара/клиента/категории/бренда сюда кладётся снимок строки (и всего, что удалится каскадом);
+    «вернуть» пересоздаёт строки из снимка. Хранится 30 дней.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="trash_entries")
+    type = models.CharField(max_length=16)  # product / client / category / brand
+    object_id = models.CharField(max_length=64)
+    object_name = models.CharField(max_length=255, blank=True, default="")
+    payload = models.JSONField(default=dict)
+    deleted_at = models.DateTimeField(auto_now_add=True)
+    deleted_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    class Meta:
+        ordering = ["-deleted_at"]
+        indexes = [
+            models.Index(fields=["company", "type", "-deleted_at"], name="ix_trash_company_type"),
+            models.Index(fields=["company", "type", "object_id"], name="ix_trash_obj"),
+        ]

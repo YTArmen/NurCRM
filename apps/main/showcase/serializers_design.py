@@ -17,6 +17,7 @@ from apps.main.models import (
     ShowcaseOrderItem,
     ShowcasePromoBlock,
     ShowcaseStats,
+    ShowcaseStockRequest,
     _cart_item_promotion,
     _money,
 )
@@ -335,13 +336,26 @@ class ShowcaseOrderSerializer(serializers.ModelSerializer):
             "comment",
             "total",
             "source",
+            "source_detail",
+            "cart_token",
+            "telegram_chat_id",
             "sale",
             "stock_reserved",
+            "pickup_code",  # ТЗ Н-33
+            "hold_until",  # ТЗ кассы 05.11 п.38: срок брони «Примерить в магазине»
             "items",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "number", "total", "sale", "stock_reserved", "created_at", "updated_at"]
+        read_only_fields = ["id", "number", "total", "sale", "stock_reserved", "telegram_chat_id", "cart_token", "hold_until",
+                            "created_at", "updated_at"]
+        extra_kwargs = {"pickup_code": {"required": False}}
+
+    def validate_pickup_code(self, value):
+        value = (value or "").strip()
+        if value and not (value.isdigit() and 4 <= len(value) <= 6):
+            raise serializers.ValidationError("Код выдачи — 4–6 цифр.")
+        return value
 
 
 class ShowcaseOrderCreateItemSerializer(serializers.Serializer):
@@ -350,6 +364,8 @@ class ShowcaseOrderCreateItemSerializer(serializers.Serializer):
     qty = serializers.DecimalField(
         max_digits=12, decimal_places=3, min_value=Decimal("0.001"), max_value=Decimal("100000")
     )
+    # ТЗ 26.10 Б-53 п.8: единица продажи (id из sale_units); qty — в ней, резерв — в базовых
+    sale_unit = serializers.IntegerField(required=False, allow_null=True, default=None)
 
 
 class ShowcaseOrderCustomerSerializer(serializers.Serializer):
@@ -359,8 +375,18 @@ class ShowcaseOrderCustomerSerializer(serializers.Serializer):
 
 
 class ShowcaseOrderDeliverySerializer(serializers.Serializer):
-    type = serializers.ChoiceField(choices=["pickup", "delivery"], default="pickup")
+    type = serializers.ChoiceField(choices=["pickup", "delivery", "try_on"], default="pickup")
     address = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+
+
+class ShowcaseCartLinkItemSerializer(serializers.Serializer):
+    product = serializers.UUIDField(required=True)
+    variant = serializers.UUIDField(required=False, allow_null=True, default=None)
+    qty = serializers.DecimalField(max_digits=12, decimal_places=3, min_value=Decimal("0.001"), max_value=Decimal("100000"))
+
+
+class ShowcaseCartLinkSerializer(serializers.Serializer):
+    items = serializers.ListField(child=ShowcaseCartLinkItemSerializer(), allow_empty=False, max_length=50)
 
 
 class ShowcaseOrderCreateSerializer(serializers.Serializer):
@@ -373,4 +399,29 @@ class ShowcaseOrderCreateSerializer(serializers.Serializer):
     )
     delivery = ShowcaseOrderDeliverySerializer(required=False, default=dict)
     comment = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
-    source = serializers.CharField(required=False, default="showcase", allow_blank=True, max_length=32)
+    # ТЗ Б-22: источник заказа; для telegram_bot — ещё telegram_chat_id
+    source = serializers.ChoiceField(
+        choices=["showcase", "telegram_bot", "voice_ai", "whatsapp", "web_chat"], required=False, default="showcase",
+        allow_blank=True)
+    # ТЗ 01.11: деталь источника (site_cart, assistant, product_card, bot_catalog…) и токен ссылки на корзину
+    source_detail = serializers.RegexField(r"^[A-Za-z0-9_.-]{1,32}$", required=False, allow_blank=True, default="")
+    cart_token = serializers.RegexField(r"^[A-Za-z0-9_-]{1,55}$", required=False, allow_blank=True, default="")
+    telegram_chat_id = serializers.RegexField(r"^-?\d{1,20}$", required=False, allow_blank=True, default="")
+
+
+class ShowcaseStockRequestSerializer(serializers.ModelSerializer):
+    """ТЗ Н-27: заявка «сообщить о поступлении» для владельца."""
+
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    variant_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ShowcaseStockRequest
+        fields = ["id", "product", "product_name", "variant", "variant_label", "phone", "telegram_chat_id",
+                  "status", "created_at", "notified_at"]
+        read_only_fields = fields
+
+    def get_variant_label(self, obj):
+        from apps.main.variant_utils import variant_label
+
+        return variant_label(obj.variant)

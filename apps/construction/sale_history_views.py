@@ -168,7 +168,14 @@ class CashShiftSalesListView(generics.ListAPIView):
             val = PM_MAP.get(raw_pm.lower())
             if val is None:
                 raise ValidationError({"payment_method": "Допустимо: cash, transfer"})
-            qs = qs.filter(payment_method=val)
+            if val == Sale.PaymentMethod.TRANSFER:
+                # ТЗ 12.11: безнал разных банков тоже считается переводом.
+                qs = qs.filter(payment_method__in=[
+                    Sale.PaymentMethod.TRANSFER, Sale.PaymentMethod.MBANK, Sale.PaymentMethod.OPTIMA,
+                    Sale.PaymentMethod.OBANK, Sale.PaymentMethod.BAKAI,
+                ])
+            else:
+                qs = qs.filter(payment_method=val)
 
         # ---- cashier ----
         # Фильтруем по продавцу конкретного чека (Sale.user — источник

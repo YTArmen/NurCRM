@@ -31,8 +31,11 @@ class WhatsAppSessionUpsertView(APIView):
     permission_classes = []  # защищаем по заголовку
     authentication_classes = []
     def post(self, request, company_id):
-        token = request.headers.get("X-WA-TOKEN")
-        if token != getattr(settings, "WHATSAPP_NODE_TOKEN", "change-me"):
+        token = request.headers.get("X-WA-TOKEN") or ""
+        expected = getattr(settings, "WHATSAPP_NODE_TOKEN", "") or ""
+        # Аудит 12.11: при пустом токене на сервере пустой заголовок проходил (подмена QR любой компании).
+        import hmac as _hmac
+        if not expected or not token or not _hmac.compare_digest(str(token), str(expected)):
             return Response({"detail": "forbidden"}, status=403)
         session, _ = WhatsAppSession.objects.get_or_create(company_id=company_id)
         for f in ("status", "last_qr_data_url", "phone_hint"):

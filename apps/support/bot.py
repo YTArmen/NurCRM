@@ -331,6 +331,11 @@ def handle_support_bot_command(text: str, chat_id: Optional[str] = None) -> Opti
         issue_id = _parse_int(cmd[len("/issue_"):])
         return get_issue_details(issue_id) if issue_id else "Неверный номер проблемы."
 
+    if cmd == "/req":  # П2-6 p2614: статус обращения
+        from apps.support.requests import handle_req_command
+
+        return handle_req_command(args)
+
     if cmd in ("/start", "/help"):
         return HELP_TEXT
 

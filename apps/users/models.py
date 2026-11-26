@@ -32,6 +32,9 @@ class SubscriptionPlan(models.Model):
     name = models.CharField(max_length=128, db_index=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     description = models.TextField(blank=True, null=True)
+    # ТЗ кассы 05.11 п.32 / Б-39: стабильный код плана (start | standard | custom), не меняется при переименовании
+    code = models.SlugField("Код плана", max_length=32, null=True, blank=True, db_index=True,
+                            help_text="start, standard или custom. Пусто — код определяется по названию.")
     features = models.ManyToManyField(Feature, blank=True)
 
     def __str__(self):
@@ -205,6 +208,9 @@ class Company(models.Model):
         GROCERY = "grocery", "Продукты"
         CLOTHING = "clothing", "Одежда"
         SERVICES = "services", "Услуги"
+        AUTOPARTS = "autoparts", "Автозапчасти"
+        BAZAAR_RETAIL = "bazaar_retail", "Базар (розница)"
+        BAZAAR_WHOLESALE = "bazaar_wholesale", "Базар (опт)"
 
     market_sphere = models.CharField(
         "Вид магазина",
@@ -290,6 +296,13 @@ class Company(models.Model):
         null=True,
         help_text="Время начала рабочего дня для календаря записей (формат HH:MM)",
     )
+    # ТЗ 29.10 Б-100: «финансы закрыты по» — инвесторы и стартовые расходы с датой <= этой только чтение
+    finance_closed_until = models.DateField("Финансы закрыты по", null=True, blank=True)
+    # ТЗ редактор накладных 30.10: окно правки проведённого прихода "24h" | "48h" | "always".
+    # NULL — не задано (берётся старое значение из app-settings nurmarket-mobile, иначе 24h). Меняет только владелец.
+    receipt_edit_window = models.CharField("Окно правки приходов", max_length=8, null=True, blank=True)
+    # ТЗ кассы 05.11 п.31 / Б-30: тихие часы для сообщений покупателям {"from":"21:00","to":"09:00","tz":"Asia/Bishkek"}; пусто — по умолчанию
+    quiet_hours = models.JSONField("Тихие часы для покупателей", default=dict, blank=True)
     appointment_work_end = models.CharField(
         "Конец рабочего дня для записей",
         max_length=5,
@@ -559,6 +572,22 @@ class User(AbstractBaseUser, PermissionsMixin):
     avatar = models.URLField(blank=True, null=True, verbose_name="Аватар (URL)")
     phone_number = models.CharField(max_length=64, verbose_name="Номер телефона", blank=True, null=True)
     track_number = models.CharField(max_length=64, verbose_name="Номер машины", blank=True, null=True)
+    # ТЗ 29.10 Б-101: карточка сотрудника (все поля необязательные)
+    hired_at = models.DateField(null=True, blank=True, verbose_name="Принят")
+    fired_at = models.DateField(null=True, blank=True, verbose_name="Уволен")
+    birth_date = models.DateField(null=True, blank=True, verbose_name="Дата рождения")
+    address = models.CharField(max_length=255, null=True, blank=True, verbose_name="Адрес")
+    emergency_contact = models.CharField(max_length=255, null=True, blank=True, verbose_name="Контакт на случай ЧС")
+    comment = models.CharField(max_length=500, null=True, blank=True, verbose_name="Комментарий")
+    language = models.CharField(
+        max_length=2, null=True, blank=True,
+        choices=[("ru", "ru"), ("ky", "ky"), ("en", "en"), ("tr", "tr"), ("uz", "uz")],
+        verbose_name="Язык интерфейса",
+    )
+    default_cashbox = models.ForeignKey(
+        "construction.Cashbox", null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="+", verbose_name="Касса по умолчанию",
+    )
 
     company = models.ForeignKey(
         "Company",
@@ -690,6 +719,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     can_view_request = models.BooleanField(default=False, verbose_name="Доступ к запросам")
     can_view_shifts = models.BooleanField(default=False, verbose_name="Доступ к смене")
     can_view_cashier = models.BooleanField(default=False, verbose_name="Доступ к интерфейсу кассы")
+    # ТЗ Н-16: «Работа на кассе» отдельно от «Финансы: кассы компании» (can_view_cashbox).
+    # По умолчанию True (db_default) — после миграции никто не теряет доступ к кассе.
+    can_use_pos = models.BooleanField(default=True, db_default=True, verbose_name="Работа на кассе (POS)")
     can_view_document = models.BooleanField(default=False, verbose_name="Доступ к документам")
     can_view_market_scales = models.BooleanField(default=False, verbose_name="Доступ к весам")
     can_view_market_label = models.BooleanField(default=False, verbose_name="Доступ к печати этикеток")
@@ -707,6 +739,28 @@ class User(AbstractBaseUser, PermissionsMixin):
     can_change_document_date = models.BooleanField(null=True, blank=True, default=None, verbose_name="Склад: менять дату документа")
     can_post_closed_period = models.BooleanField(null=True, blank=True, default=None, verbose_name="Склад: изменения в закрытом периоде")
     can_cash_negative = models.BooleanField(null=True, blank=True, default=None, verbose_name="Склад: расход кассы в минус")
+    # 12.11.2026 (ruflo S1/S3): цена со скидкой ниже закупочной. NULL/False — нельзя (владелец/админ — всегда можно).
+    can_sell_below_cost = models.BooleanField(null=True, blank=True, default=None, verbose_name="Касса: продажа ниже закупки")
+    # 14.11.2026 П0-4 К-19: False — не видеть закупочные цены (NULL — как раньше)
+    can_see_purchase_price = models.BooleanField(null=True, blank=True, default=None, verbose_name="Видеть закупочные цены")
+
+    # Режим «только смотреть» (ТЗ «Бухгалтер», п. 1). NULL — как раньше (видит → может менять), False — только просмотр.
+    can_edit_cashbox = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: кассы")
+    can_edit_products = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: товары")
+    can_edit_procurement = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: закупки")
+    # ТЗ 31.10 п.21 / ТЗ редактор накладных 30.10: правка проведённых приходов.
+    # Владелец — всегда; остальные — только явное True (NULL = нет). Выдаёт только владелец.
+    can_edit_purchase_documents = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: проведённые приходы")
+    # 21.11.2026 hist2111: удалять товары. Владелец/админ — всегда; остальные — только явное True (выдаёт владелец/админ).
+    can_delete_products = models.BooleanField(null=True, blank=True, default=None, verbose_name="Удалять товары")
+    can_edit_documents = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: документы склада")
+    can_edit_clients = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: клиенты и долги")
+    can_edit_salary = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: зарплата")
+    can_edit_employees = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: сотрудники")
+    can_edit_settings = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: настройки")
+    # WhatsApp магазина (09.11.2026): view = может отправлять; edit=False — «только отправка» (шаблоны не менять)
+    can_view_whatsapp = models.BooleanField(default=False, db_default=False, verbose_name="WhatsApp: отправка сообщений")
+    can_edit_whatsapp = models.BooleanField(null=True, blank=True, default=None, verbose_name="Менять: шаблоны WhatsApp")
 
     branches = models.ManyToManyField(
         "Branch",
@@ -960,6 +1014,8 @@ class CompanyAddon(models.Model):
     active = models.BooleanField(default=True)
     until = models.DateField(null=True, blank=True, help_text="Пусто — бессрочно")
     note = models.CharField(max_length=255, blank=True, default="")
+    # ТЗ Н-32: откуда функция — key (ключ), trial (пробный доступ), support (включила поддержка)
+    source = models.CharField(max_length=16, default="support", db_default="support")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1131,3 +1187,290 @@ class FeatureActivationKey(models.Model):
 
     def __str__(self):
         return f"{self.key} → {self.code}"
+
+
+class FeatureTrial(models.Model):
+    """ТЗ Н-32: пробный доступ к функции — один раз на функцию для компании."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="feature_trials")
+    code = models.SlugField(max_length=64)
+    expires_at = models.DateField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Пробный доступ к функции"
+        verbose_name_plural = "Пробные доступы к функциям"
+        constraints = [models.UniqueConstraint(fields=["company", "code"], name="uniq_feature_trial_company_code")]
+
+
+class FeatureKeyAttempt(models.Model):
+    """ТЗ Н-32: неверная попытка ввода ключа функции (защита от подбора, 10 в час)."""
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="+")
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Неверная попытка ключа"
+        verbose_name_plural = "Неверные попытки ключей"
+
+
+class AdminPin(models.Model):
+    """PIN подтверждения опасных действий (ТЗ п.10): хэш, счётчик неверных попыток, блокировка."""
+
+    user = models.OneToOneField("users.User", on_delete=models.CASCADE, related_name="admin_pin")
+    pin_hash = models.CharField(max_length=256)
+    failed_attempts = models.PositiveSmallIntegerField(default=0, db_default=0)
+    locked_until = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "PIN администратора"
+        verbose_name_plural = "PIN администраторов"
+
+
+class CompanyPinSetting(models.Model):
+    """Настройка компании «Подтверждать PIN» для опасных действий."""
+
+    company = models.OneToOneField("users.Company", on_delete=models.CASCADE, related_name="pin_setting")
+    require_pin = models.BooleanField(default=False, db_default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Настройка PIN компании"
+        verbose_name_plural = "Настройки PIN компаний"
+
+
+class EmployeeAccessCode(models.Model):
+    """ТЗ Н-16: код доступа сотрудника к действию (например, скидка/удаление чека) — хранится хэшем."""
+
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="employee_access_codes")
+    employee = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="access_codes")
+    action = models.CharField(max_length=64)
+    code_hash = models.CharField(max_length=256)
+    updated_by = models.ForeignKey(
+        "users.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Код доступа сотрудника"
+        verbose_name_plural = "Коды доступа сотрудников"
+        constraints = [
+            models.UniqueConstraint(fields=["employee", "action"], name="uniq_employee_access_code_action"),
+        ]
+        indexes = [models.Index(fields=["company", "action"], name="ix_empcode_company_action")]
+
+
+class ClientVersionSeen(models.Model):
+    """
+    Какие версии касс и мобилок ходят в API компании (единое ТЗ 26.10.2026, Б-01).
+    Пишет core.middleware по заголовку X-NurMarket-Client не чаще раза в час на пару компания+клиент.
+    По журналу решают, когда снимать переходный режим (флаг api_strict_2026_10, Б-02).
+    """
+
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="client_versions")
+    client = models.CharField(max_length=40)  # «kassa/1.17.61», «mobile/1.18.5»; без заголовка — «none»
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField()
+    hits = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        verbose_name = "Версия клиента API"
+        verbose_name_plural = "Версии клиентов API"
+        constraints = [models.UniqueConstraint(fields=["company", "client"], name="uniq_company_client_version")]
+        indexes = [models.Index(fields=["last_seen_at"])]
+
+    def __str__(self):
+        return f"{self.company_id}: {self.client}"
+
+
+class AuthSession(models.Model):
+    """06.11.2026 (ТЗ Бекназара): вход устройства в слот «один на тип» (mobile, android_pos, desktop_pos,
+    desktop_owner). Номер сессии лежит в токенах (claim ``sid``). Отозванная сессия — 401 session_revoked."""
+
+    SLOTS = ("mobile", "android_pos", "desktop_pos", "desktop_owner")
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="auth_sessions")
+    slot = models.CharField(max_length=16)
+    device_key = models.CharField(max_length=64)
+    device_name = models.CharField(max_length=64, blank=True, default="")
+    platform = models.CharField(max_length=32, blank=True, default="")
+    client = models.CharField(max_length=40, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField()
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_reason = models.CharField(max_length=32, blank=True, default="")
+    revoked_by_device_name = models.CharField(max_length=64, blank=True, default="")
+
+    class Meta:
+        db_table = "users_auth_session"
+        constraints = [
+            models.UniqueConstraint(fields=["user", "slot", "device_key"], name="uniq_auth_session_user_slot_device"),
+        ]
+        indexes = [models.Index(fields=["user", "slot"], name="auth_session_user_slot")]
+
+    def __str__(self):
+        return f"{self.user_id} {self.slot} {self.device_name or self.device_key}"
+
+
+class TariffPack(models.Model):
+    """
+    ТЗ кассы 05.11 п.32 / Б-39: платный пакет функций в прайсе «Своё» (ai, clients, scales, …).
+    Цены правятся в админке без кода: Тарифы → Пакеты тарифа «Своё». Сервер — единственный источник цен.
+    """
+
+    code = models.SlugField("Код пакета", max_length=64, unique=True)
+    group = models.CharField("Группа", max_length=32, blank=True, default="")
+    name = models.JSONField("Название по языкам", default=dict, blank=True, help_text='{"ru": "...", "ky": "...", "en": "..."}')
+    description = models.JSONField("Описание по языкам", default=dict, blank=True)
+    activation_fee = models.DecimalField("Разово, сом", max_digits=10, decimal_places=2, default=0)
+    monthly_fee = models.DecimalField("В месяц, сом", max_digits=10, decimal_places=2, default=0)
+    included_in = models.JSONField("Входит в планы", default=list, blank=True, help_text='["standard"]')
+    trial_days = models.PositiveIntegerField("Пробных дней", default=0)
+    position = models.PositiveIntegerField("Порядок", default=0)
+    is_active = models.BooleanField("Показывать", default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Пакет тарифа «Своё»"
+        verbose_name_plural = "Пакеты тарифа «Своё»"
+        ordering = ["position", "code"]
+
+    def __str__(self):
+        return f"{self.code}: {self.activation_fee} + {self.monthly_fee}/мес"
+
+
+class TariffCustomOrder(models.Model):
+    """
+    ТЗ кассы 05.11 п.32 / Б-39 (4): заявка на тариф «Своё». Только запись для менеджера:
+    план компании НЕ меняется и пакеты НЕ включаются, пока касса 1.17.61 не выйдет (решение 08.11).
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Ждёт менеджера"
+        PAID = "paid", "Оплачен"
+        APPROVED = "approved", "Подтверждён"
+        CANCELED = "canceled", "Отменён"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="tariff_orders")
+    created_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    packs = models.JSONField("Пакеты", default=list)
+    period = models.CharField(max_length=16, default="month")
+    amount_monthly = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    amount_once = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True)
+    pay_url = models.URLField(blank=True, default="")
+    note = models.CharField("Заметка менеджера", max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Заявка на тариф «Своё»"
+        verbose_name_plural = "Заявки на тариф «Своё»"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.company_id}: {','.join(self.packs or [])} ({self.status})"
+
+
+
+def _new_promo_code():
+    import secrets
+    abc = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "NUR-" + "".join(secrets.choice(abc) for _ in range(4)) + "-" + "".join(secrets.choice(abc) for _ in range(4))
+
+
+class PromoCode(models.Model):
+    """Промокод / подарочный код (09.11.2026): включает компании сразу несколько функций (коды CompanyAddon).
+    Выдаёт поддержка (платформенный админ); владелец вводит в Маркетплейсе."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code = models.CharField("Код", max_length=40, unique=True, default=_new_promo_code)
+    features = models.JSONField("Функции и программы (коды)", default=list, blank=True)
+    days = models.PositiveIntegerField("Дней", null=True, blank=True, help_text="Пусто — бессрочно")
+    max_uses = models.PositiveIntegerField("Сколько компаний может ввести", default=1)
+    used_count = models.PositiveIntegerField("Использован раз", default=0)
+    valid_until = models.DateField("Действует до", null=True, blank=True)
+    active = models.BooleanField(default=True)
+    note = models.CharField(max_length=255, blank=True, default="")
+    created_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Промокод"
+        verbose_name_plural = "Промокоды"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.code
+
+
+class PromoRedemption(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    promo = models.ForeignKey(PromoCode, on_delete=models.CASCADE, related_name="redemptions")
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="+")
+    user = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Активация промокода"
+        verbose_name_plural = "Активации промокодов"
+        constraints = [models.UniqueConstraint(fields=["promo", "company"], name="uniq_promo_company")]
+
+
+class BillingInvoice(models.Model):
+    """
+    elqr1911 (ТЗ Бекназара 19.11): счёт на оплату подписки NurCRM через ELQR (Элдик Банк, Dynamic QR).
+    provider=test — «учебный банк» без денег (только тестовые компании), provider=eldik — настоящий банк.
+    Продление подписки — только по SUCCESS и один раз (extended_at).
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Ждёт оплаты"
+        PROCESSING = "processing", "Проводится"
+        PAID = "paid", "Оплачен"
+        EXPIRED = "expired", "Истёк"
+        CANCELLED = "cancelled", "Отменён"
+        ERROR = "error", "Ошибка"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.CASCADE, related_name="billing_invoices")
+    created_by = models.ForeignKey("users.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    provider = models.CharField(max_length=16, default="test", db_index=True)
+    plan = models.ForeignKey(SubscriptionPlan, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    plan_code = models.CharField(max_length=32)
+    months = models.PositiveSmallIntegerField(default=1)
+    price_month = models.DecimalField("Цена в месяц", max_digits=12, decimal_places=2, default=0)
+    subtotal = models.DecimalField("Цена × месяцы", max_digits=12, decimal_places=2, default=0)
+    discount = models.DecimalField("Скидка", max_digits=12, decimal_places=2, default=0)
+    bank_fee = models.DecimalField("Комиссия банка", max_digits=12, decimal_places=2, default=0)
+    amount = models.DecimalField("К оплате", max_digits=12, decimal_places=2, default=0)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True)
+    bank_status = models.CharField(max_length=32, blank=True, default="")
+    bank_error = models.CharField(max_length=255, blank=True, default="")
+    bank_txn_id = models.CharField(max_length=128, blank=True, default="")
+    qr_image = models.TextField(blank=True, default="")
+    qr_link = models.TextField(blank=True, default="")
+    expires_at = models.DateTimeField(null=True, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    extended_at = models.DateTimeField(null=True, blank=True)
+    valid_until_before = models.DateTimeField(null=True, blank=True)
+    valid_until_after = models.DateTimeField(null=True, blank=True)
+    last_checked_at = models.DateTimeField(null=True, blank=True)
+    note = models.CharField("Заметка", max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Счёт ELQR"
+        verbose_name_plural = "Счета ELQR (подписка)"
+        ordering = ("-created_at",)
+        indexes = [models.Index(fields=["company", "-created_at"], name="billing_inv_company_idx")]
+
+    def __str__(self):
+        return f"{self.company_id} {self.amount} {self.status}"

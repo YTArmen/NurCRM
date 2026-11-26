@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from django.test import TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
-from apps.main.models import Cart, CartItem, Product, ProductAlternateBarcode
+from apps.main.models import Cart, CartItem, Client, Product, ProductAlternateBarcode
 from apps.main.pos_views import (
     _effective_qty_from_scale_data,
     _finalize_scale_data_for_product,
@@ -1114,13 +1114,17 @@ class DebtSaleReturnTests(TestCase):
 
 class SupplierReceiptSellingPriceTests(TestCase):
     def setUp(self):
-        self.company = Company.objects.create(name="Receipt Test Co", is_active=True)
+        # Company.owner обязателен (NOT NULL): без владельца фикстура падала ещё до теста.
+        owner = User.objects.create_user(email="receipt_owner@t.kg", password="x", role=Roles.OWNER)
+        self.company = Company.objects.create(name="Receipt Test Co", is_active=True, owner=owner)
+        owner.company = self.company
+        owner.save()
         self.branch = Branch.objects.create(name="Receipt Branch", company=self.company)
         self.admin = User.objects.create_user(
-            username="receipt_admin",
+            email="receipt_admin@t.kg",
+            password="x",
             company=self.company,
-            branch=self.branch,
-            role=Roles.COMPANY_OWNER,
+            role=Roles.OWNER,
         )
         self.supplier = Client.objects.create(
             company=self.company,
@@ -1160,8 +1164,10 @@ class SupplierReceiptSellingPriceTests(TestCase):
         prod.refresh_from_db()
         self.assertEqual(prod.quantity, Decimal("15"))
         self.assertEqual(prod.purchase_price, Decimal("120.000"))
-        self.assertEqual(prod.markup_percent, Decimal("10.0000"))
-        self.assertEqual(prod.price, Decimal("132.000"))
+        # Б-06 (27.10.2026): приход не меняет цену продажи, пересчитывается только наценка
+        # ((110 − 120) / 120 = −8.33 %). Пересчёт цены — только с "recalc_price": true.
+        self.assertEqual(prod.price, Decimal("110.000"))
+        self.assertEqual(prod.markup_percent, Decimal("-8.3300"))
 
     def test_scenario_2_same_purchase_price_preserves_price(self):
         prod = Product.objects.create(
@@ -1269,7 +1275,7 @@ class SupplierReceiptSellingPriceTests(TestCase):
         prod_b.refresh_from_db()
 
         self.assertEqual(prod_a.purchase_price, Decimal("120.000"))
-        self.assertEqual(prod_a.price, Decimal("132.000"))
+        self.assertEqual(prod_a.price, Decimal("110.000"))  # Б-06: цена продажи не трогается
         self.assertEqual(prod_b.purchase_price, Decimal("120.000"))
         self.assertEqual(prod_b.price, Decimal("150.000"))
 

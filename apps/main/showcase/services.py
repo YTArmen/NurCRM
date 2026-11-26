@@ -163,8 +163,19 @@ def is_owner_or_admin(user) -> bool:
         return False
 
 
+def _showcase_addon_on(company):
+    # websvc2011: услугу «Онлайн-витрина» можно включить и платной функцией online-showcase
+    # (Маркетплейс → заявка, промокод, «Функции» в support) — не только флагом компании.
+    try:
+        from apps.users.models import CompanyAddon
+        a = CompanyAddon.objects.filter(company=company, code="online-showcase").first()
+        return bool(a and a.is_effective())
+    except Exception:
+        return False
+
+
 def check_feature(company):
-    if not getattr(company, "can_view_showcase", False):
+    if not getattr(company, "can_view_showcase", False) and not _showcase_addon_on(company):
         raise PermissionDenied(
             detail="Редактор витрины входит в услугу «Онлайн витрина». Подключите её в тарифе.",
             code="feature_disabled",
@@ -398,6 +409,18 @@ def published_document(company: Company, design: Optional[ShowcaseDesign] = None
         cid for cid, c in sorted(((k, v) for k, v in cat.items() if v.get("sort_order") is not None), key=lambda kv: kv[1]["sort_order"])
     ]
     return doc
+
+
+def get_shop_knowledge(company: Company, lang: str = "ru") -> str:
+    """ТЗ 01.11: опубликованный текст design `shop.info.knowledge` для ИИ-ассистента. Нет языка — берём ru."""
+    try:
+        doc = published_document(company)
+    except Exception:
+        return ""
+    texts = (((doc.get("shop") or {}).get("info") or {}).get("knowledge")) or {}
+    if not isinstance(texts, dict):
+        return ""
+    return (texts.get(lang) or texts.get("ru") or "").strip()
 
 
 def apply_category_lists_from_doc(company: Company, doc: dict, touched_categories: dict):

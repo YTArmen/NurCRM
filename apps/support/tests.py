@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from apps.support.bot import _parse_duration, esc
 from apps.support.rules import DEFAULT_RULES, is_valid_version, sort_versions, version_gte
@@ -77,3 +77,32 @@ class BotHelpersTests(SimpleTestCase):
         codes = {r["code"] for r in DEFAULT_RULES}
         self.assertEqual(len(codes), len(DEFAULT_RULES))
         self.assertGreaterEqual(len(DEFAULT_RULES), 10)
+
+
+from django.test import override_settings
+
+
+@override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "LOCATION": "er1030"}})
+class ErrorReportsTolerantTests(TestCase):
+    """30.10.2026: плохой отчёт не роняет пачку; длинные поля обрезаются."""
+
+    def rep(self, **kw):
+        import uuid
+        r = {"client_report_id": str(uuid.uuid4()), "app": "kassa", "version": "1.17.61", "device_id": "dev-1",
+             "fingerprint": "f" * 10, "message": "boom", "first_at": "2026-10-30T10:00:00Z",
+             "last_at": "2026-10-30T10:01:00Z"}
+        r.update(kw)
+        return r
+
+    def post(self, reports):
+        from rest_framework.test import APIClient
+        return APIClient().post("/api/support/error-reports/", {"reports": reports}, format="json")
+
+    def test_bad_item_does_not_reject_batch(self):
+        r = self.post([self.rep(), self.rep(first_at="не дата"), self.rep(fingerprint="x" * 200, version="9" * 50)])
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual((r.json()["accepted"], r.json()["invalid"]), (2, 1))
+
+    def test_all_bad_400(self):
+        self.assertEqual(self.post([self.rep(first_at="нет")]).status_code, 400)
+        self.assertEqual(self.post([]).status_code, 400)

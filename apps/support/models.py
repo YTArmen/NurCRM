@@ -224,3 +224,7 @@ class SupportBotConfig(models.Model):
 
     def __str__(self):
         return f"SupportBotConfig(chat_id={self.chat_id}, enabled={self.enabled})"
+
+
+# П2-6 (14.11.2026, p2614)
+from apps.support.models_requests import SupportRequest  # noqa: E402,F401

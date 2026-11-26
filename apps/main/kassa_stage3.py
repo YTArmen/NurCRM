@@ -13,12 +13,13 @@
     GET/PATCH    /api/main/work-orders/{id}/
     POST         /api/main/work-orders/{id}/issue/
 """
+import re
 import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 from django.db import IntegrityError, transaction
-from django.db.models import F, Q, Sum
+from django.db.models import F, OuterRef, Q, Subquery, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
@@ -103,11 +104,25 @@ def _checkout_payload(payment, total, prepaid=ZERO):
 # Размеры и цвета
 # ======================================================================
 
+from apps.users.permissions import read_only_guard  # noqa: E402
+
+
 class ProductVariantSerializer(serializers.ModelSerializer):
+    # ТЗ Н-27: сколько штук варианта сейчас в резерве заказов витрины (уже списаны с quantity)
+    reserved = serializers.SerializerMethodField()
+
+    def get_reserved(self, obj):
+        val = getattr(obj, "reserved_qty", None)
+        if val is None:
+            from apps.main.models import ShowcaseOrderItem
+
+            val = ShowcaseOrderItem.objects.filter(variant_id=obj.pk, order__stock_reserved=True).aggregate(s=Sum("qty"))["s"]
+        return str(Decimal(str(val or 0)).quantize(Decimal("0.001")))
+
     class Meta:
         model = ProductVariant
-        fields = ("id", "product", "size", "color", "barcode", "quantity", "price", "is_active", "created_at", "updated_at")
-        read_only_fields = ("id", "product", "created_at", "updated_at")
+        fields = ("id", "product", "size", "color", "color_hex", "sort_order", "barcode", "quantity", "reserved", "price", "is_active", "created_at", "updated_at")
+        read_only_fields = ("id", "product", "reserved", "created_at", "updated_at")
 
     def validate_barcode(self, value):
         value = (value or "").strip() or None
@@ -126,24 +141,39 @@ class ProductVariantSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Остаток не может быть отрицательным.")
         return value
 
+    def validate_color_hex(self, value):
+        # ТЗ Н-26: необязательный #RRGGBB
+        value = (value or "").strip()
+        if value and not re.match(r"^#[0-9a-fA-F]{6}$", value):
+            raise serializers.ValidationError("Цвет должен быть в формате #RRGGBB.")
+        return value.upper()
+
 
 def sync_product_quantity_from_variants(product_id):
     """Если у товара есть варианты — его остаток равен сумме их остатков."""
-    total = ProductVariant.objects.filter(product_id=product_id).aggregate(s=Sum("quantity"))["s"]
-    if total is not None:
-        Product.objects.filter(pk=product_id).update(quantity=total)
+    # ТЗ Н-27: считаем только активные варианты
+    from apps.main.variant_utils import recalc_product_quantity
+
+    recalc_product_quantity(product_id)
 
 
 def _company_product(request, pk):
     return get_object_or_404(Product, pk=pk, company=_company(request))
 
 
+@read_only_guard("can_edit_products")  # ТЗ кассы 05.11 п.12
 class ProductVariantListCreateAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, pk):
         product = _company_product(request, pk)
-        rows = ProductVariant.objects.filter(product=product)
+        from apps.main.models import ShowcaseOrderItem
+
+        reserved = (
+            ShowcaseOrderItem.objects.filter(variant_id=OuterRef("pk"), order__stock_reserved=True)
+            .order_by().values("variant_id").annotate(s=Sum("qty")).values("s")
+        )
+        rows = ProductVariant.objects.filter(product=product).annotate(reserved_qty=Subquery(reserved))
         return Response(ProductVariantSerializer(rows, many=True).data)
 
     def post(self, request, pk):
@@ -159,6 +189,7 @@ class ProductVariantListCreateAPIView(APIView):
         return Response(ProductVariantSerializer(v).data, status=status.HTTP_201_CREATED)
 
 
+@read_only_guard("can_edit_products")  # ТЗ кассы 05.11 п.12
 class ProductVariantDetailAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -239,6 +270,7 @@ class StockTransferSerializer(serializers.Serializer):
     to_warehouse = serializers.UUIDField(required=False, allow_null=True, source="to_id")
     items = TransferItemSerializer(many=True, allow_empty=False)
     note = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    document_number = serializers.CharField(required=False, allow_blank=True, max_length=64)  # ТЗ 31.10 п.22
 
     def to_internal_value(self, data):
         # принимаем и короткие ключи из BACKEND_API.md: {from, to, items}
@@ -250,12 +282,20 @@ class StockTransferSerializer(serializers.Serializer):
         return super().to_internal_value(data)
 
 
+def transfer_attachments_payload(t, request=None):
+    """Файлы перемещения (ТЗ 31.10 п.22): id, url, size, content_type, sha256, created_at, document_type."""
+    from apps.main.media_receipts import media_payload
+    return [dict(media_payload(m, request), document_type=m.purpose) for m in t.attachments.all()]
+
+
 def _transfer_payload(t):
     return {
         "id": str(t.id),
         "from_warehouse": str(t.from_warehouse_id) if t.from_warehouse_id else None,
         "to_warehouse": str(t.to_warehouse_id) if t.to_warehouse_id else None,
         "note": t.note,
+        "document_number": t.document_number,  # ТЗ 31.10 п.22
+        "attachments": transfer_attachments_payload(t),
         "items": [
             {"product": str(i.product_id), "variant": str(i.variant_id) if i.variant_id else None, "qty": str(qty3(i.quantity))}
             for i in t.items.all()
@@ -303,7 +343,7 @@ class StockTransferListCreateAPIView(APIView):
 
     def get(self, request):
         company = _company(request)
-        rows = MarketStockTransfer.objects.filter(company=company).prefetch_related("items")[:200]
+        rows = MarketStockTransfer.objects.filter(company=company).prefetch_related("items", "attachments")[:200]
         return Response([_transfer_payload(t) for t in rows])
 
     def post(self, request):
@@ -328,6 +368,7 @@ class StockTransferListCreateAPIView(APIView):
                 t = MarketStockTransfer.objects.create(
                     company=company, from_warehouse=src, to_warehouse=dst,
                     note=data.get("note") or "", idempotency_key=key, created_by=request.user,
+                    document_number=data.get("document_number") or "",
                 )
                 for idx, it in enumerate(data["items"]):
                     qty = qty3(it["qty"])
@@ -397,6 +438,14 @@ class SaleExchangeAPIView(APIView):
             sale = get_object_or_404(Sale.objects.select_for_update(), pk=pk, company=company)
             if sale.status not in (Sale.Status.PAID, Sale.Status.PARTIALLY_RETURNED):
                 raise ValidationError({"detail": "Обмен возможен только по оплаченному чеку."})
+            # Аудит 12.11: по долговому чеку возврат уже уменьшает долг — зачёт в обмене давал двойную выгоду.
+            if sale.payment_method == Sale.PaymentMethod.DEBT and not (
+                sale.status == Sale.Status.PAID and (sale.debt_remaining or ZERO) <= 0
+            ):
+                raise ValidationError({
+                    "detail": "Обмен по чеку в долг возможен только после полного погашения долга. Оформите возврат.",
+                    "code": "exchange_debt_sale",
+                })
             shift = _open_shift(company, request.user)
 
             # 1) возврат: деньги не выдаём, сумма идёт в зачёт

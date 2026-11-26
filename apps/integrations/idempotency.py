@@ -27,7 +27,10 @@ IN_PROGRESS_TIMEOUT = timedelta(minutes=5)
 def _body_hash(request) -> str:
     data = getattr(request, "data", None)
     if isinstance(data, dict):
-        data = {k: v for k, v in data.items() if k != "idempotency_key"}
+        ignored = {"idempotency_key"}
+        if "/pos/checkout" in (getattr(request, "path", "") or ""):
+            ignored |= {"source", "device_key", "device_name"}  # Б-67: в сравнение тела не входят
+        data = {k: v for k, v in data.items() if k not in ignored}
     try:
         raw = json.dumps(data, sort_keys=True, default=str, ensure_ascii=False)
     except Exception:
@@ -61,13 +64,14 @@ def _normalize_scope(request) -> str:
     return f"{method} {path}"[:255]
 
 
-def idempotent(handler=None, *, body_key=False):
+def idempotent(handler=None, *, body_key=False, replay_flag=False):
     """
     Декоратор метода APIView (post/patch/put/delete).
     body_key=True — ключ можно передать и полем idempotency_key в теле (если нет заголовка).
+    replay_flag=True — при повторе в теле ответа (dict) ставится replayed=true.
     """
     if handler is None:
-        return functools.partial(idempotent, body_key=body_key)
+        return functools.partial(idempotent, body_key=body_key, replay_flag=replay_flag)
 
     @functools.wraps(handler)
     def wrapper(view, request, *args, **kwargs):
@@ -119,7 +123,11 @@ def idempotent(handler=None, *, body_key=False):
                         "in_progress", status.HTTP_409_CONFLICT, **{"Retry-After": "1"},
                     )
             if record.state == IdempotencyRecord.State.DONE:
-                resp = Response(record.response_body, status=record.status_code)
+                body = record.response_body
+                # ТЗ Н-08/Н-10: признак повтора в теле — по флагу или если ответ его уже содержит.
+                if isinstance(body, dict) and (replay_flag or "replayed" in body):
+                    body = {**body, "replayed": True}
+                resp = Response(body, status=record.status_code)
                 resp["Idempotent-Replayed"] = "true"
                 return resp
 

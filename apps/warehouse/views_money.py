@@ -749,7 +749,16 @@ class WarehousePeriodCloseView(CompanyBranchRestrictedMixin, generics.GenericAPI
         obj = self._settings()
         ser = self.get_serializer(obj, data=request.data, partial=True)
         ser.is_valid(raise_exception=True)
+        old_closed = obj.closed_until
         ser.save(updated_by=request.user)
+        if obj.closed_until != old_closed:
+            from apps.construction.audit import log_change
+            log_change(
+                company=obj.company, user=request.user, action="closed_until", object_type="period",
+                object_id=obj.company_id, object_name="Закрытие периода",
+                before={"closed_until": str(old_closed) if old_closed else None},
+                after={"closed_until": str(obj.closed_until) if obj.closed_until else None}, request=request,
+            )
         return Response(ser.data)
 
     def put(self, request, *args, **kwargs):

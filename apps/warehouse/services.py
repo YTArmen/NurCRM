@@ -431,6 +431,24 @@ def ensure_period_open(*, company, dates, user=None):
             )
 
 
+def ensure_period_open_api(*, company, dates, user=None):
+    """
+    То же, что ensure_period_open, но для DRF-вьюх (кассы, возвраты, оплаты долгов):
+    вместо BusinessRuleError бросает APIException → 400 {"detail", "code": "period_closed", "closed_until"}.
+    """
+    try:
+        ensure_period_open(company=company, dates=dates, user=user)
+    except BusinessRuleError as exc:
+        from rest_framework.exceptions import APIException
+
+        class PeriodClosed(APIException):
+            status_code = 400
+
+        raise PeriodClosed(
+            {"detail": str(exc), "code": exc.api_code, **(exc.extra or {})}
+        )
+
+
 def ensure_can_set_document_date(*, user, new_date):
     """Дата документа, отличная от сегодняшней, — только с правом can_change_document_date."""
     if user is None or new_date is None:
@@ -589,11 +607,8 @@ def _create_or_post_money_document(
             services_money.post_money_document(existing, user=user, allow_negative_cash=allow_negative_cash)
         return existing
 
-    if not document.counterparty_id and document.doc_type in (
-        models.Document.DocType.SALE,
-        models.Document.DocType.SALE_RETURN,
-        models.Document.DocType.PURCHASE_RETURN,
-    ):
+    # Возврат наличными без контрагента допустим (денежный документ без контрагента, как у закупа).
+    if not document.counterparty_id and document.doc_type == models.Document.DocType.SALE:
         raise ValueError("Для проведения в кассу укажите контрагента в документе.")
 
     warehouse = resolve_document_context_warehouse(document)
@@ -749,7 +764,11 @@ def _base_document_paid_amount(base_document) -> Decimal:
     ).first()
     if md is not None:
         return Decimal(md.amount or 0).quantize(Decimal("0.01"))
-    return Decimal("0.00")
+    # Нет денежного документа (продажа агента: деньги у агента, без кассы; продажа
+    # «наличными» без привязки к кассе) — считаем оплаченной сумму наличной части основания.
+    if effective_payment_kind(base_document.payment_kind) == models.Document.PaymentKind.CASH:
+        return Decimal(base_document.total or 0).quantize(Decimal("0.01"))
+    return Decimal(getattr(base_document, "prepayment_amount", None) or 0).quantize(Decimal("0.01"))
 
 
 def _returns_cash_refunded(base_document, *, exclude_document_id=None) -> Decimal:
@@ -882,6 +901,15 @@ def post_document(
     explicit_negative = bool(allow_negative)
     if explicit_negative:
         ensure_allow_negative_permitted(document, user)
+    # Возврат денег покупателю нельзя блокировать из-за минуса в кассе: у кого есть право
+    # can_cash_negative (по умолчанию владелец), возврат проходит и без флага от клиента.
+    if (
+        not allow_negative_cash
+        and document.doc_type == models.Document.DocType.SALE_RETURN
+        and user is not None
+        and perms.has_op_permission(user, perms.CASH_NEGATIVE)
+    ):
+        allow_negative_cash = True
     if allow_negative_cash:
         perms.require_op_permission(user, perms.CASH_NEGATIVE)
 

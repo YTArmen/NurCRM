@@ -112,7 +112,9 @@ class DebtPaymentMethodTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
 
         debt.refresh_from_db()
-        self.assertEqual(debt.amount, Decimal("800.00"))
+        # ТЗ 12.2: сумма долга остаётся прежней, остаток падает один раз - за счёт платежа.
+        self.assertEqual(debt.amount, Decimal("1000.00"))
+        self.assertEqual(debt.balance, Decimal("800.00"))
         self.assertEqual(debt.payment_method, "cash")
 
         pm = DebtPayment.objects.filter(debt=debt).first()

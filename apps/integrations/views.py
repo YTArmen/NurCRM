@@ -34,7 +34,7 @@ class ApiKeySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ApiKey
-        fields = ("id", "name", "prefix", "scopes", "created_at", "last_used_at", "revoked_at")
+        fields = ("id", "name", "prefix", "scopes", "rate_limit_per_minute", "created_at", "last_used_at", "revoked_at")
         read_only_fields = ("id", "prefix", "created_at", "last_used_at", "revoked_at")
 
 
@@ -60,6 +60,7 @@ class ApiKeyListCreateAPIView(generics.ListCreateAPIView):
             company=company,
             name=ser.validated_data["name"],
             scopes=ser.validated_data.get("scopes") or [ApiKey.Scope.READ],
+            rate_limit_per_minute=ser.validated_data.get("rate_limit_per_minute") or 120,
             prefix=raw[:16],
             key_hash=hash_api_key(raw),
             created_by=request.user,
@@ -80,6 +81,23 @@ class ApiKeyRevokeAPIView(generics.DestroyAPIView):
             key.revoked_at = timezone.now()
             key.save(update_fields=["revoked_at"])
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ApiKeyCallLogAPIView(generics.GenericAPIView):
+    """GET /api/users/api-keys/{id}/calls/ — последние 200 вызовов по ключу (ТЗ Н-24)."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, pk, *args, **kwargs):
+        from .models import ApiKeyCallLog
+
+        key = get_object_or_404(ApiKey, pk=pk, company=_owner_company(request))
+        rows = ApiKeyCallLog.objects.filter(key=key)[:200]
+        return Response([
+            {"created_at": r.created_at, "method": r.method, "path": r.path, "scope": r.scope,
+             "allowed": r.allowed, "reason": r.reason}
+            for r in rows
+        ])
 
 
 # ---------- Вебхуки ----------

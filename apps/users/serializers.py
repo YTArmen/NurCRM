@@ -3,6 +3,7 @@ from datetime import timedelta
 import secrets
 import string
 
+from apps.users.permissions import READ_ONLY_FIELDS
 from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.core.mail import send_mail
@@ -151,6 +152,14 @@ def _generate_password(length=6):
 # ======================
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    @classmethod
+    def get_token(cls, user):
+        token = super().get_token(user)
+        from apps.users.auth_session import stamp_auth_time
+
+        stamp_auth_time(token)  # 06.11.2026: предел 90 дней без пароля
+        return token
+
     def validate(self, attrs):
         email_val = attrs.get("email") or attrs.get("username")
         if isinstance(email_val, str):
@@ -208,6 +217,22 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             "branch_ids": branch_ids,
             "primary_branch_id": primary_branch_id,
         })
+        # 06.11.2026: слот устройства (один вход на тип). Без client_type/device_key — как раньше.
+        request = self.context.get("request")
+        raw = getattr(request, "data", None) or {}
+        from apps.users.plan_mini import check_login  # mini2011/mini2211: «Мини» — только телефон
+
+        refresh = self.get_token(user)
+        restriction = check_login(request, user, raw, refresh)  # 403 касса, 400 без device_key, claim ncl
+        from apps.users.auth_session import open_session
+
+        sess = open_session(request, user, raw, refresh)  # DeviceSlotTaken -> 409 во view
+        data["refresh"] = str(refresh)
+        data["access"] = str(refresh.access_token)
+        if sess is not None:
+            data["device_session_id"] = str(sess.id)
+        if restriction:
+            data["plan_restriction"] = restriction  # mini2211: сайт на «Мини» — только оплата
         return data
 
 
@@ -290,6 +315,210 @@ def _get_user_consulting_regions(user):
         return result
     except Exception:
         return []
+
+
+# ТЗ 29.10 Б-101: новые поля карточки сотрудника
+EMPLOYEE_CARD_FIELDS = [
+    "is_active", "hired_at", "fired_at", "birth_date", "address", "emergency_contact",
+    "comment", "language", "default_cashbox",
+]
+
+
+def _check_phone_digits(value, current=None):
+    """Телефон: 7–15 цифр (допустимы +, пробелы, скобки, дефисы). Пустая строка очищает поле.
+    Проверяется только новое значение: у существующих сотрудников плохие телефоны не ломаем."""
+    if value is None:
+        return None
+    value = str(value).strip()
+    if value == "":
+        return None
+    if current is not None and value == str(current).strip():
+        return value
+    digits = re.sub(r"[\s()+\-.]", "", value)
+    if not digits.isdigit() or not 7 <= len(digits) <= 15:
+        raise serializers.ValidationError("Телефон: от 7 до 15 цифр.", code="phone_invalid")
+    return value
+
+
+def _delete_products_effective(user):
+    """hist2111: «Удалять товары» — владелец/админ всегда, остальные только явное True."""
+    from apps.users.permissions import can_delete_products
+
+    return can_delete_products(user)
+
+
+def _purchase_edit_effective(user):
+    """ТЗ редактор накладных 30.10: право «Редактор документов закупок» — владелец всегда, остальные только явное True."""
+    from apps.users.permissions import can_edit_purchase_documents
+
+    return can_edit_purchase_documents(user)
+
+
+# ─────────────────────────────────────────────────────────────
+# S1 (аудит 03.11): кто может менять роль и права
+# ─────────────────────────────────────────────────────────────
+ELEVATED_ROLES = ("owner", "admin")
+
+
+def _is_superuser(user):
+    return bool(getattr(user, "is_superuser", False))
+
+
+def _is_owner_or_admin(user):
+    from apps.warehouse.op_permissions import is_company_owner
+
+    return bool(user is not None and (is_company_owner(user) or getattr(user, "role", None) == "admin"))
+
+
+def _rights_denied(detail, field=None):
+    body = {"code": "permission_denied", "detail": detail, "required": "can_edit_employees"}
+    if field:
+        body["field"] = field
+    return PermissionDenied(detail=body)
+
+
+def _rights_value(instance, key):
+    """Текущее значение права так, как его видит фронт: NULL у can_view_*/опасных — «нет»
+    (у опасных — по умолчанию для роли), NULL у can_edit_* — «можно» (как раньше)."""
+    from apps.warehouse.op_permissions import OP_PERMISSION_FIELDS, has_op_permission
+
+    if instance is None:
+        return None
+    if key in OP_PERMISSION_FIELDS:
+        return has_op_permission(instance, key)
+    if key == "can_edit_purchase_documents":
+        return _purchase_edit_effective(instance)
+    if key == "can_delete_products":
+        return _delete_products_effective(instance)
+    raw = getattr(instance, key, None)
+    if key in READ_ONLY_FIELDS:
+        return raw is not False
+    if key.startswith("can_"):
+        return bool(raw)
+    return raw
+
+
+def _op_fields():
+    from apps.warehouse.op_permissions import OP_PERMISSION_FIELDS
+
+    return OP_PERMISSION_FIELDS
+
+
+def _real_changes(data, instance, keys):
+    """Ключи из keys, которые в data действительно отличаются от текущих (с учётом NULL)."""
+    out = []
+    for k in keys:
+        if k not in data:
+            continue
+        if k in _op_fields():
+            # опасные права: NULL («по умолчанию для роли») фронт показывает как «нет» и шлёт false —
+            # это не изменение; изменение — выдать (true при не-true) или снять ранее выданное (false при true)
+            raw, new = (getattr(instance, k, None) if instance is not None else None), bool(data[k])
+            if (new and raw is not True) or (not new and raw is True):
+                out.append(k)
+            continue
+        new, cur = data[k], _rights_value(instance, k)
+        if k == "custom_role":
+            new, cur = getattr(new, "pk", new), getattr(instance, "custom_role_id", None)
+        elif k in READ_ONLY_FIELDS:
+            new = new is not False
+        elif k.startswith("can_"):
+            new = bool(new)
+        if new != cur:
+            out.append(k)
+    return out
+
+
+def _guard_self_rights(data, instance, current_user):
+    """Себе нельзя менять роль и права (can_*). Владелец компании может менять свои флаги can_*
+    (старый сайт после входа дописывает владельцу права сферы), но не свою роль.
+    Присланные без изменений значения пропускаются: клиенты шлют карточку целиком."""
+    if instance is None or current_user is None or _is_superuser(current_user):
+        return
+    if instance.pk != current_user.pk:
+        return
+    from apps.warehouse.op_permissions import is_company_owner
+
+    role_changed = _real_changes(data, instance, ("role", "custom_role"))
+    if role_changed:
+        raise _rights_denied("Свою роль поменять нельзя: это делает владелец или администратор.", role_changed[0])
+    if is_company_owner(current_user):
+        return
+    flags = _real_changes(data, instance, [k for k in data if k.startswith("can_")])
+    if flags:
+        raise _rights_denied("Свои права поменять нельзя: это делает владелец или администратор.", flags[0])
+
+
+def _guard_employee_rights(data, target, current_user):
+    """Права на чужую карточку (PATCH employees/{id}/ и создание):
+    роль admin выдаёт только владелец/админ, роль owner — только владелец;
+    карточку админа/владельца меняет только владелец/админ;
+    опасные права (склад) и «Редактор документов закупок» выдаёт только владелец/админ."""
+    from apps.warehouse.op_permissions import OP_PERMISSION_FIELDS, is_company_owner
+
+    if current_user is None or _is_superuser(current_user):
+        return
+    elevated_editor = _is_owner_or_admin(current_user)
+    if target is not None and getattr(target, "role", None) in ELEVATED_ROLES and not elevated_editor:
+        if data:
+            raise _rights_denied("Карточку администратора или владельца меняет только владелец или администратор.")
+    new_role = data.get("role", None)
+    cur_role = getattr(target, "role", None) if target is not None else None
+    if "role" in data and new_role != cur_role:
+        if new_role == "owner" and not is_company_owner(current_user):
+            raise _rights_denied("Роль «Владелец» выдаёт только владелец компании.", "role")
+        if new_role in ELEVATED_ROLES and not elevated_editor:
+            raise _rights_denied("Роль «Администратор» выдаёт только владелец или администратор.", "role")
+    danger = (_real_changes(data, target, list(OP_PERMISSION_FIELDS)) if target is not None
+              else [k for k in OP_PERMISSION_FIELDS if data.get(k)])
+    if danger and not elevated_editor:
+        raise _rights_denied("Опасные права выдаёт только владелец или администратор.", danger[0])
+    # неизменённое опасное право не записываем: front-market шлёт false для NULL («по умолчанию для роли»),
+    # и сохранение карточки иначе сняло бы у админа права по умолчанию (отмена проведения, дата документа)
+    for k in OP_PERMISSION_FIELDS:
+        if k in data and k not in danger:
+            data.pop(k)
+
+
+def _check_purchase_edit_grant(data, instance, current_user):
+    """Право «Редактор документов закупок» выдаёт/снимает владелец или администратор (01.11)."""
+    from apps.warehouse.op_permissions import is_company_owner
+
+    for key, eff in (("can_edit_purchase_documents", _purchase_edit_effective),
+                     ("can_delete_products", _delete_products_effective)):  # hist2111
+        if key not in data or current_user is None:
+            continue
+        before = eff(instance) if instance is not None else False
+        if bool(data[key]) != before and not (is_company_owner(current_user) or getattr(current_user, "role", None) == "admin"):
+            raise serializers.ValidationError({key: "Это право может выдать только владелец или администратор."})
+        if data[key] is False:
+            data[key] = None  # «нет» хранится как NULL (по умолчанию нет)
+
+
+class EmployeeFieldsMixin:
+    """Общая валидация полей сотрудника (создание и PATCH)."""
+
+    def validate_phone_number(self, value):
+        inst = getattr(self, "instance", None)
+        return _check_phone_digits(value, getattr(inst, "phone_number", None))
+
+    def validate_track_number(self, value):
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value or None
+
+    def validate_default_cashbox(self, value):
+        if value is None:
+            return None
+        inst = getattr(self, "instance", None)
+        company = getattr(inst, "company", None)
+        if company is None:
+            u = self.context["request"].user
+            company = getattr(u, "owned_company", None) or getattr(u, "company", None)
+        if company is None or value.company_id != company.id:
+            raise serializers.ValidationError("Касса не найдена в вашей компании.", code="cashbox_not_found")
+        return value
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -387,21 +616,31 @@ class UserSerializer(serializers.ModelSerializer):
             "can_view_sales", "can_view_services",
             "can_view_agent", "can_view_catalog",
             "can_view_branch", "can_view_logistics", "can_view_request", "can_view_shifts",
-            "can_view_cashier", "can_view_document", "can_view_market_scales", "can_view_market_label",
+            "can_view_cashier", "can_use_pos", "can_view_document", "can_view_market_scales", "can_view_market_label",
             "can_view_market_discount", "can_view_market_edit_price", "can_view_market_delete_cart_item",
             "can_view_market_procurement", "can_view_market_supplier", "can_view_market_employee_return",
+            "can_view_whatsapp", "can_edit_whatsapp",
 
             # Склад: опасные операции (null — по умолчанию для роли)
             "can_post_negative_stock", "can_unpost_documents", "can_change_document_date",
-            "can_post_closed_period", "can_cash_negative",
+            "can_post_closed_period", "can_cash_negative", "can_sell_below_cost", "can_see_purchase_price",
+            "can_edit_purchase_documents",  # ТЗ 31.10 п.21
+            "can_delete_products",  # hist2111
+            *READ_ONLY_FIELDS,
 
             # Consulting: воронка продаж
             "can_view_funnel", "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend", "can_view_leads_inbox", "funnel_grants",
 
             "branch_ids", "primary_branch_id",
             "created_at", "updated_at",
+            *EMPLOYEE_CARD_FIELDS,  # ТЗ 29.10 Б-101
         ]
-        read_only_fields = ["id", "created_at", "updated_at", "company", "is_platform_admin"]
+        read_only_fields = [
+            "id", "created_at", "updated_at", "company", "is_platform_admin",
+            # в профиле сам сотрудник меняет только язык; остальное — карточка от владельца
+            "is_active", "hired_at", "fired_at", "birth_date", "address", "emergency_contact",
+            "comment", "default_cashbox",
+        ]
 
     def validate_email(self, value):
         value = (value or "").strip().lower()
@@ -427,6 +666,8 @@ class UserSerializer(serializers.ModelSerializer):
                 data[p] = False
                 raise serializers.ValidationError("Менеджеру запрещено изменять права доступа.")
 
+        _guard_self_rights(data, self.instance, current_user)  # S1 03.11: себе роль и права не меняем
+
         # проверка типов только для тех флагов, которые реально прислали
         for k, v in data.items():
             if k.startswith("can_view_") and not isinstance(v, bool):
@@ -442,11 +683,23 @@ class UserSerializer(serializers.ModelSerializer):
         ]
         if sent and current_user is not None and not is_company_owner(current_user):
             raise serializers.ValidationError({sent[0]: "Это право может выдать только владелец компании."})
+        _check_purchase_edit_grant(data, self.instance, current_user)  # ТЗ редактор накладных 30.10
 
         return data
 
     def update(self, instance, validated_data):
         password = validated_data.pop("password", None)
+        if password:
+            # Аудит 12.11: свой пароль через профиль — только с текущим паролем
+            # (иначе украденный токен/API-ключ навсегда забирает аккаунт).
+            req = self.context.get("request")
+            me = getattr(req, "user", None)
+            if me is not None and getattr(me, "pk", None) == instance.pk:
+                current = (getattr(req, "data", {}) or {}).get("current_password") or (getattr(req, "data", {}) or {}).get("old_password")
+                if not current or not instance.check_password(str(current)):
+                    raise serializers.ValidationError(
+                        {"current_password": "Для смены пароля введите текущий пароль (или используйте users/settings/change-password/)."}
+                    )
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         if password:
@@ -456,6 +709,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         rep = super().to_representation(instance)
+        rep["can_edit_purchase_documents"] = _purchase_edit_effective(instance)  # ТЗ редактор накладных 30.10
+        rep["can_delete_products"] = _delete_products_effective(instance)  # hist2111
         return _apply_cashier_sector_gate(rep, instance)
 
 
@@ -477,6 +732,9 @@ class OwnerRegisterSerializer(serializers.ModelSerializer):
         allow_blank=True,
     )
     subscription_plan_id = serializers.UUIDField(write_only=True, required=True)
+    # mini2211: профиль магазина при регистрации (bazaar / bazaar_retail / bazaar_wholesale / grocery …).
+    # На «Мини» без параметра — bazaar_retail.
+    market_profile = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = User
@@ -485,6 +743,7 @@ class OwnerRegisterSerializer(serializers.ModelSerializer):
             "first_name", "last_name",
             "avatar",
             "company_name", "company_sector_id", "company_region", "subscription_plan_id",
+            "market_profile",
         ]
 
     def validate_email(self, value):
@@ -498,8 +757,20 @@ class OwnerRegisterSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"password2": "Пароли не совпадают."})
         return data
 
+    def validate_market_profile(self, value):
+        from apps.users.market_modules import ALIASES, PROFILES
+
+        v = str(value or "").strip().lower()
+        if not v:
+            return None
+        v = ALIASES.get(v, v)
+        if v not in PROFILES:
+            raise serializers.ValidationError("Неизвестный профиль магазина.", code="profile_unknown")
+        return v
+
     @transaction.atomic
     def create(self, validated_data):
+        market_profile = validated_data.pop("market_profile", None)  # mini2211
         company_name = validated_data.pop("company_name")
         sector_id = validated_data.pop("company_sector_id")
         company_region = validated_data.pop("company_region", None) or None
@@ -539,6 +810,16 @@ class OwnerRegisterSerializer(serializers.ModelSerializer):
         user.set_password(validated_data["password"])
         user.save()
 
+        extra_dates = {}
+        try:  # trf2111: «Мини» — 14 дней пробного (остальные тарифы — 10, Company.save)
+            from apps.users.services_subscription import resolve_plan_code as _rpc
+            if _rpc(subscription_plan) == "mini":
+                from datetime import timedelta as _td
+                from django.utils import timezone as _tz
+                _now = _tz.now()
+                extra_dates = {"start_date": _now, "end_date": _now + _td(days=14)}
+        except Exception:  # noqa: BLE001
+            extra_dates = {}
         company = Company.objects.create(
             name=company_name,
             industry=industry,
@@ -547,10 +828,31 @@ class OwnerRegisterSerializer(serializers.ModelSerializer):
             subscription_plan=subscription_plan,
             owner=user,
             scale_barcode_layout=SCALE_BARCODE_LAYOUT_PLU,
+            **extra_dates,
         )
 
         user.company = company
         user.save(update_fields=["company"])
+
+        # mini2211: профиль магазина. «Мини» без профиля — Базар (розница); выбора в мобилке нет.
+        try:
+            from apps.users.services_subscription import resolve_plan_code as _rpc2
+            if not market_profile and _rpc2(subscription_plan) == "mini":
+                market_profile = "bazaar_retail"
+        except Exception:  # noqa: BLE001
+            pass
+        if market_profile:
+            from apps.users.market_modules import APP as _MM_APP
+            from apps.users.models import CompanyAppSettings
+
+            if market_profile in Company.MarketSphere.values:
+                company.market_sphere = market_profile
+                company.market_spheres = [market_profile]
+                company.save(update_fields=["market_sphere", "market_spheres"])
+            CompanyAppSettings.objects.update_or_create(
+                company=company, branch=None, app=_MM_APP,
+                defaults={"settings": {"profile": market_profile, "added": [], "removed": []}},
+            )
 
         # ВНИМАНИЕ: «Основная касса компании» создаётся сигналом
         # apps/construction/signals.py::create_cashbox_for_company.
@@ -563,7 +865,7 @@ class OwnerRegisterSerializer(serializers.ModelSerializer):
 # Employee create
 # ======================
 
-class EmployeeCreateSerializer(serializers.ModelSerializer):
+class EmployeeCreateSerializer(EmployeeFieldsMixin, serializers.ModelSerializer):
     email = serializers.EmailField(required=True)
     role_display = serializers.CharField(read_only=True)
 
@@ -585,21 +887,24 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            "email", "first_name", "last_name", "track_number", "phone_number", "avatar",
+            "id", "email", "first_name", "last_name", "track_number", "phone_number", "avatar",
             "role", "custom_role", "role_display",
-            "region_code", "consulting_region_codes",
+            "region_code", "consulting_region_codes", "can_use_pos",  # ТЗ Н-16: id всегда в ответе
 
             # все can_view_* которые ты раньше использовал
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
             "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend",
 
             "primary_branch", "branches",
+            *EMPLOYEE_CARD_FIELDS,  # ТЗ 29.10 Б-101
         ]
+        read_only_fields = ["is_active", "fired_at"]
 
     def validate_email(self, value):
         value = (value or "").strip().lower()
-        if User.objects.filter(email=value, is_active=True).exists():
-            raise serializers.ValidationError("Этот email уже используется.")
+        # ТЗ 29.10 Б-101: email уникален; уволенные (is_active=False) сохраняют email, поэтому проверяем всех
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("Этот email уже используется.", code="email_taken")
         return value
 
     def validate(self, data):
@@ -608,6 +913,7 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
 
         if getattr(current_user, "role", None) in ("manager", "salesperson"):
             raise serializers.ValidationError("У вас нет прав для создания сотрудников.")
+        _guard_employee_rights(data, None, current_user)  # S1 03.11: роль admin/owner — только владелец/админ
 
         company = getattr(current_user, "owned_company", None) or getattr(current_user, "company", None)
         if not company:
@@ -665,6 +971,21 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
         creator = request.user
         company = getattr(creator, "owned_company", None) or getattr(creator, "company", None)
 
+        if company is not None:
+            from apps.users.services_subscription import employee_limit_error
+
+            # Лимит тарифа; блокировка строки компании — чтобы два запроса разом не прошли оба.
+            Company.objects.select_for_update().filter(pk=company.pk).first()
+            limit_error = employee_limit_error(company)
+            if limit_error:
+                # ТЗ 29.10 Б-101: новое поведение — 403 employee_limit_reached {limit, current}
+                from core.api_compat import is_strict
+                from apps.users.plan_mini import is_mini  # mini2011: «Мини» всегда 403 plan_limit
+                if is_strict(request, company) or is_mini(company):
+                    from apps.users.services_subscription import employee_limit_reached_body
+                    raise ConflictError(employee_limit_reached_body(company, limit_error), 403)
+                raise serializers.ValidationError({"detail": limit_error, "code": "employee_limit"})
+
         primary_branch_id = validated_data.pop("primary_branch", None)
         validated_data.pop("branches", None)
         branches_objects = validated_data.pop("_branches_objects", [])
@@ -693,6 +1014,9 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
             consulting_region_codes=consulting_region_codes,
             company=company,
             is_active=True,
+            **{k: validated_data.get(k) for k in (
+                "hired_at", "birth_date", "address", "emergency_contact", "comment", "language", "default_cashbox",
+            )},
         )
         user.set_password(generated_password)
 
@@ -722,6 +1046,8 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
                 if v is not None:
                     setattr(user, k, v)
 
+        if "can_use_pos" in validated_data:  # ТЗ Н-16
+            user.can_use_pos = bool(validated_data["can_use_pos"])
         user.save()
 
         # Funnel grant for region
@@ -773,6 +1099,8 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         rep = super().to_representation(instance)
+        rep["can_edit_purchase_documents"] = _purchase_edit_effective(instance)  # ТЗ редактор накладных 30.10
+        rep["can_delete_products"] = _delete_products_effective(instance)  # hist2111
         rep["generated_password"] = getattr(self, "_generated_password", None)
         rep["consulting_region_codes"] = instance.get_consulting_region_codes()
         rep["consulting_regions"] = _get_user_consulting_regions(instance)
@@ -787,6 +1115,39 @@ class EmployeeCreateSerializer(serializers.ModelSerializer):
 # Employee update
 # ======================
 
+class ConflictError(APIException):
+    """Ошибка с произвольным статусом и телом {detail, code, ...} (409 last_admin / open_shift)."""
+    status_code = 409
+
+    def __init__(self, body, status_code=409):
+        self.status_code = status_code
+        super().__init__(detail=body)
+        self.detail = body  # числа (limit/current) остаются числами, не строками
+
+
+def _check_dismissal_allowed(request, target_user):
+    """ТЗ 29.10 Б-101: 409 last_admin (последний владелец/админ) и open_shift (открытая смена).
+    Только для нового клиента / strict-компании; старые кассы ведут себя как раньше
+    (открытые смены закрываются автоматически)."""
+    from core.api_compat import is_strict
+
+    if not is_strict(request, target_user.company):
+        return
+    if target_user.role in ("owner", "admin"):
+        others = User.objects.filter(
+            company=target_user.company, is_active=True, deleted_at__isnull=True, role__in=("owner", "admin"),
+        ).exclude(pk=target_user.pk).exists()
+        if not others:
+            raise ConflictError({"detail": "Нельзя убрать последнего администратора компании.", "code": "last_admin"})
+    from apps.construction.models import CashShift
+    shift = CashShift.objects.filter(cashier_id=target_user.pk, status=CashShift.Status.OPEN).first()
+    if shift:
+        raise ConflictError({
+            "detail": "У сотрудника открыта смена. Сначала закройте её.", "code": "open_shift",
+            "shift": str(shift.pk),
+        })
+
+
 class FunnelGrantSerializer(serializers.Serializer):
     """Доступ сотрудника к воронке consalting: {funnel_id, can_manage_leads, can_manage_stages}."""
     funnel_id = serializers.UUIDField()
@@ -794,7 +1155,7 @@ class FunnelGrantSerializer(serializers.Serializer):
     can_manage_stages = serializers.BooleanField(required=False, default=False)
 
 
-class EmployeeUpdateSerializer(serializers.ModelSerializer):
+class EmployeeUpdateSerializer(EmployeeFieldsMixin, serializers.ModelSerializer):
     role_display = serializers.CharField(read_only=True)
     branch_ids = serializers.ListField(
         child=serializers.UUIDField(),
@@ -817,14 +1178,21 @@ class EmployeeUpdateSerializer(serializers.ModelSerializer):
         fields = [
             "id", "first_name", "last_name", "track_number", "phone_number", "avatar",
             "role", "custom_role", "role_display",
-            "consulting_region_codes",
+            "consulting_region_codes", "can_use_pos",
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
             "can_manage_funnel_leads",
             "can_manage_funnel_stages",
             "can_create_funnel",
             "can_manage_lead_ad_spend",
+            *READ_ONLY_FIELDS,
+            "can_edit_purchase_documents",  # ТЗ редактор накладных 30.10
+            "can_delete_products",  # hist2111
+            # S1 03.11: опасные права склада (раньше молча отбрасывались) — выдаёт владелец/админ
+            "can_post_negative_stock", "can_unpost_documents", "can_change_document_date",
+            "can_post_closed_period", "can_cash_negative", "can_sell_below_cost", "can_see_purchase_price",
             "funnel_grants",
             "branch_ids",
+            *EMPLOYEE_CARD_FIELDS,  # ТЗ 29.10 Б-101
         ]
         read_only_fields = ["id"]
 
@@ -859,10 +1227,31 @@ class EmployeeUpdateSerializer(serializers.ModelSerializer):
                 if not set(new_codes).issubset(set(my_regions)):
                     raise serializers.ValidationError("Нельзя привязать сотрудника к чужому региону.")
 
+        _check_purchase_edit_grant(data, target_user, current_user)  # ТЗ редактор накладных 30.10
+        _guard_employee_rights(data, target_user, current_user)  # S1 03.11: роль admin и опасные права
+
         branch_ids = data.get("branch_ids", None)
         if branch_ids is not None:
             company = target_user.company
             _validate_branch_ids_for_company(branch_ids, company)
+
+        # ТЗ 29.10 Б-101: мягкое увольнение / возврат сотрудника через is_active
+        if "is_active" in data and data["is_active"] != target_user.is_active:
+            if getattr(current_user, "role", None) == "supervisor":
+                raise ConflictError(
+                    {"detail": "Руководитель региона не может увольнять сотрудников.", "code": "permission_denied",
+                     "required": "can_edit_employees"}, 403)
+            if data["is_active"] is False:
+                if getattr(target_user, "role", None) == "owner" and not getattr(current_user, "is_superuser", False):
+                    raise serializers.ValidationError({"is_active": "Нельзя уволить владельца компании."})
+                _check_dismissal_allowed(request, target_user)
+            else:
+                from apps.users.services_subscription import employee_limit_error, employee_limit_reached_body
+                limit_error = employee_limit_error(target_user.company)
+                if limit_error:
+                    raise ConflictError(employee_limit_reached_body(target_user.company, limit_error), 403)
+                if getattr(target_user, "deleted_at", None):
+                    raise serializers.ValidationError({"is_active": "Удалённого сотрудника вернуть нельзя."})
 
         return data
 
@@ -871,6 +1260,14 @@ class EmployeeUpdateSerializer(serializers.ModelSerializer):
         branch_ids = validated_data.pop("branch_ids", None)
         funnel_grants = validated_data.pop("funnel_grants", None)
         consulting_region_codes = validated_data.pop("consulting_region_codes", None)
+
+        # ТЗ 29.10 Б-101: уволили — ставим дату увольнения и закрываем открытые смены; вернули — снимаем дату
+        if "is_active" in validated_data and validated_data["is_active"] != instance.is_active:
+            if validated_data["is_active"] is False:
+                instance._close_open_cash_shifts(by_user=self.context["request"].user)
+                validated_data.setdefault("fired_at", timezone.localdate())
+            else:
+                validated_data.setdefault("fired_at", None)
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
@@ -891,6 +1288,8 @@ class EmployeeUpdateSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         rep = super().to_representation(instance)
+        rep["can_edit_purchase_documents"] = _purchase_edit_effective(instance)  # ТЗ редактор накладных 30.10
+        rep["can_delete_products"] = _delete_products_effective(instance)  # hist2111
         rep["consulting_region_codes"] = instance.get_consulting_region_codes()
         rep["consulting_regions"] = _get_user_consulting_regions(instance)
         return rep
@@ -941,14 +1340,23 @@ class UserListSerializer(serializers.ModelSerializer):
         fields = [
             "id", "email", "first_name", "last_name", "track_number", "phone_number",
             "role", "custom_role", "role_display", "avatar",
-            "consulting_region_codes", "consulting_regions",
+            "consulting_region_codes", "consulting_regions", "can_use_pos",
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
             "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend",
+            *READ_ONLY_FIELDS,
+            "can_edit_purchase_documents",  # ТЗ редактор накладных 30.10
+            "can_delete_products",  # hist2111
+            # S1 03.11: опасные права склада (null — по умолчанию для роли), чтобы фронт видел и не сбрасывал их
+            "can_post_negative_stock", "can_unpost_documents", "can_change_document_date",
+            "can_post_closed_period", "can_cash_negative", "can_sell_below_cost", "can_see_purchase_price",
             "branch_ids", "primary_branch_id",
+            *EMPLOYEE_CARD_FIELDS,  # ТЗ 29.10 Б-101
         ]
 
     def to_representation(self, instance):
         rep = super().to_representation(instance)
+        rep["can_edit_purchase_documents"] = _purchase_edit_effective(instance)  # ТЗ редактор накладных 30.10
+        rep["can_delete_products"] = _delete_products_effective(instance)  # hist2111
         return _apply_cashier_sector_gate(rep, instance)
 
 
@@ -970,14 +1378,19 @@ class UserWithPermissionsSerializer(serializers.ModelSerializer):
         fields = [
             "id", "email", "first_name", "last_name", "track_number", "phone_number",
             "role", "custom_role", "role_display", "avatar",
-            "consulting_region_codes", "consulting_regions",
+            "consulting_region_codes", "consulting_regions", "can_use_pos",
             *[f.name for f in User._meta.fields if f.name.startswith("can_view_")],
             "can_manage_funnel_leads", "can_manage_funnel_stages", "can_create_funnel", "can_manage_lead_ad_spend",
+            *READ_ONLY_FIELDS,
+            "can_edit_purchase_documents",  # ТЗ редактор накладных 30.10
+            "can_delete_products",  # hist2111
             "branch_ids", "primary_branch_id",
         ]
 
     def to_representation(self, instance):
         rep = super().to_representation(instance)
+        rep["can_edit_purchase_documents"] = _purchase_edit_effective(instance)  # ТЗ редактор накладных 30.10
+        rep["can_delete_products"] = _delete_products_effective(instance)  # hist2111
         return _apply_cashier_sector_gate(rep, instance)
 
 
@@ -1018,7 +1431,8 @@ def company_addons_payload(company):
     from apps.users.models import CompanyAddon
 
     return [
-        {"code": a.code, "active": a.is_effective(), "until": a.until.isoformat() if a.until else None}
+        {"code": a.code, "active": a.is_effective(), "until": a.until.isoformat() if a.until else None,
+         "source": a.source}
         for a in CompanyAddon.objects.filter(company=company).order_by("code")
     ]
 
@@ -1078,6 +1492,28 @@ def company_features_detail(company, *, plan_until=None):
     return [{"code": code, "until": until} for code, until in out.items()]
 
 
+def company_features_with_source(company, *, plan_until=None):
+    """ТЗ Н-32: [{code, until, source}], source: tariff | key | trial | support."""
+    from apps.users.models import CompanyAddon
+
+    out = {}
+    plan = getattr(company, "subscription_plan", None)
+    if plan is not None:
+        for code in plan.features.order_by("name").values_list("name", flat=True):
+            if code:
+                out[code] = {"code": code, "until": plan_until, "source": "tariff"}
+    for a in CompanyAddon.objects.filter(company=company).order_by("code"):
+        if a.is_effective():
+            out[a.code] = {"code": a.code, "until": a.until.isoformat() if a.until else None,
+                           "source": a.source if a.source in ("key", "trial", "support") else "support"}
+    if getattr(company, "can_view_showcase", False) and "showcase_editor" not in out:
+        out["showcase_editor"] = {"code": "showcase_editor", "until": plan_until, "source": "tariff"}
+    free = _client_app_free()
+    if free is not None and free[0] not in out:
+        out[free[0]] = {"code": free[0], "until": free[1], "source": "support"}
+    return list(out.values())
+
+
 class CompanySerializer(serializers.ModelSerializer):
     industry = IndustrySerializer(read_only=True)
     subscription_plan = SubscriptionPlanSerializer(read_only=True)
@@ -1100,11 +1536,15 @@ class CompanySerializer(serializers.ModelSerializer):
             "scale_barcode_layout",
             "scale_barcode_amount_unit",
             "max_discount_percent",
+            "finance_closed_until",
             "appointment_work_start",
             "appointment_work_end",
             "market_sphere",
+            "receipt_edit_window",  # ТЗ редактор накладных 30.10
+            "quiet_hours",  # ТЗ кассы 05.11 п.31 / Б-30
         ]
-        extra_kwargs = {"cashier_password": {"write_only": True}}
+        extra_kwargs = {"cashier_password": {"write_only": True}, "finance_closed_until": {"read_only": True},
+                        "receipt_edit_window": {"read_only": True}}
 
     def validate_inn(self, value):
         # QA B24: ИНН компании — как у контрагента: пусто или 14 цифр.
@@ -1164,6 +1604,24 @@ class CompanySerializer(serializers.ModelSerializer):
         # ТЗ ч.12, 2.8: откроется ли редактор витрины (то же условие, что у 403 в showcase/*),
         # чтобы программа заранее показывала «подключите услугу», а не ошибку.
         data["can_edit_showcase"] = bool(getattr(instance, "can_view_showcase", False))
+        # ТЗ редактор накладных 30.10: окно правки приходов (действующее значение) и может ли его менять этот пользователь
+        from apps.main.receipt_edit import receipt_edit_window
+        from apps.warehouse.op_permissions import is_company_owner
+
+        data["receipt_edit_window"] = receipt_edit_window(instance)
+        from apps.main.tz31_consents import effective_quiet_hours
+        data["quiet_hours"] = effective_quiet_hours(instance)  # ТЗ кассы п.31 / Б-30
+        data["receipt_edit_window_editable"] = False  # 01.11: срока правки больше нет, настройка не действует
+        # mini2211: профиль магазина для кассира без доступа к app-settings (то же, что company/modules/)
+        try:
+            from apps.users.market_modules import state as _mm_state
+
+            _p = _mm_state(instance)["profile"]
+        except Exception:  # noqa: BLE001
+            _p = None
+        data["market_profile"] = _p
+        data["market_profile_base"] = ("bazaar" if _p.startswith("bazaar_") else _p) if _p else None
+        data["market_profile_mode"] = _p.split("_", 1)[1] if _p and _p.startswith("bazaar_") else None
 
         return data
 
@@ -1270,9 +1728,38 @@ class CompanyUpdateSerializer(serializers.ModelSerializer):
             "scale_barcode_amount_unit",
             "appointment_work_start",
             "appointment_work_end",
+            "finance_closed_until",  # ТЗ 29.10 Б-100
             "market_sphere",
             "market_spheres",
+            "receipt_edit_window",  # ТЗ редактор накладных 30.10: менять может только владелец
+            "quiet_hours",  # ТЗ кассы 05.11 п.31 / Б-30: {from, to, tz}; меняет владелец или админ
         ]
+
+    def validate_quiet_hours(self, value):
+        from apps.main.tz31_consents import clean_quiet_hours
+        try:
+            return clean_quiet_hours(value)
+        except ValueError as e:
+            raise serializers.ValidationError(str(e))
+
+    def validate_receipt_edit_window(self, value):
+        from apps.main.receipt_edit import EDIT_WINDOWS
+        from apps.warehouse.op_permissions import is_company_owner
+        from core.exceptions import ApiError
+
+        from apps.main.receipt_edit import receipt_edit_window
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None) if request else None
+        value = str(value or "").strip().lower()
+        if self.instance is not None and value == receipt_edit_window(self.instance):
+            return value  # форму прислали целиком без изменения окна — не мешаем админу сохранить остальное
+        if not is_company_owner(user):
+            raise ApiError("permission_denied", "Окно правки приходов меняет только владелец.", status_code=403,
+                           data={"required": "owner"})
+        if value not in EDIT_WINDOWS:
+            raise serializers.ValidationError("Допустимо: 24h, 48h, always.")
+        return value
 
     def validate_market_spheres(self, value):
         if not isinstance(value, list):
@@ -1357,6 +1844,13 @@ class UserUiPreferencesSerializer(serializers.ModelSerializer):
         required=False,
         error_messages={"invalid_choice": "Допустимы soft или classic"}
     )
+    # S8 (аудит 03.11): dark_style — то же, что theme_dark_palette (так его называет front-market)
+    dark_style = serializers.ChoiceField(
+        choices=["soft", "classic"],
+        source="theme_dark_palette",
+        required=False,
+        error_messages={"invalid_choice": "Допустимы soft или classic"}
+    )
 
     class Meta:
         model = UserUiPreferences
@@ -1365,5 +1859,6 @@ class UserUiPreferencesSerializer(serializers.ModelSerializer):
             "cashier_desktop_download",
             "theme_mode",
             "theme_dark_palette",
+            "dark_style",
         )
 

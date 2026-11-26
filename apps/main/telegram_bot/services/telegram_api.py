@@ -25,26 +25,35 @@ def _bot_key(token: str) -> str:
     return (token or "").split(":", 1)[0]
 
 
-def _wait_rate_limit(token: str, chat_id: str) -> None:
-    """Ждёт, пока отправка уложится в лимиты Telegram. Ошибки кэша не мешают отправке."""
+def check_rate_limit(token: str, chat_id: str) -> float:
+    """
+    ТЗ Н-23 (3): без ожидания занимает «слот» отправки. 0 — можно слать сейчас,
+    иначе число секунд (retry_after), через сколько повторить.
+    Лимиты: 30 сообщений/с на бота и 1/с в один чат. Ошибки кэша не блокируют отправку.
+    """
     bot = _bot_key(token)
-    deadline = time.monotonic() + RATE_LIMIT_MAX_WAIT_SECONDS
     try:
-        # 1 сообщение в секунду в один чат
-        while not cache.add(f"tg_rl_chat:{bot}:{chat_id}", 1, timeout=CHAT_MIN_INTERVAL_SECONDS):
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(0.2)
-        # ~30 сообщений в секунду на бота
-        while True:
-            second = int(time.time())
-            key = f"tg_rl_bot:{bot}:{second}"
-            cache.add(key, 0, timeout=5)
-            if cache.incr(key) <= BOT_MESSAGES_PER_SECOND or time.monotonic() >= deadline:
-                break
-            time.sleep(max(0.05, second + 1 - time.time()))
+        if not cache.add(f"tg_rl_chat:{bot}:{chat_id}", 1, timeout=CHAT_MIN_INTERVAL_SECONDS):
+            return CHAT_MIN_INTERVAL_SECONDS
+        second = int(time.time())
+        key = f"tg_rl_bot:{bot}:{second}"
+        cache.add(key, 0, timeout=5)
+        if cache.incr(key) > BOT_MESSAGES_PER_SECOND:
+            cache.delete(f"tg_rl_chat:{bot}:{chat_id}")
+            return round(max(0.05, second + 1 - time.time()), 2)
     except Exception as exc:
         logger.debug("rate limit cache unavailable: %s", exc)
+    return 0.0
+
+
+def _wait_rate_limit(token: str, chat_id: str) -> None:
+    """Ждёт, пока отправка уложится в лимиты Telegram (но не дольше RATE_LIMIT_MAX_WAIT_SECONDS)."""
+    deadline = time.monotonic() + RATE_LIMIT_MAX_WAIT_SECONDS
+    while True:
+        retry_after = check_rate_limit(token, chat_id)
+        if not retry_after or time.monotonic() >= deadline:
+            return
+        time.sleep(min(retry_after, 0.2 if retry_after >= 0.2 else retry_after))
 
 
 def _post_with_retry(client, url: str, **kwargs):
@@ -134,6 +143,14 @@ def get_webhook_info(token: str) -> dict:
         raise TelegramAPIError(f"Ошибка соединения с Telegram: {exc}")
 
 
+def _mirror_to_inbox(chat_id, text, data) -> None:
+    try:
+        from apps.inbox import bot_hooks
+        bot_hooks.on_bot_send(chat_id, text, data)
+    except Exception:
+        pass
+
+
 def send_message(token: str, chat_id: str, text: str, parse_mode: str = "HTML", reply_markup: dict = None) -> dict:
     """Отправляет текстовое сообщение в чат."""
     if not token or not chat_id or not text:
@@ -161,6 +178,8 @@ def send_message(token: str, chat_id: str, text: str, parse_mode: str = "HTML", 
                 data = resp2.json()
             if not data.get("ok"):
                 data.setdefault("error_code", resp.status_code)
+            else:
+                _mirror_to_inbox(chat_id, text, data)  # ящик «Чаты»: ответ бота виден в диалоге
             return data
     except Exception as exc:
         logger.error("sendMessage error for chat %s: %s", chat_id, exc)

@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from django.db.models import Exists, F, OuterRef, Q
 from django.utils import timezone
 
-from apps.main.models import Product, Sale, SaleItem
+from apps.main.models import Product, ProductAlternateBarcode, ProductPackage, ProductPromotionTier, Sale, SaleItem
 
 VALID_KINDS = {c[0] for c in Product.Kind.choices}
 VALID_PRESETS = {
@@ -192,6 +192,23 @@ def _apply_sold_within(qs, days: int):
     return qs.filter(Exists(_paid_sale_items_since(days)))
 
 
+MAX_BARCODES = 500
+
+
+def parse_barcodes(query_params):
+    """barcodes=a,b,c и/или barcodes[]=a&barcodes[]=b: без пробелов, без повторов, не больше MAX_BARCODES."""
+    raw = []
+    for key in ("barcodes", "barcodes[]"):
+        for v in query_params.getlist(key) if hasattr(query_params, "getlist") else [query_params.get(key)]:
+            raw.extend(str(v or "").split(","))
+    out = list(dict.fromkeys(c.strip() for c in raw if c and c.strip()))
+    if len(out) > MAX_BARCODES:
+        from rest_framework.exceptions import ValidationError
+
+        raise ValidationError({"barcodes": f"Не больше {MAX_BARCODES} штрихкодов за запрос."})
+    return out
+
+
 def apply_product_list_filters(qs, query_params):
     """Применяет query-параметры модалки фильтров склада к queryset Product."""
     kinds = _parse_kind_list(query_params)
@@ -230,6 +247,26 @@ def apply_product_list_filters(qs, query_params):
 
                 raise ValidationError({param: "Число."})
             qs = qs.filter(**{lookup: value})
+
+    # G4 (аудит 03.11): ?has_promotion=true — акционные (галочка «Акционный товар» и есть ступени скидки);
+    # false — все остальные
+    has_promotion = _parse_bool(query_params.get("has_promotion"))
+    if has_promotion is not None:
+        promo = Q(stock=True) & Exists(ProductPromotionTier.objects.filter(product=OuterRef("pk"), discount_percent__gt=0))
+        qs = qs.filter(promo) if has_promotion else qs.exclude(promo)
+
+    # G5 (аудит 03.11): ?piece_sale=true — продаются поштучно из упаковки (есть упаковки); у комплекта
+    # (kind=bundle) packages — это состав, поэтому комплекты сюда не входят. false — без упаковок.
+    piece_sale = _parse_bool(query_params.get("piece_sale"))
+    if piece_sale is not None:
+        packs = Exists(ProductPackage.objects.filter(product=OuterRef("pk"))) & ~Q(kind=Product.Kind.BUNDLE)
+        qs = qs.filter(packs) if piece_sale else qs.exclude(packs)
+
+    # G6 (аудит 03.11): ?barcodes=a,b,c — товары по списку штрихкодов одним запросом (основной или доп. код)
+    codes = parse_barcodes(query_params)
+    if codes:
+        alt = ProductAlternateBarcode.objects.filter(product=OuterRef("pk"), barcode__in=codes)
+        qs = qs.filter(Q(barcode__in=codes) | Exists(alt))
 
     preset = _normalize_preset(query_params.get("preset"))
     if preset:

@@ -40,8 +40,11 @@ FONT_FAMILIES = tuple(f["family"] for f in FONTS)
 
 SECTION_TYPES = (
     "announcement", "hero", "banners", "categories", "promo_blocks", "products",
-    "featured", "new_arrivals", "on_sale", "text", "contacts",
+    "featured", "new_arrivals", "on_sale", "text", "contacts", "collections",
 )
+
+# ТЗ Н-33: способы выбора варианта на странице товара
+VARIANT_PICKERS = ("buttons", "dropdown", "swatches")
 
 SORT_OPTIONS = (
     "default", "name_asc", "name_desc", "price_asc", "price_desc", "discount_desc", "discount_asc",
@@ -143,6 +146,7 @@ def default_document(company_name: str = "", whatsapp_phone: Optional[str] = Non
             "show": {
                 "old_price": True, "discount_badge": True, "new_badge": True, "category": True,
                 "stock": "hidden", "unit": True, "description": False, "add_button": True, "quantity_stepper": False,
+                "swatches": False,  # ТЗ Н-33: кружки цветов на карточке (одежда)
             },
             "new_badge_days": 14, "new_badge_text": {"ru": "НОВИНКА"},
             "add_button_text": {"ru": "В корзину"},
@@ -151,6 +155,7 @@ def default_document(company_name: str = "", whatsapp_phone: Optional[str] = Non
         "product_page": {
             "enabled": False, "gallery": True, "show_description": True,
             "show_characteristics": True, "show_related": True,
+            "variant_picker": "buttons",  # ТЗ Н-33: как выбирать размер/цвет
         },
         "cart": {
             "style": "drawer",
@@ -162,6 +167,8 @@ def default_document(company_name: str = "", whatsapp_phone: Optional[str] = Non
             "whatsapp_phone": whatsapp_phone or None,
             "checkout_button_text": {"ru": "Оформить заказ"},
             "success_text": {"ru": "Спасибо! Мы скоро свяжемся с вами."},
+            # ТЗ 01.11: кнопка «Заказать в Telegram» (включается ещё и серверным ботом, см. build_public_payload)
+            "telegram": {"enabled": False, "placement": ["cart", "product"], "label": {"ru": "Заказать в Telegram"}},
         },
         "footer": {
             "enabled": False, "address": {"ru": ""}, "phones": [], "hours": {"ru": ""},
@@ -170,8 +177,14 @@ def default_document(company_name: str = "", whatsapp_phone: Optional[str] = Non
         },
         "seo": {"title": {"ru": name}, "description": {"ru": ""}, "og_image": None, "favicon": None, "indexing": True},
         "languages": {"enabled": ["ru"], "default": "ru", "switcher": False},
+        # ТЗ 01.11: знания о магазине для ИИ-ассистента. Закрытый раздел: в публичный дизайн не попадает
+        "shop": {"info": {"knowledge": {"ru": ""}}},
     }
 
+
+KNOWLEDGE_MAX = 2000
+PRIVATE_SECTIONS = ("shop",)  # не отдаются в публичном дизайне
+TELEGRAM_PLACEMENTS = ("cart", "product", "header", "floating")
 
 DOCUMENT_SECTIONS = tuple(default_document().keys())
 
@@ -250,10 +263,13 @@ class ShowcaseFieldError(APIException):
     status_code = status.HTTP_400_BAD_REQUEST
     default_code = "invalid"
 
-    def __init__(self, field: Optional[str], detail: str, code: str = "invalid", status_code: Optional[int] = None):
+    def __init__(self, field: Optional[str], detail: str, code: str = "invalid", status_code: Optional[int] = None,
+                 extra: Optional[dict] = None):
         payload = {"detail": detail, "code": code}
         if field:
             payload["field"] = field
+        if extra:
+            payload.update(extra)  # ТЗ Н-27: index, available
         if status_code:
             self.status_code = status_code
         super().__init__(detail=payload, code=code)
@@ -575,6 +591,8 @@ _SECTION_EXTRA: Dict[str, Dict[str, Field]] = {
     "new_arrivals": {"max_items": Int(1, 48), "style": Enum(("grid", "carousel"))},
     "on_sale": {"max_items": Int(1, 48), "style": Enum(("grid", "carousel"))},
     "promo_blocks": {"ids": ListOf(UUIDItem(), max_items=20, unique=True)},
+    # ТЗ кассы 05.11 п.37: блок коллекций; ids — коллекции по порядку (пусто — все активные)
+    "collections": {"ids": ListOf(UUIDItem(), max_items=20, unique=True), "max_items": Int(1, 24), "style": Enum(("grid", "carousel"))},
     "text": {"text": I18n(2000)},
 }
 
@@ -699,7 +717,7 @@ DOCUMENT_SPEC = Obj({
         "show": Obj({
             "old_price": Bool(), "discount_badge": Bool(), "new_badge": Bool(), "category": Bool(),
             "stock": Enum(("hidden", "low_only", "always")), "unit": Bool(), "description": Bool(),
-            "add_button": Bool(), "quantity_stepper": Bool(),
+            "add_button": Bool(), "quantity_stepper": Bool(), "swatches": Bool(),
         }),
         "new_badge_days": Int(0, 365),
         "new_badge_text": I18n(24),
@@ -710,6 +728,7 @@ DOCUMENT_SPEC = Obj({
     "product_page": Obj({
         "enabled": Bool(), "gallery": Bool(), "show_description": Bool(),
         "show_characteristics": Bool(), "show_related": Bool(),
+        "variant_picker": Enum(VARIANT_PICKERS),
     }),
     "cart": Obj({
         "style": Enum(("drawer", "page")),
@@ -725,6 +744,11 @@ DOCUMENT_SPEC = Obj({
                                regex_msg="Номер WhatsApp: 9–15 цифр, например 996771830438."),
         "checkout_button_text": I18n(40),
         "success_text": I18n(300),
+        "telegram": Obj({
+            "enabled": Bool(),
+            "placement": ListOf(Enum(TELEGRAM_PLACEMENTS), max_items=len(TELEGRAM_PLACEMENTS), unique=True),
+            "label": I18n(40),
+        }),
     }),
     "footer": Obj({
         "enabled": Bool(),
@@ -743,6 +767,7 @@ DOCUMENT_SPEC = Obj({
         "favicon": Media(),
         "indexing": Bool(),
     }),
+    "shop": Obj({"info": Obj({"knowledge": I18n(KNOWLEDGE_MAX)})}),
     "languages": Obj({
         "enabled": ListOf(Enum(LANGUAGES), max_items=len(LANGUAGES), unique=True),
         "default": Enum(LANGUAGES),

@@ -355,6 +355,15 @@ def handle_callback_query(settings, cq: dict) -> None:
             # Убираем кнопки со сводки (чтобы нельзя было подтвердить дважды)
             telegram_api.edit_message_reply_markup(token, chat_id, message_id, reply_markup={"inline_keyboard": []})
 
+            # ТЗ 01.11: корзина с сайта — один токен, один заказ (повтор показывает тот же заказ)
+            cart_token = draft_data.get("cart_token") or ""
+            if cart_token:
+                done = ShowcaseOrder.objects.filter(company=company, cart_token=cart_token).first()
+                if done:
+                    cache.delete(f"tg_draft:{company.id}:{draft_id}")
+                    telegram_api.send_message(token, chat_id, f"Этот заказ уже оформлен: №{done.number}.")
+                    return
+
             # Подтверждаем и создаём заказ
             items_raw = draft_data.get("items") or []
             if not items_raw:
@@ -409,7 +418,10 @@ def handle_callback_query(settings, cq: dict) -> None:
                         customer_name=cust_name,
                         customer_phone=phone,
                         delivery_type=del_type,
-                        source="telegram",
+                        source="telegram_bot" if cart_token else "telegram",
+                        source_detail="site_cart" if cart_token else "bot_catalog",
+                        cart_token=cart_token or None,
+                        telegram_chat_id=str(chat_id),
                         comment=f"[Telegram chat_id={chat_id}]",
                         total=total_sum,
                     )
@@ -434,6 +446,11 @@ def handle_callback_query(settings, cq: dict) -> None:
                 telegram_api.send_message(token, chat_id, f"К сожалению, {exc} Заказ не может быть подтверждён.")
                 return
             except Exception as exc:
+                if cart_token:
+                    done = ShowcaseOrder.objects.filter(company=company, cart_token=cart_token).first()
+                    if done:  # гонка двойного нажатия
+                        telegram_api.send_message(token, chat_id, f"Этот заказ уже оформлен: №{done.number}.")
+                        return
                 logger.exception("Order confirmation failed: %s", exc)
                 telegram_api.send_message(token, chat_id, "Ошибка при создании заказа. Пожалуйста, обратитесь в магазин.")
                 return
@@ -451,28 +468,9 @@ def handle_callback_query(settings, cq: dict) -> None:
             my_orders_btn = {"inline_keyboard": [[{"text": "📦 Мои заказы", "callback_data": "ord:my"}]]}
             telegram_api.send_message(token, chat_id, confirm_msg, parse_mode="HTML", reply_markup=my_orders_btn)
 
-            # Уведомление владельцу
-            if settings.owner_chat_id:
-                items_str = "\n".join(
-                    f"  • {html.escape(d['product_name'])} × {format_qty(d['qty'])} = {format_price_display(d['total'])}"
-                    for d in items_to_create
-                )
-                owner_msg = (
-                    f"🛒 <b>Новый заказ из бота №{order.number}!</b>\n"
-                    f"👤 Покупатель: {html.escape(cust_name)} {phone}\n"
-                    f"💰 Сумма: <b>{format_price_display(order.total)}</b>\n"
-                    f"📦 Состав:\n{items_str}\n"
-                    f"📍 Получение: {'Доставка' if del_type == ShowcaseOrder.DeliveryType.DELIVERY else 'Самовывоз'}"
-                )
-                owner_markup = {
-                    "inline_keyboard": [
-                        [
-                            {"text": "✅ Принять", "callback_data": f"oo:{order.id}:accept"},
-                            {"text": "❌ Отклонить", "callback_data": f"oo:{order.id}:reject"},
-                        ]
-                    ]
-                }
-                telegram_api.send_message(settings.token, settings.owner_chat_id, owner_msg, parse_mode="HTML", reply_markup=owner_markup)
+            # Уведомление владельцу / в группу заказов (ТЗ Б-22: единый путь, не больше одного на заказ)
+            from apps.main.telegram_bot.services import order_notify
+            order_notify.notify_new_order(order.id)
             return
 
         if ord_action == "cancel":
@@ -487,10 +485,32 @@ def handle_callback_query(settings, cq: dict) -> None:
                 return
             lines = ["📦 <b>Ваши последние заказы:</b>"]
             for o in orders:
-                status_ru = "Новый" if o.status == ShowcaseOrder.Status.NEW else "Подтверждён" if o.status == ShowcaseOrder.Status.CONFIRMED else o.status
+                status_ru = "Новый" if o.status == ShowcaseOrder.Status.NEW else "Подтверждён" if o.status == ShowcaseOrder.Status.ACCEPTED else o.status
                 lines.append(f"• Заказ №{o.number} от {o.created_at.strftime('%d.%m %H:%M')} — <b>{format_price_display(o.total)}</b> ({status_ru})")
             telegram_api.send_message(token, chat_id, "\n".join(lines), parse_mode="HTML")
             return
+
+    # 5б. ТЗ Б-22: кнопки в уведомлении о заказе ordn:<order_id>:a|c (владелец; в группе заказов тоже)
+    if data.startswith("ordn:"):
+        from apps.main.telegram_bot.services import order_notify
+
+        parts = data.split(":")
+        order = None
+        if len(parts) == 3 and parts[2] in ("a", "c"):
+            try:
+                order = ShowcaseOrder.objects.filter(company=company, id=parts[1]).first()
+            except Exception:
+                order = None
+        if order is None:
+            telegram_api.answer_callback_query(token, cq_id, text="Заказ не найден.", show_alert=True)
+            return
+        ok, msg = order_notify.apply_order_action(settings, order, parts[2], from_user.get("id"), chat_id)
+        if not ok:
+            telegram_api.answer_callback_query(token, cq_id, text=msg, show_alert=True)
+            return
+        telegram_api.edit_message_reply_markup(token, chat_id, message_id, reply_markup={"inline_keyboard": []})
+        telegram_api.send_message(token, chat_id, msg, parse_mode=None)
+        return
 
     # 6. Действия владельца над заказом oo:<order_id>:accept / reject
     if data.startswith("oo:"):
@@ -502,27 +522,14 @@ def handle_callback_query(settings, cq: dict) -> None:
             if not order:
                 return
 
-            if owner_action == "accept":
-                order.status = ShowcaseOrder.Status.CONFIRMED
-                order.save(update_fields=["status"])
-                telegram_api.edit_message_reply_markup(token, chat_id, message_id, reply_markup={"inline_keyboard": []})
-                telegram_api.send_message(token, chat_id, f"✅ Заказ №{order.number} подтверждён.")
-                # Оповещаем покупателя
-                # Извлекаем chat_id из комментария
-                m = re.search(r"chat_id=(\d+)", order.comment or "")
-                if m:
-                    cust_chat = m.group(1)
-                    telegram_api.send_message(token, cust_chat, f"✅ Ваш заказ №{order.number} подтверждён магазином и готовится к выдаче!")
-
-            elif owner_action == "reject":
-                order.status = ShowcaseOrder.Status.CANCELLED
-                order.save(update_fields=["status"])
-                telegram_api.edit_message_reply_markup(token, chat_id, message_id, reply_markup={"inline_keyboard": []})
-                telegram_api.send_message(token, chat_id, f"❌ Заказ №{order.number} отклонён.")
-                m = re.search(r"chat_id=(\d+)", order.comment or "")
-                if m:
-                    cust_chat = m.group(1)
-                    telegram_api.send_message(token, cust_chat, f"К сожалению, ваш заказ №{order.number} отклонён магазином.")
+            from apps.main.telegram_bot.services import order_notify
+            ok, msg = order_notify.apply_order_action(
+                settings, order, "a" if owner_action == "accept" else "c", from_user.get("id"), chat_id)
+            if not ok:
+                telegram_api.answer_callback_query(token, cq_id, text=msg, show_alert=True)
+                return
+            telegram_api.edit_message_reply_markup(token, chat_id, message_id, reply_markup={"inline_keyboard": []})
+            telegram_api.send_message(token, chat_id, msg, parse_mode=None)
         return
 
 
