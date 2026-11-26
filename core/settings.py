@@ -404,6 +404,14 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'apps.main.telegram_bot.tasks.flush_customer_outbox',
         'schedule': crontab(minute='*/5'),
     },
+    'telegram-bot-reserve-tick': {  # bot2711b: бронь заказов из Telegram-бота (напоминание, автоотмена)
+        'task': 'apps.main.telegram_bot.tasks.bot_reserve_tick',
+        'schedule': crontab(minute='*/10'),
+    },
+    'telegram-bot-weekly-summary': {  # bot2711b: сводка бота-продавца владельцу, пн 9:00
+        'task': 'apps.main.telegram_bot.tasks.bot_weekly_summary',
+        'schedule': crontab(hour=9, minute=5, day_of_week=1),
+    },
     'showcase-try-on-expire': {  # ТЗ кассы 05.11 п.38 / Б-94: автоотмена просроченных броней «Примерить в магазине»
         'task': 'apps.main.tz31_tryon_tasks.cancel_expired_try_on_orders',
         'schedule': crontab(minute='*/10'),

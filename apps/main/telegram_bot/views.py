@@ -1139,53 +1139,58 @@ class TelegramBotSalesStatsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        from apps.main.telegram_bot.models import TelegramHandoff
-        from apps.main.models import ShowcaseOrder
         company = _get_company(request)
         df, dt = _period(request)
-        inq = TelegramInquiry.objects.filter(company=company, created_at__date__gte=df, created_at__date__lte=dt)
-        a = inq.aggregate(messages=Count("id"), people=Count("chat_id", distinct=True),
-                          ordered_people=Count("chat_id", distinct=True, filter=Q(order__isnull=False)))
-        orders = ShowcaseOrder.objects.filter(company=company, source__in=BOT_ORDER_SOURCES,
-                                              created_at__date__gte=df, created_at__date__lte=dt)
-        o = orders.aggregate(
-            n=Count("id"), sum_total=Coalesce(Sum("total"), Value(ZERO_MONEY, output_field=MONEY_FIELD)),
-            done=Count("id", filter=Q(status="done")),
-            done_total=Coalesce(Sum("total", filter=Q(status="done")), Value(ZERO_MONEY, output_field=MONEY_FIELD)),
-            canceled=Count("id", filter=Q(status="canceled")),
-        )
-        hs = list(TelegramHandoff.objects.filter(company=company, created_at__date__gte=df, created_at__date__lte=dt)
-                  .only("reason", "status", "created_at", "first_answer_at", "taken_at", "question", "chat_id", "customer_name"))
-        real = [h for h in hs if h.status != "logged"]
-        by_reason = {}
-        for h in real:
-            by_reason[h.reason] = by_reason.get(h.reason, 0) + 1
-        live_hours = [h for h in real if h.status != "callback"]
-        answered = [h for h in live_hours if h.first_answer_at or h.taken_at]
-        waits = sorted(((h.first_answer_at or h.taken_at) - h.created_at).total_seconds() for h in answered)
-        unknown = [h for h in hs if h.reason == "unknown"]
-        people = a["people"] or 0
-        n_orders = o["n"] or 0
-        return Response({
-            "from": df, "to": dt,
-            "dialogs": people, "messages": a["messages"] or 0, "people": people,
-            "orders": {"count": n_orders, "total": str(o["sum_total"]), "done": o["done"], "done_total": str(o["done_total"]),
-                       "canceled": o["canceled"],
-                       "avg_check": str((o["sum_total"] / n_orders).quantize(Decimal("0.01"))) if n_orders else "0.00"},
-            "conversion_percent": round(100.0 * (a["ordered_people"] or 0) / people, 1) if people else 0.0,
-            "funnel": {"dialogs": people, "handoffs": len(real), "orders": n_orders, "done": o["done"]},
-            "handoffs": {
-                "total": len(real), "by_reason": by_reason,
-                "callbacks": sum(1 for h in real if h.status == "callback"),
-                "answered": len(answered),
-                "unanswered": sum(1 for h in live_hours if not (h.first_answer_at or h.taken_at) and h.status in ("expired", "returned")),
-                "waiting_now": sum(1 for h in live_hours if h.status == "waiting"),
-                "avg_answer_seconds": int(sum(waits) / len(waits)) if waits else None,
-                "median_answer_seconds": int(waits[len(waits) // 2]) if waits else None,
-            },
-            "unknown_questions": _unknown_rows(company, unknown),  # botr2611: + name, client_id
-            "bargain": bargain_stats(company, df, dt),  # bot2711
-        })
+        return Response(sales_stats_data(company, df, dt))
+
+
+def sales_stats_data(company, df, dt):
+    """bot2711b: данные отчёта бота-продавца (API sales-stats и еженедельная сводка владельцу)."""
+    from apps.main.telegram_bot.models import TelegramHandoff
+    from apps.main.models import ShowcaseOrder
+    inq = TelegramInquiry.objects.filter(company=company, created_at__date__gte=df, created_at__date__lte=dt)
+    a = inq.aggregate(messages=Count("id"), people=Count("chat_id", distinct=True),
+                      ordered_people=Count("chat_id", distinct=True, filter=Q(order__isnull=False)))
+    orders = ShowcaseOrder.objects.filter(company=company, source__in=BOT_ORDER_SOURCES,
+                                          created_at__date__gte=df, created_at__date__lte=dt)
+    o = orders.aggregate(
+        n=Count("id"), sum_total=Coalesce(Sum("total"), Value(ZERO_MONEY, output_field=MONEY_FIELD)),
+        done=Count("id", filter=Q(status="done")),
+        done_total=Coalesce(Sum("total", filter=Q(status="done")), Value(ZERO_MONEY, output_field=MONEY_FIELD)),
+        canceled=Count("id", filter=Q(status="canceled")),
+    )
+    hs = list(TelegramHandoff.objects.filter(company=company, created_at__date__gte=df, created_at__date__lte=dt)
+              .only("reason", "status", "created_at", "first_answer_at", "taken_at", "question", "chat_id", "customer_name"))
+    real = [h for h in hs if h.status != "logged"]
+    by_reason = {}
+    for h in real:
+        by_reason[h.reason] = by_reason.get(h.reason, 0) + 1
+    live_hours = [h for h in real if h.status != "callback"]
+    answered = [h for h in live_hours if h.first_answer_at or h.taken_at]
+    waits = sorted(((h.first_answer_at or h.taken_at) - h.created_at).total_seconds() for h in answered)
+    unknown = [h for h in hs if h.reason == "unknown"]
+    people = a["people"] or 0
+    n_orders = o["n"] or 0
+    return ({
+        "from": df, "to": dt,
+        "dialogs": people, "messages": a["messages"] or 0, "people": people,
+        "orders": {"count": n_orders, "total": str(o["sum_total"]), "done": o["done"], "done_total": str(o["done_total"]),
+                   "canceled": o["canceled"],
+                   "avg_check": str((o["sum_total"] / n_orders).quantize(Decimal("0.01"))) if n_orders else "0.00"},
+        "conversion_percent": round(100.0 * (a["ordered_people"] or 0) / people, 1) if people else 0.0,
+        "funnel": {"dialogs": people, "handoffs": len(real), "orders": n_orders, "done": o["done"]},
+        "handoffs": {
+            "total": len(real), "by_reason": by_reason,
+            "callbacks": sum(1 for h in real if h.status == "callback"),
+            "answered": len(answered),
+            "unanswered": sum(1 for h in live_hours if not (h.first_answer_at or h.taken_at) and h.status in ("expired", "returned")),
+            "waiting_now": sum(1 for h in live_hours if h.status == "waiting"),
+            "avg_answer_seconds": int(sum(waits) / len(waits)) if waits else None,
+            "median_answer_seconds": int(waits[len(waits) // 2]) if waits else None,
+        },
+        "unknown_questions": _unknown_rows(company, unknown),  # botr2611: + name, client_id
+        "bargain": bargain_stats(company, df, dt),  # bot2711
+    })
 
 
 # =========================================================================

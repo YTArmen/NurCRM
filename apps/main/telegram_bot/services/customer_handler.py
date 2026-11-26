@@ -639,6 +639,10 @@ def create_order_from_ai_json(company, settings, order_data: dict, chat_id: str)
         f"Тип получения: <b>Самовывоз</b>.\n"
         f"Мы свяжемся с вами по номеру {html.escape(phone)}, когда заказ будет готов к выдаче."
     )
+    from apps.main.telegram_bot.services import reserve  # bot2711b: бронь на N часов
+    hold = reserve.set_hold(settings, order)
+    if hold:
+        reply_for_customer += "\n" + hold
     return order, reply_for_customer
 
 

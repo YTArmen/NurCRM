@@ -41,6 +41,9 @@ DEFAULTS = {
     "off_hours_reply": "",         # свой текст вне часов, {when} — когда ответит продавец
     "handoff_return_minutes": 120, # тишина продавца → диалог снова у бота
     "confirm_threshold": 30000,    # заказ от этой суммы подтверждает человек; 0 — выкл.
+    "reserve_hours": 24,           # bot2711b: бронь заказа из бота без предоплаты, ч; 0 — без срока
+    "reserve_auto_cancel": True,   # по истечении брони — автоотмена и возврат остатка
+    "weekly_summary": True,        # сводка бота-продавца владельцу по понедельникам 9:00
     "knowledge": {"rules": "", "delivery": "", "payment": "", "work_hours": ""},
     "bargain": {"enabled": False, "max_discount_percent": 5, "min_margin_percent": 10, "only_marked": True,
                 "steps": 3, "allowed_categories": [], "handoff_on_decline": False},
@@ -82,7 +85,7 @@ def validate_config(data, current=None) -> dict:
     for k, v in data.items():
         if k not in DEFAULTS:
             raise ValueError(f"seller_config.{k}: неизвестное поле")
-        if k in ("seller_enabled", "orders_enabled", "handoff_enabled"):
+        if k in ("seller_enabled", "orders_enabled", "handoff_enabled", "reserve_auto_cancel", "weekly_summary"):
             if not isinstance(v, bool):
                 raise ValueError(f"{k}: true или false")
         elif k == "tone":
@@ -114,6 +117,9 @@ def validate_config(data, current=None) -> dict:
                 v = {d: _hours_range(v.get(d), f"human_hours.{d}") for d in DAYS}
             else:
                 v = _hours_range(v, "human_hours")
+        elif k == "reserve_hours":
+            if not isinstance(v, int) or isinstance(v, bool) or not 0 <= v <= 168:
+                raise ValueError("reserve_hours: целое 0…168")
         elif k == "handoff_return_minutes":
             if not isinstance(v, int) or isinstance(v, bool) or not 10 <= v <= 1440:
                 raise ValueError("handoff_return_minutes: целое 10…1440")

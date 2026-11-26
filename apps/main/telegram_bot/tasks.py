@@ -550,3 +550,16 @@ def flush_customer_outbox():
     """ТЗ кассы 05.11 п.31 / Б-30: отправить отложенные (тихие часы) сообщения покупателям."""
     from apps.main.telegram_bot.services.customer_notify import flush_deferred
     return flush_deferred()
+
+
+# bot2711b: бот-продавец Ф3 — сроки броней заказов из Telegram и еженедельная сводка владельцу
+@shared_task(name="apps.main.telegram_bot.tasks.bot_reserve_tick")
+def bot_reserve_tick():
+    from apps.main.telegram_bot.services import reserve
+    return reserve.remind_and_expire()
+
+
+@shared_task(name="apps.main.telegram_bot.tasks.bot_weekly_summary")
+def bot_weekly_summary():
+    from apps.main.telegram_bot.services import reserve
+    return reserve.send_weekly()

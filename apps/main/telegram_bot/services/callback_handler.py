@@ -101,6 +101,11 @@ def handle_callback_query(settings, cq: dict) -> None:
         from apps.main.telegram_bot.services import seller
         seller.handle_callback(settings, cq)
         return
+    # bot2711b: владелец продлевает бронь заказа rs:x:<order_id>
+    if data.startswith("rs:x:") and chat_id:
+        from apps.main.telegram_bot.services import reserve
+        reserve.extend_click(settings, cq)
+        return
     # bot2711: «Беру за X» — товар в корзину по цене оферты торга
     if data.startswith("bg:a:") and chat_id:
         from apps.main.telegram_bot.services import bargain
@@ -481,6 +486,10 @@ def handle_callback_query(settings, cq: dict) -> None:
                 f"Сумма к оплате: <b>{format_price_display(order.total)}</b>\n"
                 f"Сообщим, когда он будет готов."
             )
+            from apps.main.telegram_bot.services import reserve  # bot2711b: бронь на N часов
+            hold = reserve.set_hold(settings, order)
+            if hold:
+                confirm_msg += "\n" + hold
             my_orders_btn = {"inline_keyboard": [[{"text": "📦 Мои заказы", "callback_data": "ord:my"}]]}
             telegram_api.send_message(token, chat_id, confirm_msg, parse_mode="HTML", reply_markup=my_orders_btn)
 
