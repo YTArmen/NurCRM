@@ -101,6 +101,11 @@ def handle_callback_query(settings, cq: dict) -> None:
         from apps.main.telegram_bot.services import seller
         seller.handle_callback(settings, cq)
         return
+    # bot2711: «Беру за X» — товар в корзину по цене оферты торга
+    if data.startswith("bg:a:") and chat_id:
+        from apps.main.telegram_bot.services import bargain
+        bargain.accept_click(settings, cq)
+        return
     # Немедленный ответ Telegram API
     telegram_api.answer_callback_query(token, cq_id)
 
@@ -415,6 +420,11 @@ def handle_callback_query(settings, cq: dict) -> None:
 
             try:
                 with transaction.atomic():
+                    # bot2711: цена по торгу — только из действующей оферты этого чата
+                    from apps.main.telegram_bot.services import bargain
+                    bg_pairs = bargain.apply_offers(company, chat_id, items_to_create)
+                    if bg_pairs:
+                        total_sum = sum((d["total"] for d in items_to_create), Decimal("0.00"))
                     max_num = ShowcaseOrder.objects.filter(company=company).aggregate(m=Max("number"))["m"] or 0
                     order = ShowcaseOrder.objects.create(
                         company=company,
@@ -446,6 +456,7 @@ def handle_callback_query(settings, cq: dict) -> None:
                     reserve_stock(items_to_create)
                     order.stock_reserved = True
                     order.save(update_fields=["stock_reserved"])
+                    bargain.mark_used(order, bg_pairs)
 
             except InsufficientStock as exc:
                 telegram_api.send_message(token, chat_id, f"К сожалению, {exc} Заказ не может быть подтверждён.")

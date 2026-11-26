@@ -258,9 +258,18 @@ class TelegramBotTestAIView(APIView):
                         api_key=ai_key, system_instruction=system_instruction,
                         contents=[{"role": "user", "parts": [{"text": question}]}], temperature=0.3, max_tokens=600)
                 reason, raw = seller.extract_handoff_tag(raw) if seller.is_on(scfg) else (None, raw)
+                from apps.main.telegram_bot.services import bargain
+                bg_tag, raw = bargain.extract_tag(raw) if bargain.is_enabled(scfg) else (None, raw)
                 order_data, clean = extract_order_json(raw)
-                answer = ai_service.normalize_ai_output_for_telegram(seller.postprocess(scfg, clean or raw, True))
-                return Response({"ok": True, "answer": answer, "model": model, "functions_called": [],
+                text_out = bargain.filter_prices(company, f"test:{request.user.id}", clean or raw) if seller.is_on(scfg) else (clean or raw)
+                bg_res = None
+                if bg_tag:  # bot2711: показать, что ответит движок торга (тест-чат владельца, в отчёт не идёт)
+                    bg_text, _mk = bargain.run_tag(settings, f"test:{request.user.id}", bg_tag, "ru")
+                    if bg_text:
+                        text_out = bg_text
+                    bg_res = {"tag": bg_tag, "text": bg_text}
+                answer = ai_service.normalize_ai_output_for_telegram(seller.postprocess(scfg, text_out, True))
+                return Response({"ok": True, "answer": answer, "model": model, "functions_called": [], "bargain": bg_res,
                                  "handoff": reason, "order_draft": order_data or None,
                                  "catalog_matches": [m.get("id") for m in matched][:10]})
             except Exception as exc:
@@ -960,6 +969,19 @@ def _period(request):
     return df, dt
 
 
+def _unknown_rows(company, unknown):
+    top = sorted(unknown, key=lambda x: x.created_at, reverse=True)[:30]
+    profs = {p.chat_id: p for p in TelegramCustomerProfile.objects.filter(
+        company=company, chat_id__in={h.chat_id for h in top}).only("chat_id", "name", "client_id")}
+    out = []
+    for h in top:
+        pr = profs.get(h.chat_id)
+        out.append({"at": h.created_at, "chat_id": h.chat_id, "text": h.question[:300],
+                    "name": (h.customer_name or (pr.name if pr else "") or ""),
+                    "client_id": str(pr.client_id) if pr and pr.client_id else None})
+    return out
+
+
 def _dialog_status(h):
     if h is None:
         return "bot"
@@ -992,8 +1014,8 @@ class TelegramBotDialogsView(APIView):
         company = _get_company(request)
         df, dt = _period(request)
         want = request.query_params.get("status") or ""
-        if want and want not in ("bot", "needs_human", "human", "callback"):
-            raise ValidationError({"status": "bot, needs_human, human или callback"})
+        if want and want not in ("bot", "needs_human", "human", "callback", "closed"):
+            raise ValidationError({"status": "bot, needs_human, human, callback или closed"})
         last_text = TelegramInquiry.objects.filter(company=company, chat_id=OuterRef("chat_id")).order_by("-created_at")
         qs = (TelegramCustomerProfile.objects.filter(company=company, last_at__date__gte=df, last_at__date__lte=dt)
               .annotate(last_text=Subquery(last_text.values("text")[:1]))
@@ -1008,6 +1030,9 @@ class TelegramBotDialogsView(APIView):
                 chats = live.filter(status="taken", until__gt=now)
             elif want == "callback":
                 chats = live.filter(status="callback", closed_at__isnull=True, created_at__gt=now - __import__("datetime").timedelta(days=3))
+            elif want == "closed":  # botr2611: заявки, вернувшиеся боту (returned/expired)
+                busy = live.filter(Q(status__in=("waiting", "taken"), until__gt=now) | Q(status="callback", closed_at__isnull=True))
+                chats = live.filter(status__in=("returned", "expired")).exclude(chat_id__in=busy.values("chat_id"))
             else:
                 chats = None
             if chats is not None:
@@ -1073,11 +1098,24 @@ class TelegramBotDialogDetailView(APIView):
         if not _can_manage_bot_settings(request.user, company):
             raise PermissionDenied("Недостаточно прав.")
         action = request.data.get("action")
-        if action not in ("take", "return"):
-            raise ValidationError({"action": "take или return"})
+        if action not in ("take", "return", "reply"):
+            raise ValidationError({"action": "take, return или reply"})
         bs = TelegramBotSettings.objects.select_related("company").filter(company=company).first()
         if bs is None:
             raise NotFound("Бот не подключён.")
+        if action == "reply":  # botr2611: ответ покупателю из программы владельца
+            text = str(request.data.get("text") or "").strip()
+            if not text:
+                raise ValidationError({"text": "Пустой ответ."})
+            if len(text) > 4000:
+                raise ValidationError({"text": "Не больше 4000 знаков."})
+            if not bs.token:
+                raise ValidationError({"detail": "У бота нет токена."})
+            by = getattr(request.user, "first_name", "") or getattr(request.user, "email", "") or "владелец"
+            h, err = seller.reply_from_app(bs, p.chat_id, text, by)
+            if err:
+                return Response({"detail": "Не доставлено: " + err, "code": "telegram_error"}, status=502)
+            return Response({"status": _dialog_status(h), "sent": True, "handoff": _handoff_json(h)})
         h = seller.active_handoff(company, p.chat_id)
         if action == "take":
             if h is None:
@@ -1117,7 +1155,7 @@ class TelegramBotSalesStatsView(APIView):
             canceled=Count("id", filter=Q(status="canceled")),
         )
         hs = list(TelegramHandoff.objects.filter(company=company, created_at__date__gte=df, created_at__date__lte=dt)
-                  .only("reason", "status", "created_at", "first_answer_at", "taken_at", "question", "chat_id"))
+                  .only("reason", "status", "created_at", "first_answer_at", "taken_at", "question", "chat_id", "customer_name"))
         real = [h for h in hs if h.status != "logged"]
         by_reason = {}
         for h in real:
@@ -1145,6 +1183,223 @@ class TelegramBotSalesStatsView(APIView):
                 "avg_answer_seconds": int(sum(waits) / len(waits)) if waits else None,
                 "median_answer_seconds": int(waits[len(waits) // 2]) if waits else None,
             },
-            "unknown_questions": [{"at": h.created_at, "chat_id": h.chat_id, "text": h.question[:300]}
-                                  for h in sorted(unknown, key=lambda x: x.created_at, reverse=True)[:30]],
+            "unknown_questions": _unknown_rows(company, unknown),  # botr2611: + name, client_id
+            "bargain": bargain_stats(company, df, dt),  # bot2711
         })
+
+
+# =========================================================================
+# bot2711: бот-продавец Ф2 — торг (правила товаров, журнал, симулятор, отчёт)
+# =========================================================================
+
+BOT_CAPABILITIES.update({"bot_bargain": True})
+
+
+def _require_manager(request):
+    company = _get_company(request)
+    if not _can_manage_bot_settings(request.user, company):
+        raise PermissionDenied("Правила торга видит и меняет только владелец/админ.")
+    return company
+
+
+def _rule_json(p, rule, bcfg):
+    from apps.main.telegram_bot.services import bargain
+    lp = Decimal(str(p.price or 0))
+    return {
+        "product_id": str(p.id), "name": p.name, "price": str(lp),
+        "purchase_price": str(p.purchase_price or 0),
+        "category_id": str(p.category_id) if getattr(p, "category_id", None) else None,
+        "allowed": rule.allowed if rule else None,
+        "min_price": str(rule.min_price) if rule and rule.min_price is not None else None,
+        "max_discount_percent": str(rule.max_discount_percent) if rule and rule.max_discount_percent is not None else None,
+        "effective_allowed": _eff_allowed(p, bcfg, rule),
+        "floor": str(bargain.floor_price(p, lp, bcfg, rule)) if lp > 0 else "0.00",
+    }
+
+
+def _eff_allowed(p, bcfg, rule):
+    from apps.main.telegram_bot.services import bargain
+    if rule is not None and rule.allowed is not None:
+        return bool(rule.allowed)
+    cats = [str(c) for c in (bcfg.get("allowed_categories") or [])]
+    if cats and str(getattr(p, "category_id", "") or "") in cats:
+        return True
+    return not bcfg.get("only_marked", True)
+
+
+class TelegramBargainProductsView(APIView):
+    """GET /api/main/telegram-bot/bargain/products/?search=&only_rules=1&page=&page_size=
+    Товары с правилами торга и итоговым полом цены (только владельцу/админу; покупателю и ИИ — никогда)."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from apps.main.models import Product
+        from apps.main.telegram_bot.models import ProductBargain
+        from apps.main.telegram_bot.services import bargain
+        company = _require_manager(request)
+        bs = TelegramBotSettings.objects.filter(company=company).first()
+        _cfg, bcfg = bargain.cfg_bargain(bs) if bs else ({}, {})
+        qs = Product.objects.filter(company=company).exclude(status=Product.Status.ARCHIVED) \
+            .only("id", "name", "price", "purchase_price", "category_id").order_by("name")
+        s = (request.query_params.get("search") or "").strip()
+        if s:
+            qs = qs.filter(name__icontains=s)
+        if request.query_params.get("only_rules") in ("1", "true"):
+            qs = qs.filter(bargain_rule__isnull=False)
+        cat = request.query_params.get("category")
+        if cat:
+            qs = qs.filter(category_id=cat)
+        pager = TelegramInquiryPagination()
+        page = pager.paginate_queryset(qs, request, view=self)
+        rules = {r.product_id: r for r in ProductBargain.objects.filter(product_id__in=[p.id for p in page])}
+        return pager.get_paginated_response([_rule_json(p, rules.get(p.id), bcfg) for p in page])
+
+
+class TelegramBargainProductDetailView(APIView):
+    """PUT /api/main/telegram-bot/bargain/products/<uuid>/ {allowed: true|false|null, min_price, max_discount_percent}
+    DELETE — сбросить правила товара (как в общих настройках)."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _product(self, company, pk):
+        from apps.main.models import Product
+        p = Product.objects.filter(company=company, pk=pk).first()
+        if p is None:
+            raise NotFound("Товар не найден.")
+        return p
+
+    def put(self, request, pk):
+        from apps.main.telegram_bot.models import ProductBargain
+        from apps.main.telegram_bot.services import bargain
+        company = _require_manager(request)
+        p = self._product(company, pk)
+        d = request.data
+        errors = {}
+        allowed = d.get("allowed", None)
+        if allowed not in (True, False, None):
+            errors["allowed"] = "true, false или null"
+
+        def dec(name, lo, hi):
+            v = d.get(name)
+            if v in (None, ""):
+                return None
+            try:
+                v = Decimal(str(v))
+            except Exception:
+                errors[name] = "число"
+                return None
+            if not lo <= v <= hi:
+                errors[name] = f"{lo}…{hi}"
+            return v
+        min_price = dec("min_price", Decimal("0"), Decimal("100000000"))
+        max_disc = dec("max_discount_percent", Decimal("0"), Decimal("50"))
+        if min_price is not None and p.price and min_price > Decimal(str(p.price)):
+            errors["min_price"] = "Не выше цены товара."
+        if errors:
+            raise ValidationError(errors)
+        rule, _ = ProductBargain.objects.update_or_create(
+            product=p, defaults={"company": company, "allowed": allowed, "min_price": min_price, "max_discount_percent": max_disc})
+        bs = TelegramBotSettings.objects.filter(company=company).first()
+        _cfg, bcfg = bargain.cfg_bargain(bs) if bs else ({}, {})
+        TelegramBotAudit.objects.create(
+            company=company, user=request.user,
+            user_name=getattr(request.user, "first_name", "") or getattr(request.user, "email", "owner"),
+            action=TelegramBotAudit.Action.SETTINGS_UPDATE, object_title=f"Торг: {p.name}"[:255], source="owner",
+            changes={"allowed": allowed, "min_price": str(min_price) if min_price is not None else None,
+                     "max_discount_percent": str(max_disc) if max_disc is not None else None},
+        )
+        return Response(_rule_json(p, rule, bcfg))
+
+    def delete(self, request, pk):
+        from apps.main.telegram_bot.models import ProductBargain
+        company = _require_manager(request)
+        p = self._product(company, pk)
+        ProductBargain.objects.filter(product=p).delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class TelegramBargainOffersView(APIView):
+    """GET /api/main/telegram-bot/bargain/offers/?from=&to=&chat_id=&decision= — журнал решений движка (владельцу)."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from apps.main.telegram_bot.models import TelegramBargainOffer
+        company = _require_manager(request)
+        df, dt = _period(request)
+        qs = TelegramBargainOffer.objects.filter(company=company, created_at__date__gte=df, created_at__date__lte=dt) \
+            .select_related("product", "variant", "used_order")
+        if request.query_params.get("chat_id"):
+            qs = qs.filter(chat_id=request.query_params["chat_id"])
+        if request.query_params.get("decision"):
+            qs = qs.filter(decision=request.query_params["decision"])
+        pager = TelegramInquiryPagination()
+        page = pager.paginate_queryset(qs, request, view=self)
+        return pager.get_paginated_response([{
+            "id": str(o.id), "at": o.created_at, "chat_id": o.chat_id, "is_test": o.chat_id.startswith("test:"),
+            "product_id": str(o.product_id), "product_name": o.product.name if o.product_id else "",
+            "variant_id": str(o.variant_id) if o.variant_id else None, "qty": str(o.qty),
+            "list_price": str(o.list_price), "client_offer": str(o.client_offer) if o.client_offer is not None else None,
+            "decision": o.decision, "price": str(o.price), "step": o.step, "floor": str(o.floor),
+            "limit_percent": str(o.limit_percent), "expires_at": o.expires_at, "accepted_at": o.accepted_at,
+            "order": {"id": str(o.used_order_id), "number": o.used_order.number} if o.used_order_id else None,
+        } for o in page])
+
+
+class TelegramBargainTestView(APIView):
+    """POST /api/main/telegram-bot/bargain/test/ {product_id, variant_id?, offer?, reset?}
+    Симулятор движка для владельца (отдельный тест-чат, в отчёт не идёт). Ответ — как увидит покупатель + пол."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        from django.core.cache import cache
+        from apps.main.models import Product, ProductVariant
+        from apps.main.telegram_bot.services import bargain
+        from apps.main.variant_utils import name_with_variant
+        company = _require_manager(request)
+        bs = TelegramBotSettings.objects.select_related("company").filter(company=company).first()
+        if bs is None:
+            raise NotFound("Бот не подключён.")
+        p = Product.objects.filter(company=company, pk=request.data.get("product_id")).first() if request.data.get("product_id") else None
+        if p is None:
+            raise ValidationError({"product_id": "Товар не найден."})
+        v = None
+        if request.data.get("variant_id"):
+            v = ProductVariant.objects.filter(company=company, product=p, pk=request.data["variant_id"]).first()
+        chat = f"test:{request.user.id}"
+        if request.data.get("reset"):
+            cache.delete(bargain._state_key(company.id, chat, p.id, getattr(v, "id", None)))
+            cache.delete(f"tgbg:rate:{company.id}:{chat}")
+        res = bargain.propose_price(bs, chat, p, v, request.data.get("qty") or 1, bargain.parse_offer(request.data.get("offer")))
+        text, markup = bargain.render(res, name_with_variant(p.name, v), request.data.get("lang") or "ru")
+        _cfg, bcfg = bargain.cfg_bargain(bs)
+        return Response({
+            "decision": res["decision"], "price": str(res["price"]), "list_price": str(res["list_price"]),
+            "expires_at": res["expires_at"], "text": text, "button": bool(markup),
+            "floor": str(bargain.floor_price(p, res["list_price"], bcfg)) if res["list_price"] else "0.00",
+        })
+
+
+def bargain_stats(company, df, dt):
+    """Блок «торг» для sales-stats."""
+    from django.db.models import F, ExpressionWrapper
+    from apps.main.telegram_bot.models import TelegramBargainOffer
+    qs = TelegramBargainOffer.objects.filter(company=company, created_at__date__gte=df, created_at__date__lte=dt) \
+        .exclude(chat_id__startswith="test:")
+    a = qs.aggregate(proposals=Count("id"), dialogs=Count("chat_id", distinct=True),
+                     declines=Count("id", filter=Q(decision="decline")),
+                     accepted=Count("id", filter=Q(accepted_at__isnull=False)))
+    used = qs.filter(used_order__isnull=False)
+    concession = ExpressionWrapper((F("list_price") - F("price")) * F("qty"), output_field=MONEY_FIELD)
+    u = used.aggregate(n=Count("id"), lost=Coalesce(Sum(concession), Value(ZERO_MONEY, output_field=MONEY_FIELD)),
+                       listed=Coalesce(Sum(ExpressionWrapper(F("list_price") * F("qty"), output_field=MONEY_FIELD)),
+                                       Value(ZERO_MONEY, output_field=MONEY_FIELD)))
+    top = list(qs.values("product_id", "product__name").annotate(n=Count("id"), orders=Count("used_order", distinct=True))
+               .order_by("-n")[:10])
+    return {
+        "dialogs": a["dialogs"], "proposals": a["proposals"], "accepted_by_customer": a["accepted"],
+        "orders": u["n"], "concessions_total": str(u["lost"]),
+        "avg_discount_percent": round(float(100 * u["lost"] / u["listed"]), 1) if u["listed"] else 0.0,
+        "decline_share_percent": round(100.0 * a["declines"] / a["proposals"], 1) if a["proposals"] else 0.0,
+        "top_products": [{"product_id": str(t["product_id"]), "name": t["product__name"], "proposals": t["n"],
+                          "orders": t["orders"]} for t in top],
+    }
+

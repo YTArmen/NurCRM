@@ -525,3 +525,48 @@ class TelegramHandoff(models.Model):
         db_table = "telegram_handoffs"
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["company", "chat_id", "-created_at"], name="tg_handoff_chat_idx")]
+
+
+class ProductBargain(models.Model):
+    """bot2711: правила торга товара. Отдельная таблица — публичные API витрины её никогда не читают."""
+    product = models.OneToOneField("main.Product", on_delete=models.CASCADE, primary_key=True, related_name="bargain_rule")
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="+")
+    allowed = models.BooleanField("Торг разрешён", null=True, blank=True)  # None — как в общих настройках
+    min_price = models.DecimalField("Минимальная цена для торга", max_digits=14, decimal_places=2, null=True, blank=True)
+    max_discount_percent = models.DecimalField("Макс. скидка, %", max_digits=5, decimal_places=2, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "telegram_product_bargain"
+
+
+class TelegramBargainOffer(models.Model):
+    """bot2711: журнал решений движка торга и оферты (одна оферта — один заказ)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey("users.Company", on_delete=models.CASCADE, related_name="+")
+    chat_id = models.CharField(max_length=64)
+    product = models.ForeignKey("main.Product", on_delete=models.CASCADE, related_name="+")
+    variant = models.ForeignKey("main.ProductVariant", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    qty = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("1"))
+    list_price = models.DecimalField(max_digits=14, decimal_places=2)
+    client_offer = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    decision = models.CharField(max_length=12)  # accept|counter|decline
+    price = models.DecimalField(max_digits=14, decimal_places=2)
+    step = models.PositiveSmallIntegerField(default=0)
+    floor = models.DecimalField(max_digits=14, decimal_places=2)  # только для владельца, не для ИИ
+    limit_percent = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0"))
+    token_hash = models.CharField(max_length=64, db_index=True)
+    token = models.TextField()
+    expires_at = models.DateTimeField()
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    used_order = models.ForeignKey("main.ShowcaseOrder", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        db_table = "telegram_bargain_offers"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["company", "chat_id", "product", "-created_at"], name="tg_bargain_chat_idx"),
+            models.Index(fields=["used_order"], name="tg_bargain_order_idx"),
+        ]

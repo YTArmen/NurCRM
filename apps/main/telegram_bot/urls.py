@@ -22,6 +22,10 @@ from apps.main.telegram_bot.views import (
     TelegramBotDialogsView,
     TelegramBotDialogDetailView,
     TelegramBotSalesStatsView,
+    TelegramBargainProductsView,
+    TelegramBargainProductDetailView,
+    TelegramBargainOffersView,
+    TelegramBargainTestView,
 )
 from apps.main.telegram_bot.views_public import TelegramWebhookPublicView
 
@@ -46,6 +50,10 @@ urlpatterns = [
     path("owner-code/verify/", TelegramBotOwnerCodeVerifyView.as_view(), name="telegram-bot-owner-code-verify"),
     path("dialogs/", TelegramBotDialogsView.as_view(), name="telegram-bot-dialogs"),  # bot2611
     path("dialogs/<str:chat_id>/", TelegramBotDialogDetailView.as_view(), name="telegram-bot-dialog-detail"),
+    path("bargain/products/", TelegramBargainProductsView.as_view(), name="telegram-bot-bargain-products"),  # bot2711
+    path("bargain/products/<uuid:pk>/", TelegramBargainProductDetailView.as_view(), name="telegram-bot-bargain-product"),
+    path("bargain/offers/", TelegramBargainOffersView.as_view(), name="telegram-bot-bargain-offers"),
+    path("bargain/test/", TelegramBargainTestView.as_view(), name="telegram-bot-bargain-test"),
     path("sales-stats/", TelegramBotSalesStatsView.as_view(), name="telegram-bot-sales-stats"),
     path("webhook/<uuid:bot_uuid>/", TelegramWebhookPublicView.as_view(), name="telegram-bot-webhook-under-bot"),
     path("webhook/", TelegramWebhookPublicView.as_view(), name="telegram-bot-webhook-under-bot-info"),

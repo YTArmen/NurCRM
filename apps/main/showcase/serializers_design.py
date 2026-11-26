@@ -302,6 +302,13 @@ class ShowcasePromoBlockSerializer(serializers.ModelSerializer):
 class ShowcaseOrderItemSerializer(serializers.ModelSerializer):
     variant_size = serializers.CharField(source="variant.size", read_only=True, default=None)
     variant_color = serializers.CharField(source="variant.color", read_only=True, default=None)
+    bargain = serializers.SerializerMethodField()  # bot2711: цена по торгу из Telegram-бота (или null)
+
+    def get_bargain(self, obj):
+        if obj.discount and getattr(obj.order, "source", "") in ("telegram", "telegram_bot"):
+            from apps.main.telegram_bot.services.bargain import item_bargain
+            return item_bargain(obj)
+        return None
 
     class Meta:
         model = ShowcaseOrderItem
@@ -316,6 +323,7 @@ class ShowcaseOrderItemSerializer(serializers.ModelSerializer):
             "price",
             "discount",
             "total",
+            "bargain",
         ]
         read_only_fields = ["id", "total"]
 

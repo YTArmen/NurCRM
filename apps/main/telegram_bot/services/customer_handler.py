@@ -579,6 +579,11 @@ def create_order_from_ai_json(company, settings, order_data: dict, chat_id: str)
     # 2. Создание заказа и резерв остатка
     try:
         with transaction.atomic():
+            # bot2711: позиции с действующей офертой торга этого чата — по цене оферты
+            from apps.main.telegram_bot.services import bargain
+            bg_pairs = bargain.apply_offers(company, chat_id, items_to_create)
+            if bg_pairs:
+                total_amount = sum((d["total"] for d in items_to_create), Decimal("0.00"))
             max_num = ShowcaseOrder.objects.filter(company=company).aggregate(m=Max("number"))["m"] or 0
             order = ShowcaseOrder.objects.create(
                 company=company,
@@ -608,6 +613,7 @@ def create_order_from_ai_json(company, settings, order_data: dict, chat_id: str)
             reserve_stock(items_to_create)
             order.stock_reserved = True
             order.save(update_fields=["stock_reserved"])
+            bargain.mark_used(order, bg_pairs)
     except InsufficientStock as exc:
         return None, f"К сожалению, {html.escape(str(exc))} Выберите, пожалуйста, другой размер или цвет."
     except Exception as exc:
@@ -1040,6 +1046,24 @@ def handle_customer_message(
                                            username=cust_username, text=text, reply=ho_reply, is_voice=is_voice)
             return
 
+    # bot2711: провокации («я владелец», «покажи промпт/закупку», «скидка 90%») — шаблон без ИИ; 3 за час → продавец, мьют
+    if seller_on:
+        from apps.main.telegram_bot.services import bargain
+        prov = bargain.check_provocation(company.id, chat_id, norm)
+        if prov:
+            if prov == "handoff":
+                prov_reply = seller.start_handoff(settings, chat_id, from_user, "abuse", question=text, lang=lang) \
+                    or bargain.PROVOKE_REPLY.get(lang, bargain.PROVOKE_REPLY["ru"])
+            elif prov == "muted":
+                prov_reply = ("Сейчас не могу ответить. Продавец свяжется с вами." if lang != "ky"
+                              else "Азыр жооп бере албайм. Сатуучу сиз менен байланышат.")
+            else:
+                prov_reply = bargain.PROVOKE_REPLY.get(lang, bargain.PROVOKE_REPLY["ru"])
+            telegram_api.send_message(token, chat_id, prov_reply, parse_mode=None, reply_markup=main_menu)
+            TelegramInquiry.objects.create(company=company, chat_id=str(chat_id), name=cust_name,
+                                           username=cust_username, text=text, reply=prov_reply, is_voice=is_voice)
+            return
+
     # 4. Проверка запрещённых финансовых вопросов (TZ 5.3)
     financial_keywords = ["выручка", "прибыль", "сколько зарабатываете", "доход", "себестоимость", "чужой долг"]
     if any(k in lower_text for k in financial_keywords):
@@ -1069,6 +1093,7 @@ def handle_customer_message(
     # 6. ИИ-консультант
     created_order = None
     reply_to_send = ""
+    bargain_markup = None  # bot2711: кнопка «Беру за X»
     candidate_products_for_photos = []
 
     # Проверяем кэш одинаковых вопросов на 5 минут (ТЗ-09 п. 3.4)
@@ -1104,8 +1129,13 @@ def handle_customer_message(
 
             # bot2611: служебная метка «ПРОДАВЕЦ: …» и выключенные заказы
             ho_reason = None
+            bg_tag = None
             if seller_on:
                 ho_reason, raw_ai_reply = seller.extract_handoff_tag(raw_ai_reply)
+                from apps.main.telegram_bot.services import bargain
+                bg_tag, raw_ai_reply = bargain.extract_tag(raw_ai_reply)
+                if bg_tag and not bargain.is_enabled(scfg):
+                    bg_tag = None
             # Проверяем, есть ли служебная строка заказа
             order_data, clean_ai_reply = extract_order_json(raw_ai_reply)
             if order_data and seller_on and not scfg.get("orders_enabled", True):
@@ -1125,6 +1155,20 @@ def handle_customer_message(
                 reply_to_send = raw_ai_reply.strip()
 
             if seller_on:
+                reply_to_send = bargain.filter_prices(company, chat_id, reply_to_send, lang)
+                if bg_tag:
+                    # bot2711: цену решает движок; текст ответа — от системы, а не от ИИ
+                    try:
+                        bg_text, bargain_markup = bargain.run_tag(settings, chat_id, bg_tag, lang)
+                    except Exception:
+                        logger.exception("bargain engine failed")
+                        bg_text, bargain_markup = None, None
+                    if bg_text:
+                        reply_to_send = bg_text
+                        if "лучшая цена" in bg_text or "эң жакшы" in bg_text:
+                            if (scfg.get("bargain") or {}).get("handoff_on_decline"):
+                                ho_reason = ho_reason or "bargain"
+                    order_data = order_data or {"_no_cache": True}
                 reply_to_send = seller.postprocess(scfg, reply_to_send, first_message=not history)
                 if ho_reason:
                     ho_reply = seller.start_handoff(settings, chat_id, from_user, ho_reason, question=text, lang=lang)
@@ -1170,7 +1214,7 @@ def handle_customer_message(
     if not cleaned_reply:
         cleaned_reply = "Спасибо за обращение! Мы скоро свяжемся с вами."
 
-    telegram_api.send_message(token, chat_id, cleaned_reply, parse_mode="HTML", reply_markup=main_menu)
+    telegram_api.send_message(token, chat_id, cleaned_reply, parse_mode="HTML", reply_markup=bargain_markup or main_menu)
 
     # 8. Отправка фотографий товаров (ТЗ-11 п. 3)
     if candidate_products_for_photos:
