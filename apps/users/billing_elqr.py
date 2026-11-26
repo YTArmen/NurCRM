@@ -79,6 +79,10 @@ def ttl():
         return 1200
 
 
+def callback_url():
+    return _env("ELQR_CALLBACK_URL", "https://app.nurcrm.kg/api/users/billing/eldik/callback/")
+
+
 def test_emails():
     return {e.strip().lower() for e in _env("ELQR_TEST_EMAILS", "market@nur.kg").split(",") if e.strip()}
 
@@ -148,10 +152,13 @@ class EldikBank:
             raise BankError(f"http {r.status_code}")
         return data
 
-    def generate(self, inv):
+    def generate(self, inv, ttl_seconds=None):
+        # elqr2611: по документации банка нужны psType и callbackUrl; ttl_seconds=0 — тест для банка (TTL=0)
         data = self._call("POST", "/api/v1/qr/generate", {
-            "id": str(inv.id), "amount": float(inv.amount), "ttl": ttl(),
+            "id": str(inv.id), "amount": float(inv.amount),
+            "ttl": ttl() if ttl_seconds is None else int(ttl_seconds),
             "name": f"NurCRM · {inv.company.name}"[:64],
+            "psType": "eldik", "callbackUrl": callback_url(),
         })
         link = data.get("qrLink") or data.get("qrIink") or ""  # у банка опечатка qrIink
         image = data.get("qrImage") or ""
